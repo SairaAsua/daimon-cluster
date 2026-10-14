@@ -158,6 +158,9 @@ if sys.argv[3] == 'import-drift':
     sys.path.append('/unqualified-import-drift')
 ''')
         archive.writestr('daimon_matrix/native_egress.py', '# Synthetic egress.\n')
+        codecs = Path(__file__).parent / 'fixtures/receiving_reader'
+        for name in ('canonical.py', 'release_compatibility.py'):
+            archive.writestr('daimon_matrix/' + name, (codecs / name).read_bytes())
     seal(code / 'sdk')
     (package / 'startup_probe.py').write_text('''import json,os,sys
 from pathlib import Path

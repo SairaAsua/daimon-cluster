@@ -367,6 +367,7 @@ def qualified_startup(venv: Path, code: Path, *, code_digest: str, code_uid: int
     origins()
     importlib.import_module('daimon_matrix.runtime')
     importlib.import_module('daimon_matrix.native_egress')
+    reader = importlib.import_module('daimon_matrix.release_compatibility').describe_reader()
     origins()
     if not startup_context(venv, imports, code):
         raise OnboardingError('qualified_runtime_context_required')
@@ -377,7 +378,7 @@ def qualified_startup(venv: Path, code: Path, *, code_digest: str, code_uid: int
                                 if row['distribution'] == 'daimon-matrix'),
         import_files_sha256=digest(files), import_context_sha256=digest(dict(
             path=sys.path, dont_write_bytecode=sys.dont_write_bytecode,
-            pycache_prefix=sys.pycache_prefix)), interpreter=actual_interpreter,
+            pycache_prefix=sys.pycache_prefix)), interpreter=actual_interpreter, reader=reader,
         isolated=True, no_site=True, no_bytecode=True)
 
 
