@@ -297,7 +297,7 @@ LOADED_STARTUP_FILES = {'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_t
     'tests/test_receiving_host_selection.py', 'tests/test_receiving_update_journal.py',
     'tests/test_onboarding_sdk.py', 'tests/test_onboarding_target.py', 'tests/test_onboarding_runtime.py',
     'tests/test_onboarding_source.py', 'tests/test_receiving_process_observation.py',
-    'tests/test_receiving_update_preflight.py'}
+    'tests/test_receiving_update_preflight.py', 'tests/test_receiving_update_selection.py'}
 LOADED_STARTUP_TESTS = ('tests/test_onboarding_sdk.py', 'tests/test_onboarding_code_successor.py',
     'tests/test_source_bootstrap.py',
     'tests/test_receiving_cohort_control.py', 'tests/test_receiving_host_selection.py',
