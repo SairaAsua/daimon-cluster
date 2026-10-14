@@ -1,8 +1,8 @@
-"""Qualified candidate preparation for the existing receiving update operation.
+"""Qualified preparation and owner-controlled receiving update effects.
 
-Inputs come from its protected approved selection, never a participant upload.
-This prepares immutable SDK generations; it does not select code, stop a service,
-adopt authority, open native state, or claim that a receiver has loaded it.
+Inputs come from protected approved selections, never participant uploads.
+Preparation, sender revocation and selector CAS have separate retained evidence;
+none alone establishes receiving readiness or completed adoption.
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,305 @@ from pathlib import Path
 
 from . import being_seed, onboarding_release, onboarding_sdk
 from .onboarding import JobStore, OnboardingError, digest, private_directory
+from .owner_process import ConnectedProcessObserver
+
+
+class OwnerGroupClient:
+    """Finite owner-local control of the actual selected group daemon.
+
+    Call from its receiving owner, not a model tool. Prepared authenticated
+    requests stay in owner-private files; outputs contain only their digests and
+    verified observations. Reading/control never claims candidate readiness.
+    """
+
+    def __init__(self, root: Path, socket_path: Path):
+        self.root = private_directory(root)
+        self.socket = socket_path
+        self._observer: ConnectedProcessObserver | None = None
+
+    def __enter__(self) -> OwnerGroupClient:
+        if self._observer is not None:
+            raise OnboardingError('receiving_owner_scope_required')
+        self._observer = ConnectedProcessObserver()
+        self._observer.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        if self._observer is not None:
+            self._observer.__exit__(*args)
+            self._observer = None
+
+    def _client(self, role: str):
+        from daimon_matrix.client import ClientConfig, LocalClient
+        from daimon_matrix.operator_capabilities import host_capability_profile
+        if self._observer is None or 'connection_observer' not in LocalClient.__dataclass_fields__:
+            raise OnboardingError('qualified_receiving_owner_client_required')
+        profile = host_capability_profile(role)
+        directory = self.root / profile['client_directory']
+        key = bytearray(onboarding_release.regular(directory / profile['client_key_filename'], uid=os.geteuid()))
+        config = ClientConfig.load(directory / profile['client_config_filename'], key)
+        options = {'connection_observer': self._observer, 'timeout_seconds': 40}
+        return LocalClient(self.socket, config, **options)
+
+    def status(self) -> dict:
+        before = self.socket.lstat()
+        client = self._client('status')
+        response = client.runtime_status()[1]
+        if response.get('ok') is not True:
+            raise OnboardingError('receiving_group_status_unavailable')
+        after = self.socket.lstat()
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise OnboardingError('receiving_group_socket_changed')
+        if self._observer is None:
+            raise OnboardingError('receiving_owner_scope_required')
+        self._observer.verify()
+        process = self._observer.process
+        if process is None:
+            raise OnboardingError('receiving_group_responder_conflict')
+        status = response['result']
+        loaded = status.get('loaded_runtime')
+        if loaded is not None and loaded.get('process_id') != process['pid']:
+            raise OnboardingError('receiving_group_responder_conflict')
+        gate = status.get('receiving', {}).get('channels', {}).get('tribe')
+        if (not isinstance(gate, dict) or gate.get('controlled') is not True
+                or gate.get('process_id') != process['pid']):
+            raise OnboardingError('receiving_group_control_required')
+        return dict(schema='cluster-receiving-owner-observation/v1', process=process,
+            server=response['server'], runtime_status=status, gate=gate,
+            receiving_readiness='unobserved')
+
+    def prepare_control(self, command: dict, path: Path) -> dict:
+        """Persist one exact native request before attempting its effect."""
+        parent = self._control_directory(path)
+        with being_seed._locked(parent):
+            return self._prepare_control(command, path)
+
+    def _control_directory(self, path: Path) -> Path:
+        parent = private_directory(self.root / 'receiving-control', create=True)
+        if path.parent != parent or not re.fullmatch(r'[a-z0-9-]{1,128}\.json', path.name):
+            raise OnboardingError('receiving_control_path_required')
+        return parent
+
+    def _durable_control(self, path: Path) -> None:
+        """Complete a failed publication without rewriting its exact request.
+
+        Called under the control-directory lock, including retained-file retries
+        and direct apply. A readable file after rename may still need its file,
+        directory and newly-created directory's parent made durable.
+        """
+        self._control_directory(path)
+        descriptor = os.open(being_seed._path(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(descriptor)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_nlink != 1 or info.st_mode & 0o077
+                    or info.st_size > being_seed.MAX_RECORD):
+                raise OnboardingError('receiving_control_private_file_required')
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        for directory in (path.parent, self.root):
+            private_directory(directory)
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+    def _prepare_control(self, command: dict, path: Path) -> dict:
+        from daimon_matrix.local_api import request_hash
+        if path.exists():
+            retained = being_seed._read(path)
+            if retained.get('command') != command:
+                raise OnboardingError('receiving_control_binding_conflict')
+            self._durable_control(path)
+            return dict(request_id=retained['request']['request_id'],
+                request_sha256=request_hash(retained['request']), command_sha256=digest(command))
+        observed = self.status()
+        gate = observed['gate']
+        if (command.get('channel_id') != 'tribe'
+                or command.get('process_instance_id') != gate['process_instance_id']
+                or command.get('expected_head') != gate['head']):
+            raise OnboardingError('receiving_control_binding_conflict')
+        client = self._client('receiving-controller')
+        request = client.prepare('runtime.reader-selection', command)
+        being_seed._write(path, dict(schema='cluster-receiving-owner-control/v1',
+            command=command, request=request, process=observed['process'], server=observed['server']))
+        self._durable_control(path)
+        return dict(request_id=request['request_id'], request_sha256=request_hash(request),
+                    command_sha256=digest(command))
+
+    def apply_control(self, path: Path) -> dict:
+        """Exact retry or observed same-process completion; never re-author."""
+        with being_seed._locked(self._control_directory(path)):
+            return self._apply_control(path)
+
+    def _apply_control(self, path: Path) -> dict:
+        from daimon_matrix.local_api import request_hash
+        retained = being_seed._read(path)
+        if set(retained) != {'schema', 'command', 'request', 'process', 'server'} or retained['schema'] != 'cluster-receiving-owner-control/v1':
+            raise OnboardingError('receiving_control_binding_conflict')
+        command, request = retained['command'], retained['request']
+        if request.get('method') != 'runtime.reader-selection' or request.get('params') != command:
+            raise OnboardingError('receiving_control_binding_conflict')
+        self._durable_control(path)
+        observed = self.status()
+        if observed['process'] != retained['process'] or observed['server'] != retained['server']:
+            raise OnboardingError('receiving_control_process_changed')
+        expected_hash = request_hash(request)
+        gate = observed['gate']
+        if gate.get('request_sha256') != expected_hash:
+            if (gate['process_instance_id'] != command['process_instance_id']
+                    or gate['head'] != command['expected_head']):
+                raise OnboardingError('receiving_control_superseded')
+            response = self._client('receiving-controller').send(request)
+            if response.get('ok') is not True:
+                raise OnboardingError('receiving_control_not_accepted')
+            observed = self.status()
+            gate = observed['gate']
+        if (gate.get('request_sha256') != expected_hash
+                or gate.get('phase') != command['phase']
+                or gate.get('operation_id') != command['operation_id']
+                or gate.get('release_digest') != command['release_digest']
+                or gate.get('readers') != command['readers']):
+            raise OnboardingError('receiving_control_completion_uncertain')
+        return {**observed, 'schema': 'cluster-receiving-owner-control-observation/v1',
+            'request_id': request['request_id'], 'request_sha256': expected_hash,
+            'command_sha256': digest(command)}
+
+
+def freeze_senders(owners: dict[str, OwnerGroupClient], *, tribe_ref: str) -> list[dict]:
+    """Observe the required sender vector before planning the update intent."""
+    senders = []
+    identities = set()
+    for name, owner in sorted(owners.items()):
+        observed = owner.status()
+        application = observed['runtime_status'].get('loaded_application')
+        if (not isinstance(application, dict)
+                or application.get('tribe', {}).get('policy', {}).get('tribe_ref') != tribe_ref):
+            raise OnboardingError('receiving_sender_group_required')
+        identity = (observed['server']['being_ref'], observed['server']['embodiment_id'])
+        if identity in identities:
+            raise OnboardingError('receiving_sender_vector_invalid')
+        identities.add(identity)
+        senders.append(dict(name=name, root=str(owner.root), socket=str(owner.socket),
+            server=observed['server'], process=observed['process'], gate=observed['gate']))
+    if not 1 <= len(senders) <= 256:
+        raise OnboardingError('receiving_sender_vector_invalid')
+    return senders
+
+
+class CohortController:
+    """Durably fence the frozen senders before an existing selector effect.
+
+    Uses the actual owner RPC clients and operation journal. Receiver preparation,
+    authority/application adoption, process admission and positive projection
+    require their own later evidence; this barrier does not report them ready.
+    """
+
+    def __init__(self, journal, operation_id: str, owners: dict[str, OwnerGroupClient]):
+        self.journal = journal
+        self.operation_id = operation_id
+        self.owners = dict(owners)
+
+    def _row(self) -> dict:
+        row = self.journal.get(self.operation_id)
+        if (row is None or row['operation'] != 'receiving-update'
+                or row['state'] in {'degraded', 'compensated', 'completed'}):
+            raise OnboardingError('receiving_cohort_operation_required')
+        before, after = row['expected_precondition'], row['intended_transition']
+        call = row['intent'].get('runtime_call', {})
+        if (call.get('precondition_digest') != digest(before)
+                or call.get('transition_digest') != digest(after)
+                or not re.fullmatch(r'[0-9a-f]{64}', call.get('manifest_digest', ''))):
+            raise OnboardingError('receiving_cohort_operation_required')
+        senders = before.get('senders')
+        if (not isinstance(senders, list) or not 1 <= len(senders) <= 256
+                or any(not isinstance(item, dict) for item in senders)
+                or [item.get('name') for item in senders] != sorted(self.owners)):
+            raise OnboardingError('receiving_sender_vector_invalid')
+        for item in senders:
+            if set(item) != {'name', 'root', 'socket', 'server', 'process', 'gate'}:
+                raise OnboardingError('receiving_sender_vector_invalid')
+            owner = self.owners[item['name']]
+            if (str(owner.root), str(owner.socket)) != (item['root'], item['socket']):
+                raise OnboardingError('receiving_sender_vector_invalid')
+        return row
+
+    def _record(self, row: dict, key: str, value: dict) -> dict:
+        from .operation_journal import JournalConflict
+        observations = dict(row['runtime_observation'] or {})
+        revocations = dict(observations.get('sender_revocations', {}))
+        if key in revocations and revocations[key] != value:
+            raise JournalConflict('receiving sender revocation changed')
+        revocations[key] = value
+        observations['sender_revocations'] = revocations
+        return self.journal.advance(self.operation_id, row['state'],
+            runtime_observation=observations,
+            expected_runtime_observation=row['runtime_observation'])
+
+    def revoke_senders(self) -> dict:
+        """Resume only retained exact controls and persist each actual ACK."""
+        with self.journal.mutation_lock(self.operation_id):
+            row = self._row()
+            if row['state'] == 'planned':
+                row = self.journal.advance(self.operation_id, 'runtime-dispatching')
+            release = row['intent']['runtime_call']['manifest_digest']
+            control_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'receiving-control:' + self.operation_id))
+            for sender in row['expected_precondition']['senders']:
+                name = sender['name']
+                if name in (row['runtime_observation'] or {}).get('sender_revocations', {}):
+                    continue
+                owner = self.owners[name]
+                observed = owner.status()
+                if (observed['process'] != sender['process'] or observed['server'] != sender['server']
+                        or observed['gate'] != sender['gate']):
+                    # A prepare-before-reply retry may already have effected the
+                    # exact retained control. The owner helper resolves it; a
+                    # fresh command is never rebound to this changed gate.
+                    path = owner.root / 'receiving-control' / (control_id + '-revoke.json')
+                    if not path.exists():
+                        raise OnboardingError('receiving_sender_precondition_changed')
+                gate = sender['gate']
+                command = dict(process_instance_id=gate['process_instance_id'], channel_id='tribe',
+                    expected_head=gate['head'], operation_id=control_id, release_digest=release,
+                    phase='revoke', readers=[])
+                path = owner.root / 'receiving-control' / (control_id + '-revoke.json')
+                owner.prepare_control(command, path)
+                result = owner.apply_control(path)
+                row = self._record(row, name, result)
+            return self.require_revocation_barrier()
+
+    def require_revocation_barrier(self) -> dict:
+        """A durable old ACK alone cannot authorize a current receiver effect."""
+        row = self._row()
+        revocations = (row['runtime_observation'] or {}).get('sender_revocations', {})
+        for sender in row['expected_precondition']['senders']:
+            retained = revocations.get(sender['name'])
+            if not isinstance(retained, dict):
+                raise OnboardingError('receiving_sender_barrier_incomplete')
+            control_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'receiving-control:' + self.operation_id))
+            if (retained.get('server') != sender['server']
+                    or retained.get('process') != sender['process']
+                    or retained.get('gate', {}).get('operation_id') != control_id
+                    or retained.get('gate', {}).get('release_digest') != row['intent']['runtime_call']['manifest_digest']):
+                raise OnboardingError('receiving_sender_barrier_changed')
+            current = self.owners[sender['name']].status()
+            if (current['process'] != retained['process'] or current['server'] != retained['server']
+                    or current['gate'] != retained['gate']
+                    or current['gate'].get('phase') != 'revoke'
+                    or current['gate'].get('readers') != []
+                    or current['gate'].get('request_sha256') != retained['request_sha256']):
+                raise OnboardingError('receiving_sender_barrier_changed')
+        return dict(schema='cluster-receiving-sender-barrier/v1', operation_id=self.operation_id,
+            manifest_digest=row['intent']['runtime_call']['manifest_digest'],
+            sender_revocations=revocations, receiving_readiness='unobserved')
+
+    def apply_host_selection(self, config_path: Path) -> dict:
+        """Gate the maintained real selector effect, not a test callback."""
+        with self.journal.mutation_lock(self.operation_id):
+            return apply_host_selection(self.journal, self.operation_id, config_path,
+                                        _cohort_control=self)
 
 
 def _manifest(path: Path, expected: str, *, uid: int) -> dict:
@@ -158,7 +458,8 @@ def prepare_sdk(home: Path, code: Path, code_digest: str, manifest_path: Path,
     return {**checked, 'installation': receipt, 'interpreter': interpreter, 'prepared': True}
 
 
-def apply_host_selection(journal, operation_id: str, config_path: Path) -> dict:
+def apply_host_selection(journal, operation_id: str, config_path: Path,
+                         *, _cohort_control: CohortController | None = None) -> dict:
     """Apply/reconcile the retained host-runtime projection under real job locks.
 
     This is one controller effect, not completed receiving adoption. Only runtime
@@ -182,6 +483,10 @@ def apply_host_selection(journal, operation_id: str, config_path: Path) -> dict:
             or before.get('host_config_sha256') != digest(before['host_configuration'])):
         raise OnboardingError('receiving_update_selection_required')
     original = before['host_configuration']
+    if 'senders' in before and (
+            not isinstance(_cohort_control, CohortController) or _cohort_control.journal is not journal
+            or _cohort_control.operation_id != operation_id):
+        raise OnboardingError('receiving_sender_barrier_required')
     candidate = {**{key: value for key, value in original.items() if key not in RUNTIME_SELECTION_KEYS},
                  **after['host_runtime']}
     # Configuration path is part of the frozen operation, never a fresh target.
@@ -199,6 +504,8 @@ def apply_host_selection(journal, operation_id: str, config_path: Path) -> dict:
         row = journal.get(operation_id)
         if row is None or row['state'] in {'degraded', 'compensated'}:
             raise JournalConflict('receiving operation requires explicit repair')
+        if _cohort_control is not None:
+            _cohort_control.require_revocation_barrier()
         current = being_seed._read(config_path)
         if current not in (original, candidate):
             raise JournalConflict('receiving host selection has advanced beyond the frozen predecessor')
