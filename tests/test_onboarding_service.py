@@ -13,14 +13,15 @@ def test_guest_manager_uses_existing_system_unit_and_root_owned_fragment(tmp_pat
     from clusterctl import onboarding_service
     from clusterctl.onboarding_service import MatrixGuestService, MatrixUserService
     unit = tmp_path / UNIT
-    content = b'[Service]\nUser=agent\nKillMode=control-group\nExecStart=/qualified-loader\n'
+    content = b'[Service]\nUser=agent\nGroup=agent\nKillMode=control-group\nExecStart=/qualified-loader\n'
     calls, reads = [], []
     def execute(argv):
         calls.append(argv)
         if 'show' in argv:
             values = dict(Id=UNIT, ActiveState='active', SubState='running', MainPID='123',
                 ControlGroup='/system.slice/'+UNIT, InvocationID='synthetic-manager',
-                FragmentPath=str(unit), DropInPaths='', KillMode='control-group', Result='success')
+                FragmentPath=str(unit), DropInPaths='', KillMode='control-group', Result='success',
+                User='agent', Group='agent')
             return '\n'.join(key+'='+value for key, value in values.items())
         return ''
     def regular(path, *, uid):
