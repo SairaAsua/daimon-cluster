@@ -2132,6 +2132,31 @@ class CohortController:
             self._fence_partial_activation(activation)
             return self._row()['runtime_observation']['cohort_reassessment']
 
+    def _confirmed_selection(self, row: dict, plan: dict, manifest: dict, activation: dict) -> dict:
+        """Reconcile a fully retained selection using fresh all-required proof.
+
+        No controls are prepared/applied. The original reader/expiry vector stays
+        fixed; changed proof/gate or expired observation uses the existing repair.
+        """
+        release = row['intent']['runtime_call']['manifest_digest']
+        try:
+            deadline = self._current_activation(row, plan, manifest, activation)
+            for name, accepted in row['runtime_observation']['sender_selections'].items():
+                with self._owner_deadline(self.owners[name], deadline):
+                    current = self.owners[name].status()
+                if any(current[key] != accepted[key] for key in ('server', 'process', 'gate')):
+                    raise OnboardingError('receiving_cohort_selection_changed')
+            self._accept_activation_deadline(deadline)
+            if any(item['expires_at_ms'] <= time.time_ns() // 1_000_000 for item in activation['readers']):
+                raise OnboardingError('receiving_cohort_observation_expired')
+        except (OnboardingError, OSError):
+            self._fence_partial_activation(activation)
+            raise
+        return dict(schema='cluster-receiving-cohort-selection/v1', operation_id=self.operation_id,
+            manifest_digest=release, evidence_sha256=activation['evidence_sha256'],
+            readers=activation['readers'], sender_selections=row['runtime_observation']['sender_selections'],
+            receiving_readiness='qualified-local-projection', communication_acceptance='unobserved')
+
     def activate(self) -> dict:
         """Resume one fixed all-required vector through exact native selections.
 
@@ -2148,6 +2173,8 @@ class CohortController:
             if 'cohort_reassessment' in row['runtime_observation']:
                 raise OnboardingError('receiving_cohort_reassessment_required')
             release = row['intent']['runtime_call']['manifest_digest']
+            if set(row['runtime_observation'].get('sender_selections', {})) == set(self.owners):
+                return self._confirmed_selection(row, plan, manifest, activation)
             control_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'receiving-control:' + self.operation_id))
             for name in sorted(self.owners):
                 # Refresh all required observers before each positive step. A
@@ -2212,23 +2239,7 @@ class CohortController:
                     observations['sender_selections'] = selections
                     row = self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
                         expected_runtime_observation=row['runtime_observation'])
-            try:
-                deadline = self._current_activation(row, plan, manifest, activation)
-                for name, accepted in row['runtime_observation']['sender_selections'].items():
-                    with self._owner_deadline(self.owners[name], deadline):
-                        current = self.owners[name].status()
-                    if any(current[key] != accepted[key] for key in ('server', 'process', 'gate')):
-                        raise OnboardingError('receiving_cohort_selection_changed')
-                self._accept_activation_deadline(deadline)
-                if any(item['expires_at_ms'] <= time.time_ns() // 1_000_000 for item in activation['readers']):
-                    raise OnboardingError('receiving_cohort_observation_expired')
-            except (OnboardingError, OSError):
-                self._fence_partial_activation(activation)
-                raise
-            return dict(schema='cluster-receiving-cohort-selection/v1', operation_id=self.operation_id,
-                manifest_digest=release, evidence_sha256=activation['evidence_sha256'],
-                readers=activation['readers'], sender_selections=row['runtime_observation']['sender_selections'],
-                receiving_readiness='qualified-local-projection', communication_acceptance='unobserved')
+            return self._confirmed_selection(row, plan, manifest, activation)
 
 
 def _manifest(path: Path, expected: str, *, uid: int) -> dict:

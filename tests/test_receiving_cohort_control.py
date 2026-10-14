@@ -870,3 +870,27 @@ def test_owner_adapter_rechecks_actual_loaded_connection_before_control(tmp_path
         with pytest.raises(OnboardingError, match='process_changed'):
             receiving.owner_control(tmp_path, group, observed, 'receiving-control-apply', path)
         assert calls == []
+
+
+def test_completed_cohort_retry_observes_without_repreparing_native_controls(tmp_path, monkeypatch):
+    controller, owners, _, _ = activation_fixture(tmp_path)
+    first = controller.activate()
+    effects = {name: owner.effects for name, owner in owners.items()}
+    def refuse(*args, **kwargs):
+        pytest.fail('completed selection retry prepared or applied another control')
+    for owner in owners.values():
+        monkeypatch.setattr(owner, 'prepare_control', refuse)
+        monkeypatch.setattr(owner, 'apply_control', refuse)
+    assert controller.activate() == first
+    assert {name: owner.effects for name, owner in owners.items()} == effects
+
+
+def test_completed_cohort_retry_changed_gate_still_fences_forward(tmp_path):
+    controller, owners, journal, identifier = activation_fixture(tmp_path)
+    first = controller.activate()
+    owners['eko'].gate['head'] = '9' * 64
+    with pytest.raises(OnboardingError, match='selection_changed'):
+        controller.activate()
+    assert journal.get(identifier)['runtime_observation']['cohort_activation']['readers'] == first['readers']
+    assert all(owner.gate['readers'] == [] for owner in owners.values())
+    assert_new_operation_can_revoke(owners)
