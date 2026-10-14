@@ -6,9 +6,26 @@ import threading
 import pytest
 
 from clusterctl import onboarding_peer
-from clusterctl.onboarding import digest
+from clusterctl.onboarding import OnboardingError, digest
 from clusterctl.onboarding_source import Source
 pytest_plugins = ['tests.test_onboarding_peer']
+
+
+def test_source_group_construction_does_not_invoke_unrelated_pair_ceremony(tmp_path, monkeypatch):
+    root = tmp_path / 'runtime'
+    root.mkdir(mode=0o700)
+    calls = []
+    def unavailable(*args, **kwargs):
+        calls.append(True)
+        raise OnboardingError('qualified_native_peer_sdk_required')
+    monkeypatch.setattr(onboarding_peer, 'native', unavailable)
+    source = Source(dict(schema='cluster-onboarding-source/v1', runtime_root=str(root),
+        password_file=str(tmp_path / 'unused.unlock'), native_visibility=str(tmp_path / 'unused.json'),
+        outputs=str(tmp_path / 'outputs'), applications=[]))
+    assert calls == []
+    with pytest.raises(OnboardingError, match='qualified_native_peer_sdk_required'):
+        source.tool
+    assert calls == [True]  # Explicit ceremony still has the exact existing guard.
 
 
 def signed_visibility(target, directory):

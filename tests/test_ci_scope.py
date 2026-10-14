@@ -6,6 +6,20 @@ from tools.ci_scope import ONBOARDING_CONTRACTS, select
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_loaded_startup_covers_actual_processes_and_preserves_broader_boundaries(tmp_path):
+    from tools.ci_scope import LOADED_STARTUP_FILES, LOADED_STARTUP_TESTS
+    changed = sorted(LOADED_STARTUP_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py'})
+    assert select(changed, ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    assert {'tests/test_receiving_process_observation.py', 'tests/test_onboarding_sdk.py',
+            'tests/test_onboarding_runtime.py', 'tests/test_onboarding_source.py',
+            'tests/test_matrix_host_process.py'} <= set(LOADED_STARTUP_TESTS)
+    for other in ('requirements-weave.txt', 'clusterctl/onboarding_admission.py',
+                  'clusterctl/onboarding_custody.py', 'clusterctl/onboarding_host.py',
+                  'clusterctl/production_fences.py', 'unknown.py'):
+        assert select([*changed, other], ROOT) != ('peer', list(LOADED_STARTUP_TESTS))
+
+
 def test_host_selection_covers_job_fences_and_shared_journal_consumers(tmp_path):
     from tools.ci_scope import HOST_SELECTION_FILES, HOST_SELECTION_TESTS
     changed = sorted(HOST_SELECTION_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py'})

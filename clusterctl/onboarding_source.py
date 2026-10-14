@@ -17,13 +17,14 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import being_seed, onboarding_peer
+from . import being_seed, onboarding_peer, onboarding_release
 from .onboarding import OnboardingError, private_directory
 from .onboarding_views import serve_views
 
 
 class Source:
-    def __init__(self, settings: dict, *, code: Path | None = None, code_uid: int = 0):
+    def __init__(self, settings: dict, *, code: Path | None = None, code_uid: int = 0,
+                 code_digest: str | None = None, qualified_startup: dict | None = None):
         if (not isinstance(settings, dict) or set(settings) != {'schema', 'runtime_root', 'password_file',
                 'native_visibility', 'outputs', 'applications'} or settings['schema'] != 'cluster-onboarding-source/v1'
                 or any(not isinstance(settings[key], str) or not Path(settings[key]).is_absolute()
@@ -38,7 +39,17 @@ class Source:
         self.visibility = Path(settings['native_visibility'])
         self.code = code or Path(__file__).resolve().parents[1]
         self.code_uid = code_uid
-        self.tool = onboarding_peer.native(self.code, uid=code_uid)
+        self.code_digest = code_digest
+        self.qualified_startup = qualified_startup
+        self._tool = None
+
+    @property
+    def tool(self):
+        # Group serving does not run the archived two-party ceremony. Preserve
+        # that ceremony's exact SDK/tool guards when it is actually requested.
+        if self._tool is None:
+            self._tool = onboarding_peer.native(self.code, uid=self.code_uid)
+        return self._tool
 
     def _reader(self):
         from daimon_matrix.messaging_config import protected_read
@@ -50,7 +61,9 @@ class Source:
             return time.time_ns() // 1_000_000
         options = ({'egress_factory': daemon._visibility_factory(self.visibility, clock=clock)} if signed else
                    {'egress': native_egress.closed_visibility(clock=clock, catalog_mode='migrate')})
-        return runtime.load_runtime(self.root, 'runtime.json', self._reader, clock=clock, **options)
+        return runtime.load_runtime(self.root, 'runtime.json', self._reader, clock=clock,
+            **({} if self.qualified_startup is None else {'qualified_startup': self.qualified_startup}),
+            **options)
 
     @contextmanager
     def writer(self):
@@ -158,9 +171,23 @@ class Source:
         raw = regular(original, uid=os.geteuid())
         if hashlib.sha256(raw).hexdigest() != original_sha256:
             raise OnboardingError('existing_onboarding_source_service_preserved')
-        launcher = ('import sys;sys.path.insert(0,sys.argv.pop(1));'
-                    'from clusterctl.onboarding_source import main;raise SystemExit(main())')
-        argv = [str(python), '-B', '-I', '-c', launcher, str(self.code), '--config', str(config)]
+        from . import onboarding_code_successor, onboarding_sdk
+        parameters = onboarding_code_successor.sdk_parameters(self.code, uid=self.code_uid)
+        if parameters:
+            if self.code_digest is None:
+                raise OnboardingError('qualified_onboarding_source_runtime_required')
+            onboarding_release.verify(self.code, self.code_digest, uid=self.code_uid)
+            venv = python.parent.parent
+            imports = onboarding_sdk.runtime_imports(venv, self.code,
+                code_uid=self.code_uid, **parameters)
+            command = onboarding_sdk.runtime_command(venv, imports, self.code,
+                'clusterctl.onboarding_source', ['--config', str(config),
+                                               '--code-digest', self.code_digest])
+        else:
+            launcher = ('import sys;sys.path.insert(0,sys.argv.pop(1));'
+                        'from clusterctl.onboarding_source import main;raise SystemExit(main())')
+            command = [str(python), '-B', '-I', '-c', launcher, str(self.code), '--config', str(config)]
+        argv = command
         def selection(arguments):
             encoded = ' '.join(json.dumps(arg.replace('%', '%%').replace('$', '$$')) for arg in arguments)
             return b'\n'.join(('ExecStart=' + encoded).encode() if line.startswith(b'ExecStart=') else line
@@ -206,10 +233,19 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--ready-fd', type=int)
+    parser.add_argument('--code-digest')
     args = parser.parse_args(argv)
     try:
+        from . import onboarding_code_successor, onboarding_sdk
+        code = Path(__file__).resolve().parents[1]
+        parameters = onboarding_code_successor.sdk_parameters(code)
+        if parameters and args.code_digest is None:
+            raise OnboardingError('qualified_onboarding_source_runtime_required')
+        startup = (onboarding_sdk.qualified_startup(Path(sys.prefix), code,
+            code_digest=args.code_digest, **parameters) if parameters else None)
         settings = being_seed._read(args.config)
-        source = Source(settings)
+        source = Source(settings, code=code, code_digest=args.code_digest,
+                        qualified_startup=startup)
         stop = threading.Event()
         for signum in (signal.SIGTERM, signal.SIGINT):
             signal.signal(signum, lambda *_: stop.set())

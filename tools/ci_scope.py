@@ -290,6 +290,17 @@ GROUP_TESTS = ('tests/test_onboarding_group.py', 'tests/test_onboarding_acceptan
 RECEIVING_RUNTIME_FILES = {'clusterctl/onboarding_peer.py', 'clusterctl/onboarding_runtime.py',
     'tests/test_onboarding_peer.py', 'tests/test_onboarding_runtime.py'}
 
+LOADED_STARTUP_FILES = {'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_target.py',
+    'clusterctl/onboarding_runtime.py', 'clusterctl/onboarding_source.py', 'clusterctl/owner_process.py',
+    'tests/test_onboarding_sdk.py', 'tests/test_onboarding_target.py', 'tests/test_onboarding_runtime.py',
+    'tests/test_onboarding_source.py', 'tests/test_receiving_process_observation.py'}
+LOADED_STARTUP_TESTS = ('tests/test_onboarding_sdk.py', 'tests/test_onboarding_code_successor.py',
+    'tests/test_receiving_update_selection.py', 'tests/test_receiving_update_preflight.py',
+    'tests/test_onboarding_source.py', 'tests/test_onboarding_runtime.py', 'tests/test_onboarding_service.py',
+    'tests/test_receiving_process_observation.py', 'tests/test_onboarding_group.py',
+    'tests/test_onboarding_target.py', 'tests/test_onboarding_admission.py',
+    'tests/test_matrix_host_process.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
+
 
 HOME_FILES = {'clusterctl/homes/__init__.py', 'clusterctl/homes/policy.py',
     'clusterctl/homes/sessions.py', 'clusterctl/homes/authority.py',
@@ -339,6 +350,12 @@ HOME_WORKER_TESTS = ('tests/test_home_worker_successor.py', 'tests/test_onboardi
 
 
 def select(changed: list[str], root: Path) -> tuple[str, list[str]]:
+    if ('tests/test_receiving_process_observation.py' in changed
+            and set(changed) <= LOADED_STARTUP_FILES | CI_FILES
+            and all((root / path).is_file() for path in LOADED_STARTUP_TESTS)):
+        # Actual same-connection/process startup, retained SDK and service paths.
+        # No changed archive, physical recovery, authority or native model code.
+        return 'peer', list(LOADED_STARTUP_TESTS)
     if not changed:
         return 'full', ['tests']
     if set(changed) <= RUNBOOK_DOCS:

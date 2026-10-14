@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import os
+import socket
+import struct
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 import select
 from typing import Any
@@ -77,4 +80,61 @@ class ProcessPresence:
 
     def __exit__(self, *_args: Any) -> None:
         self.close()
+
+
+class ConnectedProcessObserver:
+    """Pin the actual RPC peer through authentication and the complete observation.
+
+    Use as LocalClient's owner-only connection observer within one foreground
+    scope. Multiple RPCs must reach the same kernel process; this is transport
+    association, not SDK/application/admission qualification or remote liveness.
+    """
+
+    def __init__(self) -> None:
+        self._process: dict[str, Any] | None = None
+        self._stack = ExitStack()
+        self._presence: ProcessPresence | None = None
+        self._active = False
+
+    def __enter__(self) -> ConnectedProcessObserver:
+        if self._active or self._process is not None:
+            raise PresenceError("owner_process_observation_rejected")
+        self._active = True
+        return self
+
+    @property
+    def process(self) -> dict[str, Any] | None:
+        return None if self._process is None else dict(self._process)
+
+    @contextmanager
+    def __call__(self, connection: socket.socket):
+        if not self._active or not hasattr(socket, "SO_PEERCRED"):
+            raise PresenceError("owner_process_observation_rejected")
+        try:
+            pid, uid, _gid = struct.unpack(
+                "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            if uid != os.geteuid():
+                raise ValueError("different process owner")
+            process = dict(uid=uid, pid=pid,
+                start_ticks=int((Path("/proc") / str(pid) / "stat").read_text().rpartition(")")[2].split()[19]),
+                boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip())
+            if self._process is not None and process != self._process:
+                raise ValueError("different process on later connection")
+            if self._presence is None:
+                self._presence = self._stack.enter_context(ProcessPresence(process))
+                self._process = process
+            self._presence.verify()
+        except Exception as error:
+            raise PresenceError("owner_process_observation_rejected") from error
+        yield
+        self.verify()
+
+    def verify(self) -> None:
+        if not self._active or self._presence is None:
+            raise PresenceError("owner_process_observation_rejected")
+        self._presence.verify()
+
+    def __exit__(self, *_args: Any) -> None:
+        self._active = False
+        self._stack.close()
 

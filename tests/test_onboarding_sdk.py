@@ -2,7 +2,11 @@
 import hashlib
 import json
 import os
+import shutil
+import subprocess
+import sys
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -134,3 +138,93 @@ def test_wheel_paths_cannot_escape_site_packages(tmp_path):
     path.chmod(0o644)
     with pytest.raises(OnboardingError, match="invalid_onboarding_sdk_wheel"):
         onboarding_sdk.wheel(path, uid=os.geteuid())
+
+
+def test_actual_serving_startup_qualifies_own_closed_tree_and_rejects_contamination(tmp_path):
+    code, _, home = fixture(tmp_path)
+    (code / 'release.json').unlink()
+    package = code / 'clusterctl'
+    package.mkdir()
+    source = Path(onboarding_sdk.__file__).parent
+    for name in ('__init__.py', 'being_seed.py', 'onboarding.py', 'onboarding_input.py',
+                 'onboarding_release.py', 'onboarding_sdk.py'):
+        shutil.copyfile(source / name, package / name)
+    # Tiny synthetic SDK: this tests startup association, not real receiving.
+    wheel = next((code / 'sdk/wheels').iterdir())
+    with zipfile.ZipFile(wheel, 'a') as archive:
+        archive.writestr('daimon_matrix/runtime.py', '''# Synthetic runtime.
+import sys
+if sys.argv[3] == 'import-drift':
+    sys.path.append('/unqualified-import-drift')
+''')
+        archive.writestr('daimon_matrix/native_egress.py', '# Synthetic egress.\n')
+    seal(code / 'sdk')
+    (package / 'startup_probe.py').write_text('''import json,os,sys
+from pathlib import Path
+from clusterctl import onboarding_sdk
+from clusterctl.onboarding import OnboardingError
+code, fingerprint, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+if mode == 'path-tail':
+    sys.path.append('/unqualified-extra-imports')
+elif mode in ('installed-module', 'installed-dependency', 'stdlib-escape'):
+    from importlib.util import module_from_spec, spec_from_file_location
+    path = Path(sys.argv[4])
+    if mode == 'stdlib-escape':
+        import sysconfig
+        standard = sysconfig.get_path('stdlib')
+        path = Path(standard) / os.path.relpath(path, standard)
+    name = 'daimon_matrix' if mode == 'installed-module' else 'unqualified_dependency'
+    spec = spec_from_file_location(name, path, submodule_search_locations=[str(path.parent)])
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules[name] = module
+elif mode == 'package-path':
+    import daimon_matrix
+    daimon_matrix.__path__.append('/unqualified-package-search')
+elif mode == 'cluster-path':
+    import clusterctl
+    clusterctl.__spec__.submodule_search_locations.append('/unqualified-cluster-search')
+try:
+    observation = onboarding_sdk.qualified_startup(Path(sys.prefix), code,
+        code_digest=fingerprint, code_uid=os.geteuid())
+    print(json.dumps(dict(ok=True, observation=observation, pid=os.getpid())))
+except OnboardingError as error:
+    print(json.dumps(dict(ok=False, error=str(error))))
+''')
+    selected = dict(schema=onboarding_release.PROFILE, model='gpt-6.1-sol', reasoning='xhigh',
+                    approval='never', sandbox='danger-full-access', skills=['listening'], primary_store=None)
+    for path in package.rglob('*'):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    package.chmod(0o755)
+    fingerprint = onboarding_release.seal(code, selected)
+    venv = onboarding_sdk.install(home, code, fingerprint, code_uid=os.geteuid())
+    imports = onboarding_sdk.runtime_imports(venv, code, code_uid=os.geteuid())
+    site = next(venv.glob('lib/python*/site-packages'))
+    installed_module = site / 'daimon_matrix/__init__.py'
+    ordinary_dependency = home / 'ordinary-dependency.py'
+    ordinary_dependency.write_text('# Disposable dependency outside any site/dist-packages.\n')
+    marker = home / 'unexpected-startup'
+    (site / 'unexpected.pth').write_text('import pathlib; pathlib.Path(' + repr(str(marker))
+                                       + ').write_text("executed")\n')
+    snapshots = []
+    for mode in ('valid', 'valid', 'path-tail', 'installed-module', 'installed-dependency',
+                 'package-path', 'cluster-path', 'import-drift', 'stdlib-escape'):
+        command = onboarding_sdk.runtime_command(venv, imports, code,
+            'clusterctl.startup_probe', [str(code), fingerprint, mode,
+                str(ordinary_dependency if mode == 'stdlib-escape' else installed_module)])
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=True,
+                                env={'PATH': os.defpath, 'LANG': 'C.UTF-8',
+                                     'LD_LIBRARY_PATH': str(Path(sys.base_prefix) / 'lib')})
+        observed = json.loads(result.stdout)
+        assert observed['ok'] is (mode == 'valid'), result.stdout
+        if observed['ok']:
+            snapshot = observed['observation']
+            assert snapshot['process_id'] == observed['pid'] != os.getpid()
+            assert snapshot['code_digest'] == fingerprint
+            assert snapshot['sdk_digest'] == digest(json.loads((code / 'sdk/sdk.json').read_bytes()))
+            snapshots.append(snapshot)
+        else:
+            assert observed['error'] in {'qualified_runtime_context_required',
+                                         'qualified_runtime_module_required'}
+    assert snapshots[0]['startup_instance_id'] != snapshots[1]['startup_instance_id']
+    assert not marker.exists() and not list(home.rglob('custody.json'))

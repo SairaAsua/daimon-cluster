@@ -203,6 +203,8 @@ def test_native_receiving_daemon_restarts_same_authority_and_refuses_second_writ
                 observed = target.running()
                 assert observed["process"]["pid"] == process.pid
                 assert observed["origin"] == before["receipt"]["origin"]
+                assert observed['runtime_status']['local_origin'] == observed['origin']
+                assert observed['receiving_readiness'] == 'unobserved'
                 assert target.serve(receive_only=True) == 1
                 assert process.poll() is None
                 assert client.runtime_status()[1]["ok"] is True

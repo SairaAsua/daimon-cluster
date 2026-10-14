@@ -15,7 +15,7 @@ import socket
 import struct
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Iterator
 
@@ -43,7 +43,9 @@ def profile(plan: dict) -> dict:
 
 
 class Target:
-    def __init__(self, home: Path, plan: dict, genesis: dict, *, code: Path | None = None, code_uid: int = 0):
+    def __init__(self, home: Path, plan: dict, genesis: dict, *, code: Path | None = None,
+                 code_uid: int = 0, code_digest: str | None = None,
+                 qualified_startup: dict | None = None):
         self.home = private_directory(home)
         self.plan = validate_plan(plan)
         self.genesis = genesis
@@ -57,6 +59,8 @@ class Target:
         self.credential = self.root / "credential"
         self.code = code if code is not None else Path(__file__).resolve().parents[1]
         self.code_uid = code_uid
+        self.code_digest = code_digest or plan['release_digest']
+        self.qualified_startup = qualified_startup
 
     def document_bundle(self) -> dict:
         return document(self.package / "runtime/runtime.json")
@@ -393,7 +397,9 @@ class Target:
                 argv += ["--visibility-installation", str(visibility_installation)]
             if ready_descriptor is not None:
                 argv += ["--ready-fd", str(ready_descriptor)]
-            return daemon.main(argv)
+            options = {} if self.qualified_startup is None else {
+                'qualified_startup': self.qualified_startup}
+            return daemon.main(argv, **options)
         finally:
             # Native startup consumes/closes the FD. Early refusal may not.
             try:
@@ -410,45 +416,67 @@ class Target:
         a resource fence, peer delivery or a model/Telegram acceptance.
         """
         from daimon_matrix.client import ClientConfig, LocalClient
-        from .owner_process import ProcessPresence
         prepared = self.observe()
         if prepared["phase"] != "v8":
             raise OnboardingError("current_onboarding_target_required")
         root = self.package / "runtime"
         socket_identity = (root / "matrix.sock").lstat()
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(5)
-            connection.connect(str(root / "matrix.sock"))
-            pid, uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-            if uid != os.geteuid():
-                raise OnboardingError("onboarding_daemon_owner_conflict")
-            process = dict(uid=uid, pid=pid,
-                start_ticks=int((Path("/proc") / str(pid) / "stat").read_text().rpartition(")")[2].split()[19]),
-                boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip())
-            with ProcessPresence(process) as presence:
-                key = bytearray(onboarding_release.regular(root / "client.key", uid=os.geteuid()))
-                config = ClientConfig.load(root / "client.json", key)
-                # Match the maintained owner client's bounded response window.
-                # A slow authenticated status reply is not evidence of absence.
-                client = LocalClient(root / "matrix.sock", config, timeout_seconds=40)
-                _, status = client.runtime_status()
-                expected = prepared["receipt"]["origin"]
-                if status["ok"] is not True or any(status["server"].get(field) != value for field, value in expected.items()):
-                    raise OnboardingError("onboarding_daemon_origin_conflict")
-                if admitted:
-                    _, observed = client.scope_me()
-                    body = observed.get('result', {}).get('body', {})
-                    if (observed.get('ok') is not True or body.get('state') != 'running'
-                            or any(body.get(field) != expected[field] for field in
-                                   ('body_ref', 'embodiment_id', 'incarnation_id'))):
-                        raise OnboardingError('onboarding_admission_not_current')
-                current_socket = (root / "matrix.sock").lstat()
-                if (socket_identity.st_dev, socket_identity.st_ino) != (current_socket.st_dev, current_socket.st_ino):
-                    raise OnboardingError("onboarding_daemon_socket_changed")
-                presence.verify()
-                return dict(schema="cluster-onboarding-runtime-presence/v1", plan_digest=digest(self.plan),
-                    origin=expected, process=process, runtime_id=config.runtime_id,
-                    runtime_sha256=prepared["receipt"]["runtime_sha256"])
+        key = bytearray(onboarding_release.regular(root / "client.key", uid=os.geteuid()))
+        config = ClientConfig.load(root / "client.json", key)
+        from .owner_process import ConnectedProcessObserver, ProcessPresence
+        connected = 'connection_observer' in getattr(LocalClient, '__dataclass_fields__', {})
+        with ExitStack() as stack:
+            presence: ConnectedProcessObserver | ProcessPresence
+            if connected:
+                presence = stack.enter_context(ConnectedProcessObserver())
+                options = {'connection_observer': presence}
+            else:
+                # Retained SDKs lack the actual-connection seam. Preserve their
+                # original presence probe, explicitly never receiving-qualified.
+                if self.qualified_startup is not None:
+                    raise OnboardingError('qualified_onboarding_client_required')
+                connection = stack.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM))
+                connection.settimeout(5)
+                connection.connect(str(root / 'matrix.sock'))
+                pid, uid, _gid = struct.unpack('3i', connection.getsockopt(
+                    socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                if uid != os.geteuid():
+                    raise OnboardingError('onboarding_daemon_owner_conflict')
+                process = dict(uid=uid, pid=pid,
+                    start_ticks=int((Path('/proc') / str(pid) / 'stat').read_text().rpartition(
+                        ')')[2].split()[19]),
+                    boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
+                presence = stack.enter_context(ProcessPresence(process))
+                options = {}
+            # Kernel observation covers the exact connection and authenticated
+            # response. A separate empty probe cannot identify this responder.
+            client = LocalClient(root / "matrix.sock", config, timeout_seconds=40,
+                                 **options)
+            _, status = client.runtime_status()
+            expected = prepared["receipt"]["origin"]
+            if status["ok"] is not True or any(status["server"].get(field) != value for field, value in expected.items()):
+                raise OnboardingError("onboarding_daemon_origin_conflict")
+            loaded = status['result'].get('loaded_runtime')
+            if connected and loaded is not None and (presence.process is None
+                    or loaded.get('process_id') != presence.process['pid']):
+                raise OnboardingError('onboarding_daemon_responder_conflict')
+            if admitted:
+                _, observed = client.scope_me()
+                body = observed.get('result', {}).get('body', {})
+                if (observed.get('ok') is not True or body.get('state') != 'running'
+                        or any(body.get(field) != expected[field] for field in
+                               ('body_ref', 'embodiment_id', 'incarnation_id'))):
+                    raise OnboardingError('onboarding_admission_not_current')
+            current_socket = (root / "matrix.sock").lstat()
+            if (socket_identity.st_dev, socket_identity.st_ino) != (current_socket.st_dev, current_socket.st_ino):
+                raise OnboardingError("onboarding_daemon_socket_changed")
+            presence.verify()
+            return dict(schema="cluster-onboarding-runtime-presence/v1", plan_digest=digest(self.plan),
+                origin=expected, process=presence.process, runtime_id=config.runtime_id,
+                runtime_sha256=prepared["receipt"]["runtime_sha256"],
+                runtime_status=status['result'], receiving_readiness='unobserved',
+                responder_association='same-connection' if connected else 'legacy-probe')
+
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -492,14 +520,13 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(dict(ready=ready, matrix_commit=matrix_commit)))
             return 0
         venv = onboarding_sdk.observe(args.home, runtime, **sdk_parameters)
-        imports = onboarding_sdk.runtime_imports(venv, runtime, **sdk_parameters) if sdk_parameters else None
-        qualified_context = (imports is not None and sys.flags.isolated and sys.flags.no_site
-            and sys.dont_write_bytecode and sys.pycache_prefix == str(imports / '.disabled-bytecode')
-            and sys.path[:2] == [str(runtime), str(imports)])
+        imports = venv.parent / 'runtime-imports' if sdk_parameters else None
+        qualified_context = (imports is not None
+            and onboarding_sdk.startup_context(venv, imports, runtime))
         if Path(sys.prefix) != venv or sdk_parameters and not qualified_context:
             arguments = argv if argv is not None else sys.argv[1:]
             if sdk_parameters:
-                assert imports is not None
+                imports = onboarding_sdk.runtime_imports(venv, runtime, **sdk_parameters)
                 command = onboarding_sdk.runtime_command(venv, imports, runtime,
                     'clusterctl.onboarding_target', arguments)
             else:
@@ -508,7 +535,11 @@ def main(argv: list[str] | None = None) -> int:
                 command = [str(venv / "bin/python"), "-B", "-I", "-c", launcher,
                            str(runtime), *arguments]
             os.execv(venv / "bin/python", command)
-        target = Target(args.home, plan, document(args.genesis), code=runtime)
+        startup = (onboarding_sdk.qualified_startup(venv, runtime,
+            code_digest=args.runtime_digest or plan['release_digest'], **sdk_parameters)
+            if sdk_parameters else None)
+        target = Target(args.home, plan, document(args.genesis), code=runtime,
+            code_digest=args.runtime_digest or plan['release_digest'], qualified_startup=startup)
         if args.action == 'peer-identity':
             from .onboarding_peer import identity
             print(json.dumps(identity(target)))
