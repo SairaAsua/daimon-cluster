@@ -2,17 +2,118 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import hashlib
 import json
 import os
+import re
 import stat
 import subprocess
 import uuid
 from pathlib import Path
 
 from . import being_seed, onboarding_code_successor, onboarding_release
-from .onboarding import OnboardingError, validate_plan
+from .onboarding import OnboardingError, private_directory, validate_plan
 
 UNIT = 'daimon-onboarding-matrix.service'
+
+
+@contextmanager
+def selection_lock(unit: Path):
+    """Shared ownership for first installation and subsequent Matrix selection."""
+    directory = unit.parent
+    being_seed._path(directory)
+    info = directory.stat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        raise OnboardingError('onboarding_service_directory_rejected')
+    lock = private_directory(directory / ('.' + unit.name + '.selection'), create=True)
+    with being_seed._locked(lock):
+        yield
+
+
+def code_command(python: Path, code: Path, module: str, arguments: list[str]) -> list[str]:
+    """Hook-free initial import of the already approved stdlib bootstrap code."""
+    if not re.fullmatch(r'clusterctl\.[a-z][a-z0-9_]*', module):
+        raise OnboardingError('qualified_matrix_entrypoint_required')
+    launcher = '''import sys,importlib
+from pathlib import Path
+code = sys.argv.pop(1)
+module = sys.argv.pop(1)
+cache = code + '/.disabled-bytecode'
+if Path(cache).exists() or Path(cache).is_symlink():
+    raise SystemExit(1)
+sys.pycache_prefix = cache
+sys.dont_write_bytecode = True
+sys.path.insert(0, code)
+raise SystemExit(importlib.import_module(module).main())
+'''
+    return [str(python), '-B', '-I', '-S', '-c', launcher, str(code), module, *arguments]
+
+
+def entrypoint(original: bytes, argv: list[str]) -> bytes:
+    """Change the one exact ExecStart line, preserving every other unit byte."""
+    if (not isinstance(argv, list) or not 1 <= len(argv) <= 100
+            or any(not isinstance(arg, str) or '\n' in arg or '\r' in arg or '\0' in arg for arg in argv)
+            or not Path(argv[0]).is_absolute() or len(json.dumps(argv).encode()) > 65536
+            or original.count(b'\nExecStart=') != 1 or original.startswith(b'ExecStart=')):
+        raise OnboardingError('qualified_matrix_entrypoint_required')
+    encoded = ' '.join(json.dumps(arg.replace('%', '%%').replace('$', '$$')) for arg in argv)
+    return b'\n'.join(('ExecStart=' + encoded).encode() if line.startswith(b'ExecStart=') else line
+                      for line in original.split(b'\n'))
+
+
+def select_entrypoint(unit: Path, argv: list[str], *, previous_sha256: str) -> dict:
+    """CAS an approved Matrix unit under a persistent kernel selection lock.
+
+    Called only with the protected operation's exact unit, predecessor and
+    qualified command. This selects a file, never a live process: no reload,
+    stop/start, authority adoption, native-input replay or readiness claim occurs.
+    The retained predecessor supports lost-ACK recovery, not obsolete authority.
+    All supported selectors of this unit must use this same lock.
+    """
+    if (not isinstance(previous_sha256, str) or not re.fullmatch(r'[0-9a-f]{64}', previous_sha256)
+            or unit.name != UNIT and not re.fullmatch(r'daimon-matrix-[a-z0-9-]+\.service', unit.name)):
+        raise OnboardingError('qualified_matrix_entrypoint_required')
+    directory = unit.parent
+    with selection_lock(unit):
+        current = onboarding_release.regular(unit, uid=os.geteuid())
+        mode = stat.S_IMODE(unit.stat().st_mode)
+        if mode not in {0o600, 0o640, 0o644}:
+            raise OnboardingError('existing_onboarding_service_preserved')
+        retained = directory / (unit.name + '.' + previous_sha256 + '.previous')
+        original = (current if hashlib.sha256(current).hexdigest() == previous_sha256
+                    else onboarding_release.regular(retained, uid=os.geteuid()))
+        if hashlib.sha256(original).hexdigest() != previous_sha256:
+            raise OnboardingError('existing_onboarding_service_preserved')
+        candidate = entrypoint(original, argv)
+        candidate_sha256 = hashlib.sha256(candidate).hexdigest()
+        result = dict(previous_sha256=previous_sha256, selected_sha256=candidate_sha256,
+                      selected=True, loaded_readiness='unobserved')
+        if current == candidate:
+            parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+            return result
+        if current != original:
+            raise OnboardingError('existing_onboarding_service_preserved')
+        # Freeze original bytes before replacement, retaining exact permissions.
+        publish(retained, original, mode=mode)
+        temporary = directory / ('.onboarding-selection-' + uuid.uuid4().hex)
+        try:
+            publish(temporary, candidate, mode=mode)
+            if onboarding_release.regular(unit, uid=os.geteuid()) != original:
+                raise OnboardingError('existing_onboarding_service_preserved')
+            os.replace(temporary, unit)
+            parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return result
 
 
 def command(code: Path, *, receive_only: bool, visibility: Path | None = None,
@@ -26,15 +127,14 @@ def command(code: Path, *, receive_only: bool, visibility: Path | None = None,
         raise OnboardingError('qualified_onboarding_runtime_required')
     runtime_args = ([] if runtime_code is None else
                     ['--runtime-code', str(runtime_code), '--runtime-digest', str(runtime_digest)])
-    launcher = ('import sys;sys.path.insert(0,sys.argv.pop(1));'
-                'from clusterctl.onboarding_target import main;raise SystemExit(main())')
     public = '/home/agent/.onboarding-matrix/'
-    argv = ['/usr/bin/python3', '-B', '-I', '-c', launcher, str(runtime_code or code), 'admitted-serve',
+    arguments = ['admitted-serve',
             '--home', '/home/agent', '--code', str(code), *runtime_args,
             '--plan', '/home/agent/.onboarding-input/plan.json',
             '--genesis', public + 'genesis.json', '--admission-profile', public + 'admission.json',
             *(['--messaging-application', str(messaging_application)] if messaging_application is not None else [])]
-    return argv + (['--receive-only'] if receive_only else ['--visibility-installation', str(visibility)])
+    arguments += (['--receive-only'] if receive_only else ['--visibility-installation', str(visibility)])
+    return code_command(Path('/usr/bin/python3'), runtime_code or code, 'clusterctl.onboarding_target', arguments)
 
 
 def install(code: Path, *, receive_only: bool, visibility: Path | None = None,
@@ -55,10 +155,11 @@ def install(code: Path, *, receive_only: bool, visibility: Path | None = None,
            'Environment=HOME=/home/agent\nUMask=0077\nRestart=on-failure\nRestartSec=5\n'
            'KillMode=control-group\nTimeoutStopSec=30\nExecStart=' + encoded +
            '\n[Install]\nWantedBy=multi-user.target\n').encode()
-    publish(directory / UNIT, raw)
-    execute = run or _run
-    execute(['systemctl', 'daemon-reload'])
-    execute(['systemctl', 'enable', '--now', UNIT])
+    with selection_lock(directory / UNIT):
+        publish(directory / UNIT, raw)
+        execute = run or _run
+        execute(['systemctl', 'daemon-reload'])
+        execute(['systemctl', 'enable', '--now', UNIT])
 
 
 def publish(path: Path, raw: bytes, *, mode: int = 0o600) -> None:

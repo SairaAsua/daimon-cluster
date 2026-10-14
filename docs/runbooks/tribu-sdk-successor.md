@@ -64,6 +64,37 @@ adoption, service load, egress and communication remain separate controller stag
 Neither helper opens native state, rotates identity, restarts services, or modifies
 the independent provider account and native conversations.
 
+An explicit V4 runtime successor pins the approved SDK revision and exact wheel
+inside its receiving-code digest. The external Matrix manifest pins that digest;
+no circular manifest pointer is embedded in the code. The original base and
+previous SDK digest remain frozen, and all original non-runtime context remains
+byte-identical. Legacy V1/V2/V3 behavior stays explicit. A separately selected
+Telegram component is unchanged unless a combined successor explicitly includes it.
+Target launch and SDK preparation resolve this exact selected generation rather
+than reporting the historical default pin as if it were current.
+
+V4 runtime startup uses a closed import tree derived from the exact qualified
+wheels inside the existing SDK generation. It preserves the installed environment
+and its receipt. Full file/directory validation rejects additional or changed
+import bytes, and dependency validation uses this tree itself, not extra installed
+distributions. Nested directory entries are persisted before publication. The
+initial maintained bootstrap, SDK reexec and admitted child use hook-free startup;
+the latter two restore the selected prefix and use only approved Cluster code,
+this verified tree and trusted standard-library paths. Bytecode lookup is redirected
+outside existing caches and writing is disabled. Matching a venv prefix alone does
+not establish qualified startup. The interpreter/code remain trusted; this is not
+a sandbox or a new runtime identity.
+
+`onboarding_service.select_entrypoint` compares the exact protected predecessor
+under the same kernel lock used by initial guest installation and Source unit
+registration. It changes only ExecStart, retains original bytes and modes, rejects
+a newer selection, and recovers replacement-before-ACK without repeating it.
+A successful retry also re-establishes directory durability. It reports file
+selection with `loaded_readiness: unobserved`: no systemctl, native writer,
+authority adoption, account update or model turn is invoked by this helper.
+The owning journal/controller still coordinates cohort generations, real service
+drain/load/readiness and forward authority/application recovery before activation.
+
 Retain the actual currently selected Telegram artifact. Where Telegram already
 has its own qualified successor, keep that independent selection. If building a
 combined V3 successor, pass its current qualified artifact explicitly: building

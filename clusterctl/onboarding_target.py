@@ -477,24 +477,37 @@ def main(argv: list[str] | None = None) -> int:
         plan = validate_plan(being_seed._read(args.plan))
         runtime = onboarding_code_successor.selection(args.runtime_code, args.runtime_digest,
             args.code, plan['release_digest'], uid=0)
+        sdk_parameters = onboarding_code_successor.sdk_parameters(runtime)
+        matrix_commit = sdk_parameters.get('matrix_commit', onboarding_sdk.MATRIX_COMMIT)
         if args.action == 'sdk-prepare':
-            onboarding_sdk.install(args.home, runtime, args.runtime_digest or plan['release_digest'])
-            print(json.dumps(dict(ready=True, matrix_commit=onboarding_sdk.MATRIX_COMMIT)))
+            onboarding_sdk.install(args.home, runtime, args.runtime_digest or plan['release_digest'], **sdk_parameters)
+            print(json.dumps(dict(ready=True, matrix_commit=matrix_commit)))
             return 0
         if args.action == 'sdk-observe':
             try:
-                onboarding_sdk.observe(args.home, runtime)
+                onboarding_sdk.observe(args.home, runtime, **sdk_parameters)
                 ready = True
             except FileNotFoundError:
                 ready = False
-            print(json.dumps(dict(ready=ready, matrix_commit=onboarding_sdk.MATRIX_COMMIT)))
+            print(json.dumps(dict(ready=ready, matrix_commit=matrix_commit)))
             return 0
-        venv = onboarding_sdk.observe(args.home, runtime)
-        if Path(sys.prefix) != venv:
-            launcher = ("import sys; sys.path.insert(0,sys.argv.pop(1)); "
-                        "from clusterctl.onboarding_target import main; raise SystemExit(main())")
-            os.execv(venv / "bin/python", [str(venv / "bin/python"), "-B", "-I", "-c", launcher,
-                                          str(runtime), *(argv if argv is not None else sys.argv[1:])])
+        venv = onboarding_sdk.observe(args.home, runtime, **sdk_parameters)
+        imports = onboarding_sdk.runtime_imports(venv, runtime, **sdk_parameters) if sdk_parameters else None
+        qualified_context = (imports is not None and sys.flags.isolated and sys.flags.no_site
+            and sys.dont_write_bytecode and sys.pycache_prefix == str(imports / '.disabled-bytecode')
+            and sys.path[:2] == [str(runtime), str(imports)])
+        if Path(sys.prefix) != venv or sdk_parameters and not qualified_context:
+            arguments = argv if argv is not None else sys.argv[1:]
+            if sdk_parameters:
+                assert imports is not None
+                command = onboarding_sdk.runtime_command(venv, imports, runtime,
+                    'clusterctl.onboarding_target', arguments)
+            else:
+                launcher = ("import sys; sys.path.insert(0,sys.argv.pop(1)); "
+                            "from clusterctl.onboarding_target import main; raise SystemExit(main())")
+                command = [str(venv / "bin/python"), "-B", "-I", "-c", launcher,
+                           str(runtime), *arguments]
+            os.execv(venv / "bin/python", command)
         target = Target(args.home, plan, document(args.genesis), code=runtime)
         if args.action == 'peer-identity':
             from .onboarding_peer import identity

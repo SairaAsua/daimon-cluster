@@ -156,11 +156,38 @@ class AdmittedDaemon:
                 'LD_LIBRARY_PATH':str(Path(sys.base_prefix)/'lib')}
             if 'DM_TRIBU_REFERENCE_DIRECTORY' in os.environ:
                 environment['DM_TRIBU_REFERENCE_DIRECTORY'] = os.environ['DM_TRIBU_REFERENCE_DIRECTORY']
-            self.process = subprocess.Popen([sys.executable, '-B', '-I', '-c', launcher,
-                str(Path(__file__).resolve().parents[1]), str(self.target.home), json.dumps(self.target.plan),
+            arguments = [str(self.target.home), json.dumps(self.target.plan),
                 json.dumps(self.target.genesis), str(child.fileno()), str(ready_write), str(os.getpid()),
                 'true' if receive_only else 'false', str(visibility_installation) if visibility_installation else '',
-                str(messaging_application) if messaging_application else '', str(self.target.code_uid)],
+                str(messaging_application) if messaging_application else '', str(self.target.code_uid)]
+            from . import onboarding_code_successor, onboarding_sdk
+            parameters = onboarding_code_successor.sdk_parameters(self.target.code, uid=self.target.code_uid)
+            if parameters:
+                # This parent already runs the selected SDK. Derive/check the
+                # same closed paths before a fresh child can execute site hooks.
+                venv = Path(sys.prefix)
+                imports = onboarding_sdk.runtime_imports(venv, self.target.code,
+                    code_uid=self.target.code_uid, **parameters)
+                child_launcher = '''import sys
+from pathlib import Path
+sys.prefix = sys.exec_prefix = sys.argv.pop(1)
+imports = sys.argv.pop(1)
+code = sys.argv.pop(1)
+sys.path[:0] = [code, imports]
+sys.dont_write_bytecode = True
+sys.pycache_prefix = imports + '/.disabled-bytecode'
+from clusterctl.onboarding_runtime import child_main
+import json
+raise SystemExit(child_main(Path(sys.argv[1]), json.loads(sys.argv[2]), json.loads(sys.argv[3]),
+    int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6]), sys.argv[7]=='true',
+    Path(sys.argv[8]) if sys.argv[8] else None, Path(sys.argv[9]) if sys.argv[9] else None, int(sys.argv[10])))
+'''
+                command = [str(venv / 'bin/python'), '-B', '-I', '-S', '-c', child_launcher,
+                           str(venv), str(imports), str(self.target.code), *arguments]
+            else:
+                command = [sys.executable, '-B', '-I', '-c', launcher,
+                           str(Path(__file__).resolve().parents[1]), *arguments]
+            self.process = subprocess.Popen(command,
                 pass_fds=(child.fileno(), ready_write), stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 env=environment)

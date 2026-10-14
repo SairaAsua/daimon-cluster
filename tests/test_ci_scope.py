@@ -17,6 +17,17 @@ def test_receiving_preflight_keeps_sdk_startup_and_retained_successor_qualificat
         assert select([*changed, other], ROOT)[0] != 'update-preflight'
 
 
+def test_receiving_selection_keeps_actual_native_startup_and_unit_recovery(tmp_path):
+    from tools.ci_scope import UPDATE_SELECTION_FILES, UPDATE_SELECTION_TESTS
+    changed = sorted(UPDATE_SELECTION_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py'})
+    assert select(changed, ROOT) == ('update-selection', list(UPDATE_SELECTION_TESTS))
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    for other in ('clusterctl/onboarding_admission.py', 'clusterctl/onboarding_custody.py',
+                  'clusterctl/operation_journal.py', 'clusterctl/onboarding_enrollment.py',
+                  'requirements-weave.txt', 'unknown.py'):
+        assert select([*changed, other], ROOT)[0] != 'update-selection'
+
+
 def test_sdk_bootstrap_keeps_exact_install_and_successor_contracts(tmp_path):
     from tools.ci_scope import SDK_BOOTSTRAP_FILES, SDK_BOOTSTRAP_TESTS
     changed = sorted(SDK_BOOTSTRAP_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py'})
