@@ -52,11 +52,20 @@ def requirement_lines(rows: list[dict]) -> bytes:
                    for row in rows).encode()
 
 
-def verify(code: Path, *, uid: int, matrix_commit: str = MATRIX_COMMIT) -> dict:
+def verify(code: Path, *, uid: int, matrix_commit: str = MATRIX_COMMIT,
+           matrix_wheel_sha256: str | None = None) -> dict:
+    # New revisions require an exact wheel selection from the protected owning
+    # operation. A commit label alone cannot relax the retained pin guard.
+    qualified = (isinstance(matrix_wheel_sha256, str)
+        and re.fullmatch(r"[0-9a-f]{64}", matrix_wheel_sha256) is not None
+        and isinstance(matrix_commit, str)
+        and re.fullmatch(r"[0-9a-f]{40}", matrix_commit) is not None)
+    if matrix_wheel_sha256 is not None and not qualified:
+        raise OnboardingError("invalid_onboarding_sdk")
     root = code / "sdk"
     value = json.loads(onboarding_release.regular(root / "sdk.json", uid=uid))
     if (not isinstance(value, dict) or set(value) != {"schema", "matrix_commit", "wheels"}
-            or matrix_commit not in {MATRIX_COMMIT, PREVIOUS_MATRIX_COMMIT}
+            or not qualified and matrix_commit not in {MATRIX_COMMIT, PREVIOUS_MATRIX_COMMIT}
             or value["schema"] != SCHEMA or value["matrix_commit"] != matrix_commit
             or not isinstance(value["wheels"], list) or not 1 <= len(value["wheels"]) <= 100):
         raise OnboardingError("invalid_onboarding_sdk")
@@ -64,6 +73,9 @@ def verify(code: Path, *, uid: int, matrix_commit: str = MATRIX_COMMIT) -> dict:
     if (value["wheels"] != found or len({row["distribution"] for row in found}) != len(found)
             or sum(row["distribution"] == "daimon-matrix" for row in found) != 1
             or onboarding_release.regular(root / "requirements.txt", uid=uid) != requirement_lines(found)):
+        raise OnboardingError("onboarding_sdk_digest_mismatch")
+    if qualified and next(row for row in found if row['distribution'] == 'daimon-matrix')[
+            'sha256'] != matrix_wheel_sha256:
         raise OnboardingError("onboarding_sdk_digest_mismatch")
     return value
 
@@ -118,6 +130,19 @@ with ensurepip._get_pip_whl_path_ctx() as wheel:
           str(venv), mode, *arguments])
 
 
+def interpreter(venv: Path) -> dict:
+    """Observe the returned generation's actual interpreter without site hooks."""
+    probe = ("import json,sys; print(json.dumps(dict(implementation=sys.implementation.name, "
+             "version=list(sys.version_info[:3]))))")
+    value = json.loads(_run([str(venv / 'bin/python'), '-I', '-S', '-c', probe]))
+    if (not isinstance(value, dict) or set(value) != {'implementation', 'version'}
+            or not isinstance(value['implementation'], str)
+            or not isinstance(value['version'], list) or len(value['version']) != 3
+            or any(type(part) is not int for part in value['version'])):
+        raise OnboardingError('qualified_receiving_interpreter_required')
+    return value
+
+
 def installed(venv: Path, code: Path, value: dict, *, code_uid: int) -> None:
     # Query only stdlib metadata in the isolated interpreter. Do not import an
     # unverified installed SDK, dependency, .pth hook or sitecustomize.
@@ -142,8 +167,9 @@ def installed(venv: Path, code: Path, value: dict, *, code_uid: int) -> None:
 
 
 def observe(home: Path, code: Path, *, code_uid: int = 0,
-            matrix_commit: str = MATRIX_COMMIT) -> Path:
-    value = verify(code, uid=code_uid, matrix_commit=matrix_commit)
+            matrix_commit: str = MATRIX_COMMIT, matrix_wheel_sha256: str | None = None) -> Path:
+    value = verify(code, uid=code_uid, matrix_commit=matrix_commit,
+                   matrix_wheel_sha256=matrix_wheel_sha256)
     root = home / ".local/share/daimon-matrix/sdk" / digest(value)
     private_directory(root)
     expected = dict(schema="cluster-onboarding-sdk-installation/v1", sdk_digest=digest(value),
@@ -155,9 +181,10 @@ def observe(home: Path, code: Path, *, code_uid: int = 0,
 
 
 def install(home: Path, code: Path, release_digest: str, *, code_uid: int = 0,
-            matrix_commit: str = MATRIX_COMMIT) -> Path:
+            matrix_commit: str = MATRIX_COMMIT, matrix_wheel_sha256: str | None = None) -> Path:
     onboarding_release.verify(code, release_digest, uid=code_uid)
-    value = verify(code, uid=code_uid, matrix_commit=matrix_commit)
+    value = verify(code, uid=code_uid, matrix_commit=matrix_commit,
+                   matrix_wheel_sha256=matrix_wheel_sha256)
     private_directory(home)
     parent = home / ".local/share/daimon-matrix/sdk"
     current = home

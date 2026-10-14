@@ -6,6 +6,17 @@ from tools.ci_scope import ONBOARDING_CONTRACTS, select
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_receiving_preflight_keeps_sdk_startup_and_retained_successor_qualification(tmp_path):
+    from tools.ci_scope import UPDATE_PREFLIGHT_FILES, UPDATE_PREFLIGHT_TESTS
+    changed = sorted(UPDATE_PREFLIGHT_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py'})
+    assert select(changed, ROOT) == ('update-preflight', list(UPDATE_PREFLIGHT_TESTS))
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    for other in ('clusterctl/onboarding_host.py', 'clusterctl/onboarding_target.py',
+                  'clusterctl/onboarding_runtime.py', 'clusterctl/onboarding_custody.py',
+                  'requirements-weave.txt', 'clusterctl/operation_journal.py', 'unknown.py'):
+        assert select([*changed, other], ROOT)[0] != 'update-preflight'
+
+
 def test_sdk_bootstrap_keeps_exact_install_and_successor_contracts(tmp_path):
     from tools.ci_scope import SDK_BOOTSTRAP_FILES, SDK_BOOTSTRAP_TESTS
     changed = sorted(SDK_BOOTSTRAP_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py'})

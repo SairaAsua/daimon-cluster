@@ -224,6 +224,16 @@ UPDATE_INTENT_TESTS = ('tests/test_receiving_update_journal.py', 'tests/test_ope
                        'tests/test_onboarding_code_successor.py', 'tests/test_onboarding_sdk.py',
                        'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
 
+UPDATE_PREFLIGHT_FILES = {'clusterctl/onboarding_receiving_update.py', 'clusterctl/onboarding_sdk.py',
+    'tests/test_receiving_update_preflight.py', 'docs/runbooks/tribu-sdk-successor.md',
+    'tools/check_rc_types.py',
+    'tests/fixtures/receiving_reader/canonical.py',
+    'tests/fixtures/receiving_reader/release_compatibility.py',
+    'tests/fixtures/receiving_reader/PROVENANCE.json'}
+UPDATE_PREFLIGHT_TESTS = ('tests/test_receiving_update_preflight.py', 'tests/test_onboarding_sdk.py',
+    'tests/test_onboarding_code_successor.py', 'tests/test_onboarding_release.py',
+    'tests/test_receiving_update_journal.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
+
 
 GROUP_FILES = {'tests/test_onboarding_group.py',
     'clusterctl/onboarding_acceptance.py', 'clusterctl/onboarding_target.py',
@@ -302,6 +312,12 @@ def select(changed: list[str], root: Path) -> tuple[str, list[str]]:
         return 'docs', []
     if set(changed) <= CI_FILES | RUNBOOK_DOCS:
         return 'ci', ['tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    if ({'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_update_preflight.py'} <= set(changed)
+            and set(changed) <= UPDATE_PREFLIGHT_FILES | CI_FILES
+            and all((root / path).is_file() for path in UPDATE_PREFLIGHT_TESTS)):
+        # Actual candidate process/offline installation, not service selection,
+        # authority adoption, admission or dependency-pin qualification.
+        return 'update-preflight', list(UPDATE_PREFLIGHT_TESTS)
     if ('clusterctl/onboarding_sdk.py' in changed
             and set(changed) <= SDK_BOOTSTRAP_FILES | CI_FILES
             and all((root / path).is_file() for path in SDK_BOOTSTRAP_TESTS)):
