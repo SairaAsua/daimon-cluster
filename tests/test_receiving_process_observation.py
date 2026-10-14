@@ -26,6 +26,38 @@ def test_both_actual_admitted_child_launchers_compile_before_spawn():
         compile(launcher.value, '<actual-admitted-child-launcher>', 'exec')
 
 
+@pytest.mark.parametrize('qualified', [False, True])
+def test_guest_observation_deadline_refuses_before_custody_or_unbounded_rpc(monkeypatch, qualified):
+    from clusterctl.onboarding import OnboardingError
+    from clusterctl.onboarding_target import Target
+    from daimon_matrix import client
+    from types import SimpleNamespace
+    import time
+    fields=dict(getattr(client.LocalClient,'__dataclass_fields__',{}))
+    if qualified:
+        fields['deadline_ns']=None
+    else:
+        fields.pop('deadline_ns',None)
+    # Explicit API availability seam only, never loaded/startup qualification.
+    monkeypatch.setattr(client.LocalClient,'__dataclass_fields__',fields)
+    target=SimpleNamespace(observe=lambda:pytest.fail('refused observation opened custody'))
+    error='onboarding_observation_deadline_expired' if qualified else 'qualified_onboarding_deadline_client_required'
+    with pytest.raises(OnboardingError,match=error):
+        Target.running(target,deadline_ns=time.monotonic_ns()-1)
+
+
+@pytest.mark.parametrize('action,timeout', [('observe','1'),('running','0'),('admitted-running','-1'),
+                                         ('running','nan'),('running','inf'),('running','61')])
+def test_guest_cli_rejects_invalid_observation_budget_before_sdk_or_body(capsys, monkeypatch, action, timeout):
+    from clusterctl import onboarding_target
+    monkeypatch.setattr(onboarding_target.being_seed,'_read',lambda *_args,**_kwargs:
+        pytest.fail('invalid observation budget opened a plan'))
+    assert onboarding_target.main([action,'--home','/unused','--plan','/unused/plan',
+        '--genesis','/unused/genesis','--code','/unused/code',
+        '--observation-timeout-seconds',timeout])==1
+    assert capsys.readouterr().out=='{"error": "native_onboarding_target_refused"}\n'
+
+
 def child_listener(path, ready):
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
         listener.bind(path)

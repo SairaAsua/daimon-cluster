@@ -105,11 +105,11 @@ class MatrixUserService:
         content = onboarding_release.regular(self.unit, uid=self._unit_uid)
         return dict(unit_sha256=hashlib.sha256(content).hexdigest(), manager=values)
 
-    def stop(self) -> None:
+    def stop(self, *, deadline_ns: int | None = None) -> None:
         # Do not wait for the CLI to imply drain. The controller observes the
         # pinned process and manager completion independently. StopUnit targets
         # the named Matrix-only unit; it is not an atomic process/invocation CAS.
-        self.run([*self._manager_prefix, '--no-block', 'stop', self.unit.name])
+        self._execute([*self._manager_prefix, '--no-block', 'stop', self.unit.name], deadline_ns)
 
     def bind_process(self, process: dict, inspected: dict) -> dict:
         values = inspected['manager']

@@ -955,7 +955,7 @@ class HostBackend:
 
     def _matrix_command(self, plan: dict, action: str) -> dict:
         value = self._target_call(plan, action)
-        if (not isinstance(value, dict) or set(value) != {"phase", "request", "receipt"}
+        if (not isinstance(value, dict) or set(value) - {'group', 'receiving_controller'} != {"phase", "request", "receipt"}
                 or value["phase"] not in {"absent", "prepared", "v7", "credential-pending", "v8-published", "v8", "peer-published"}):
             raise OnboardingError("invalid_onboarding_observation")
         return value

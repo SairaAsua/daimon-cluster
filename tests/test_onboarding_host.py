@@ -74,6 +74,31 @@ def configured(tmp_path):
     return config, value, run, HostBackend(config, run=run)
 
 
+@pytest.mark.parametrize('optional', [{}, {'group': {}}, {'receiving_controller': {}},
+                                     {'group': {}, 'receiving_controller': {}}])
+def test_matrix_observation_wrapper_retains_supported_selection_metadata(tmp_path, optional):
+    """Wrapper seam; Target tests authenticate these receiving observations."""
+    _,value,_,backend=configured(tmp_path)
+    observed=dict(phase='v8',request={},receipt={},**optional)
+    backend._target_call=lambda *_args,**_kwargs:observed
+    assert backend._matrix_command(value,'observe') is observed
+
+
+@pytest.mark.parametrize('change', ['unknown-field','missing-receipt','invalid-phase'])
+def test_matrix_observation_wrapper_still_rejects_unrecognized_contract(tmp_path, change):
+    _,value,_,backend=configured(tmp_path)
+    observed=dict(phase='v8',request={},receipt={})
+    if change=='unknown-field':
+        observed['unexpected']={}
+    elif change=='missing-receipt':
+        del observed['receipt']
+    else:
+        observed['phase']='controller-ready'
+    backend._target_call=lambda *_args,**_kwargs:observed
+    with pytest.raises(OnboardingError,match='invalid_onboarding_observation'):
+        backend._matrix_command(value,'observe')
+
+
 def test_exact_receiving_mount_can_keep_its_existing_operational_alias(tmp_path):
     _, value, run, backend = configured(tmp_path)
     desired = {"type": "disk", "source": "/qualified/source", "path": "/opt/qualified-code",

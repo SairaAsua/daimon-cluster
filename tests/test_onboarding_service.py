@@ -42,6 +42,26 @@ def test_guest_manager_uses_existing_system_unit_and_root_owned_fragment(tmp_pat
         MatrixUserService(unit, run=execute)
 
 
+def test_matrix_stop_uses_remaining_local_budget_and_retains_timeout_uncertainty(tmp_path, monkeypatch):
+    import time
+    import subprocess
+    from clusterctl import onboarding_service
+    from clusterctl.onboarding_service import MatrixGuestService
+    calls=[]
+    def lost(argv, **kwargs):
+        calls.append((argv,kwargs['timeout']))
+        raise subprocess.TimeoutExpired(argv,kwargs['timeout'])
+    monkeypatch.setattr(onboarding_service.subprocess,'run',lost)
+    manager=MatrixGuestService(tmp_path/UNIT)
+    with pytest.raises(OnboardingError,match='receiving_matrix_deadline_expired'):
+        manager.stop(deadline_ns=time.monotonic_ns()-1)
+    assert not calls
+    with pytest.raises(OnboardingError,match='receiving_matrix_manager_unavailable'):
+        manager.stop(deadline_ns=time.monotonic_ns()+1_000_000_000)
+    assert len(calls)==1 and calls[0][0]==['systemctl','--no-block','stop',UNIT]
+    assert 0<calls[0][1]<=1
+
+
 def test_guest_manager_binds_real_parent_and_child_with_explicit_synthetic_cgroup(tmp_path, monkeypatch):
     import os
     import subprocess

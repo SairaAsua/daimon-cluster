@@ -10,6 +10,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 import socket
 import struct
@@ -470,7 +471,8 @@ class Target:
             except OSError:
                 pass
 
-    def running(self, *, admitted: bool = False, require_loaded: bool = False) -> dict:
+    def running(self, *, admitted: bool = False, require_loaded: bool = False,
+                deadline_ns: int | None = None) -> dict:
         """Observe a kernel-pinned daemon and authenticate its native status.
 
         Admitted observations also check the current native body scope. Loaded
@@ -478,6 +480,11 @@ class Target:
         candidate equality, resource fences and communication remain separate.
         """
         from daimon_matrix.client import ClientConfig, LocalClient
+        if deadline_ns is not None:
+            if 'deadline_ns' not in getattr(LocalClient, '__dataclass_fields__', {}):
+                raise OnboardingError('qualified_onboarding_deadline_client_required')
+            if time.monotonic_ns() >= deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
         prepared = self.observe()
         if prepared["phase"] != "v8":
             raise OnboardingError("current_onboarding_target_required")
@@ -493,7 +500,7 @@ class Target:
             presence: ConnectedProcessObserver | ProcessPresence
             if connected:
                 presence = stack.enter_context(ConnectedProcessObserver())
-                options = {'connection_observer': presence}
+                options: dict = {'connection_observer': presence}
             else:
                 # Retained SDKs lack the actual-connection seam. Preserve their
                 # original presence probe, explicitly never receiving-qualified.
@@ -514,6 +521,10 @@ class Target:
                 options = {}
             # Kernel observation covers the exact connection and authenticated
             # response. A separate empty probe cannot identify this responder.
+            if deadline_ns is not None:
+                options['deadline_ns'] = deadline_ns
+                if time.monotonic_ns() >= deadline_ns:
+                    raise OnboardingError('onboarding_observation_deadline_expired')
             client = LocalClient(root / "matrix.sock", config, timeout_seconds=40,
                                  **options)
             _, status = client.runtime_status()
@@ -572,6 +583,8 @@ class Target:
             presence.verify()
             if parent is not None:
                 parent.verify()
+            if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
             return dict(schema="cluster-onboarding-runtime-presence/v1", plan_digest=digest(self.plan),
                 origin=expected, process=presence.process, runtime_id=config.runtime_id,
                 admission_parent=None if parent is None else parent.process,
@@ -611,11 +624,16 @@ def main(argv: list[str] | None = None) -> int:
     visibility.add_argument("--visibility-installation", type=Path)
     parser.add_argument("--ready-fd", type=int)
     parser.add_argument('--require-loaded', action='store_true')
+    parser.add_argument('--observation-timeout-seconds', type=float)
     parser.add_argument('--control-file', type=Path)
     parser.add_argument('--control-command', type=Path)
     args = parser.parse_args(argv)
     try:
         controlling = args.action in {'receiving-control-prepare', 'receiving-control-apply'}
+        timeout = args.observation_timeout_seconds
+        if timeout is not None and (args.action not in {'running', 'admitted-running'}
+                or not math.isfinite(timeout) or not 0 < timeout <= 60):
+            raise OnboardingError('invalid_receiving_observation_timeout')
         if (args.require_loaded and args.action not in {'running', 'admitted-running'}
                 or controlling and (args.control_file is None
                     or (args.action == 'receiving-control-prepare') != (args.control_command is not None))
@@ -692,7 +710,8 @@ def main(argv: list[str] | None = None) -> int:
                                 ready_descriptor=args.ready_fd)
         if args.action in {"running", "admitted-running"}:
             print(json.dumps(target.running(admitted=args.action == 'admitted-running',
-                                            require_loaded=args.require_loaded)))
+                require_loaded=args.require_loaded,
+                deadline_ns=None if timeout is None else time.monotonic_ns()+int(timeout*1_000_000_000))))
             return 0
         if args.action in {'admission-check', 'admission-enroll'}:
             from .onboarding_admission import ReceivingHolder

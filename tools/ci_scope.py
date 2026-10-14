@@ -359,7 +359,35 @@ HOME_WORKER_TESTS = ('tests/test_home_worker_successor.py', 'tests/test_onboardi
     'tests/test_home_gateway.py', 'tests/test_home_access.py')
 
 
-def select(changed: list[str], root: Path) -> tuple[str, list[str]]:
+def host_observation_only(root: Path, base: str) -> bool:
+    """Prove the sole host change accepts existing receiving metadata.
+
+    A host filename alone cannot narrow provisioning/access qualification.
+    Any other byte change keeps its broader profile, including future edits.
+    """
+    if not re.fullmatch(r'[0-9a-f]{40}', base):
+        return False
+    name='clusterctl/onboarding_host.py'
+    before=subprocess.run(['git','show',base+':'+name],cwd=root,capture_output=True,check=False)
+    if before.returncode:
+        return False
+    try:
+        original=before.stdout
+        current=(root/name).read_bytes()
+    except OSError:
+        return False
+    old=b'set(value) != {"phase", "request", "receipt"}'
+    new=b"set(value) - {'group', 'receiving_controller'} != {\"phase\", \"request\", \"receipt\"}"
+    return original.count(old)==1 and original.replace(old,new,1)==current
+
+
+def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
+    host_files={'clusterctl/onboarding_host.py','tests/test_onboarding_host.py'}
+    host_tests=(*LOADED_STARTUP_TESTS,'tests/test_onboarding_host.py',
+                'tests/test_onboarding_host_ownership.py','tests/test_onboarding_managed.py')
+    if (host_files <= set(changed) and set(changed) <= LOADED_STARTUP_FILES | CI_FILES | host_files
+            and all((root/path).is_file() for path in host_tests) and host_observation_only(root,base)):
+        return 'peer',list(dict.fromkeys(host_tests))
     if ({'tests/test_receiving_process_observation.py', 'tests/test_source_bootstrap.py'} & set(changed)
             and set(changed) <= LOADED_STARTUP_FILES | CI_FILES
             and all((root / path).is_file() for path in LOADED_STARTUP_TESTS)):
@@ -647,7 +675,7 @@ def main(argv=None):
                                 cwd=root, capture_output=True, check=False)
         if result.returncode == 0:
             changed = result.stdout.decode().rstrip('\0').split('\0') if result.stdout else []
-    profile, tests = select(changed, root)
+    profile, tests = select(changed, root, base=base)
     if profile == 'sdk' and sdk_pin_only(root, base, changed):
         # Retain prior unchanged authority/custody/receiving qualification.
         tests = list(SDK_PIN_TESTS)

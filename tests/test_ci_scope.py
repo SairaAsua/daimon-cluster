@@ -6,6 +6,34 @@ from tools.ci_scope import ONBOARDING_CONTRACTS, select
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_receiving_metadata_scope_requires_exact_host_content_and_keeps_all_receiving_tests(monkeypatch):
+    import subprocess
+    from tools.ci_scope import LOADED_STARTUP_FILES, LOADED_STARTUP_TESTS
+    name='clusterctl/onboarding_host.py'
+    current=(ROOT/name).read_text()
+    addition="set(value) - {'group', 'receiving_controller'} != {\"phase\", \"request\", \"receipt\"}"
+    original=current.replace(addition,'set(value) != {"phase", "request", "receipt"}')
+    assert original!=current
+    monkeypatch.setattr('tools.ci_scope.subprocess.run',lambda *_args,**_kwargs:
+        subprocess.CompletedProcess([],0,original.encode()))
+    changed=sorted(LOADED_STARTUP_FILES | {'tools/ci_scope.py','tests/test_ci_scope.py',name,'tests/test_onboarding_host.py'})
+    profile,tests=select(changed,ROOT,base='a'*40)
+    assert profile=='peer' and set(LOADED_STARTUP_TESTS)<=set(tests)
+    assert {'tests/test_onboarding_host.py','tests/test_onboarding_host_ownership.py',
+            'tests/test_onboarding_managed.py'}<=set(tests)
+    assert select(changed,ROOT)!=('peer',tests)
+    for extra in ('requirements-weave.txt','clusterctl/onboarding_custody.py','unknown.py'):
+        assert select([*changed,extra],ROOT,base='a'*40)!=('peer',tests)
+    read_bytes=Path.read_bytes
+    with monkeypatch.context() as newline:
+        newline.setattr(Path,'read_bytes',lambda path:
+            current.replace('\n','\r\n').encode() if path==ROOT/name else read_bytes(path))
+        assert select(changed,ROOT,base='a'*40)!=('peer',tests)
+    monkeypatch.setattr('tools.ci_scope.subprocess.run',lambda *_args,**_kwargs:
+        subprocess.CompletedProcess([],0,('unrelated source change\n'+original).encode()))
+    assert select(changed,ROOT,base='a'*40)!=('peer',tests)
+
+
 def test_loaded_startup_covers_actual_processes_and_preserves_broader_boundaries(tmp_path):
     from tools.ci_scope import LOADED_STARTUP_FILES, LOADED_STARTUP_TESTS
     changed = sorted(LOADED_STARTUP_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py'})
