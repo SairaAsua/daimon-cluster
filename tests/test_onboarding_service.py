@@ -63,6 +63,61 @@ def test_matrix_stop_uses_remaining_local_budget_and_retains_timeout_uncertainty
     assert 0<calls[0][1]<=1
 
 
+def test_guest_manager_freezes_exact_incus_and_reference_cache_dropins(tmp_path, monkeypatch):
+    import hashlib
+    from clusterctl import onboarding_service
+    from clusterctl.onboarding_service import MatrixGuestService
+    unit = tmp_path / UNIT
+    incus = Path('/run/systemd/system/service.d/zzz-lxc-service.conf')
+    cache = unit.with_name(UNIT + '.d') / 'tribu-reference-cache.conf'
+    files = {
+        unit: b'[Service]\nUser=agent\nGroup=agent\nExecStart=/existing\n',
+        incus: (b'[Service]\nProcSubset=all\nProtectProc=default\nProtectControlGroups=no\n'
+                b'ProtectKernelTunables=no\nNoNewPrivileges=no\nLoadCredential=\n'
+                b'PrivateNetwork=no\nImportCredential=\n'),
+        cache: (b'[Service]\nEnvironment=DM_TRIBU_REFERENCE_DIRECTORY='
+                b'/home/agent/.local/state/tribu-reference-cache\n'),
+    }
+    values = dict(Id=UNIT, ActiveState='active', SubState='running', MainPID='123',
+        ControlGroup='/system.slice/' + UNIT, InvocationID='synthetic-manager',
+        FragmentPath=str(unit), DropInPaths=str(cache) + ' ' + str(incus),
+        KillMode='control-group', Result='success', User='agent', Group='agent')
+    reads = []
+    def regular(path, *, uid):
+        assert uid == 0
+        reads.append(path)
+        return files[path]
+    monkeypatch.setattr(onboarding_service.onboarding_release, 'regular', regular)
+    manager = MatrixGuestService(unit, run=lambda _: '\n'.join(key + '=' + value for key, value in values.items()))
+    actual = manager.inspect()
+    assert actual['dropins'] == {str(path): hashlib.sha256(files[path]).hexdigest() for path in (cache, incus)}
+    assert reads == [unit, cache, incus]
+    for wrong in ('/unqualified.conf', str(incus) + ' ' + str(incus)):
+        values['DropInPaths'] = wrong
+        with pytest.raises(OnboardingError, match='scope_required'):
+            manager.inspect()
+    values['DropInPaths'] = str(cache) + ' ' + str(incus)
+    for path, extra in ((incus, b'ExecStart=/foreign\n'), (cache, b'User=root\n')):
+        original = files[path]
+        files[path] += extra
+        with pytest.raises(OnboardingError, match='scope_required'):
+            manager.inspect()
+        files[path] = original
+    assert manager.inspect() == actual
+
+
+def test_guest_start_checks_reloaded_configuration_before_start_dispatch(tmp_path):
+    from clusterctl.onboarding_service import MatrixGuestService
+    calls = []
+    manager = MatrixGuestService(tmp_path / UNIT, run=lambda argv: calls.append(argv) or '')
+    def reject():
+        assert calls == [['systemctl', 'daemon-reload']]
+        raise OnboardingError('synthetic changed reloaded configuration')
+    with pytest.raises(OnboardingError, match='changed reloaded'):
+        manager.start(pre_start=reject)
+    assert calls == [['systemctl', 'daemon-reload']]
+
+
 def test_guest_manager_binds_real_parent_and_child_with_explicit_synthetic_cgroup(tmp_path, monkeypatch):
     import os
     import subprocess

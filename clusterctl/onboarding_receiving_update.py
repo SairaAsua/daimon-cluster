@@ -1259,6 +1259,7 @@ class GuestBootstrapController:
         if (root['scope']['process'] != observed['process']
                 or root['scope']['admission_parent'] != observed['admission_parent']
                 or root['service']['unit_sha256'] != effects['unit_selected']['selected_sha256']
+                or root['service'].get('dropins', {}) != frozen['root']['service'].get('dropins', {})
                 or root['service']['manager'] != effects['started']['manager']
                 or any(startup.get(key) != value for key, value in dict(
                     code_digest=candidate['runtime_digest'], matrix_commit=candidate['prepared']['matrix_revision'],

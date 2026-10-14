@@ -152,6 +152,20 @@ def test_full_dual_route_effects_and_exact_retry_never_repeat_stop_or_keys(fixtu
     assert controller.execute() == result
 
 
+def test_loaded_proof_preserves_the_frozen_root_dropin_vector(fixture):
+    controller, backend, _, _ = fixture
+    controller.execute()
+    actual = backend._guest_service_call
+    def changed(*args, **kwargs):
+        result = actual(*args, **kwargs)
+        result['service']['dropins'] = {'/new-dropin.conf': 'e' * 64}
+        return result
+    backend._guest_service_call = changed
+    with pytest.raises(OnboardingError, match='loaded_conflict'):
+        controller.execute()
+    assert backend.stops == backend.starts == 1
+
+
 @pytest.mark.parametrize('phase', ['quiesce', 'stage', 'publish', 'select', 'start'])
 def test_lost_concrete_reply_recovers_the_same_operation(fixture, phase):
     controller, backend, _, _ = fixture

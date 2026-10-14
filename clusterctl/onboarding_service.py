@@ -14,6 +14,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from collections.abc import Callable
 
 from . import being_seed, onboarding_code_successor, onboarding_release
 from .onboarding import OnboardingError, private_directory, validate_plan
@@ -101,7 +102,7 @@ class MatrixUserService:
             raise OnboardingError('receiving_matrix_service_scope_required')
         values = dict(lines)
         if (values['Id'] != self.unit.name or values['FragmentPath'] != str(self.unit)
-                or values['DropInPaths'] or values['KillMode'] != 'control-group'
+                or values['DropInPaths'] and not identity or values['KillMode'] != 'control-group'
                 or not values['MainPID'].isdigit()
                 or values['ControlGroup'] and not values['ControlGroup'].endswith('/' + self.unit.name)
                 or any(values[key] != value for key, value in identity.items())):
@@ -109,7 +110,32 @@ class MatrixUserService:
         content = onboarding_release.regular(self.unit, uid=self._unit_uid)
         if identity:
             guest_execution_identity(content)
-        return dict(unit_sha256=hashlib.sha256(content).hexdigest(), manager=values)
+        result = dict(unit_sha256=hashlib.sha256(content).hexdigest(), manager=values)
+        if identity and values['DropInPaths']:
+            result['dropins'] = self._guest_dropins(values['DropInPaths'])
+        return result
+
+    def _guest_dropins(self, paths: str) -> dict:
+        """Freeze exact maintained guest additions, never executable overrides."""
+        expected = {
+            Path('/run/systemd/system/service.d/zzz-lxc-service.conf'): (
+                b'[Service]\nProcSubset=all\nProtectProc=default\nProtectControlGroups=no\n'
+                b'ProtectKernelTunables=no\nNoNewPrivileges=no\nLoadCredential=\n'
+                b'PrivateNetwork=no\nImportCredential=\n'),
+            self.unit.with_name(self.unit.name + '.d') / 'tribu-reference-cache.conf': (
+                b'[Service]\nEnvironment=DM_TRIBU_REFERENCE_DIRECTORY='
+                b'/home/agent/.local/state/tribu-reference-cache\n'),
+        }
+        selected = [Path(path) for path in paths.split()]
+        if len(set(selected)) != len(selected) or any(path not in expected for path in selected):
+            raise OnboardingError('receiving_matrix_service_scope_required')
+        result = {}
+        for path in selected:
+            raw = onboarding_release.regular(path, uid=self._unit_uid)
+            if raw != expected[path]:
+                raise OnboardingError('receiving_matrix_service_scope_required')
+            result[str(path)] = hashlib.sha256(raw).hexdigest()
+        return result
 
     def stop(self, *, deadline_ns: int | None = None) -> None:
         # Do not wait for the CLI to imply drain. The controller observes the
@@ -150,6 +176,15 @@ class MatrixGuestService(MatrixUserService):
         self._manager_prefix = ['systemctl']
         self._unit_uid = 0
         self._required_execution = dict(User='agent', Group='agent')
+
+    def start(self, *, deadline_ns: int | None = None,
+              pre_start: Callable[[], None] | None = None) -> None:
+        self._execute([*self._manager_prefix, 'daemon-reload'], deadline_ns)
+        # Reload can expose an override absent from the old manager snapshot.
+        # Validate that effective configuration before dispatching StartUnit.
+        if pre_start is not None:
+            pre_start()
+        self._execute([*self._manager_prefix, '--no-block', 'start', self.unit.name], deadline_ns)
 
     def bind_admitted_process(self, observed: dict, inspected: dict) -> dict:
         """Associate the manager's parent with the authenticated native child.
@@ -225,6 +260,12 @@ class GuestServiceBootstrap:
         if not re.fullmatch(r'[0-9a-f]{64}', original_hash):
             raise OnboardingError('receiving_guest_service_request_required')
         current = onboarding_release.regular(self.manager.unit, uid=self.manager._unit_uid)
+        # Bind on-disk additions before daemon-reload, not only their paths.
+        if previous['service'].get('dropins'):
+            if (not hasattr(self.manager, '_guest_dropins')
+                    or self.manager._guest_dropins(previous['service']['manager']['DropInPaths'])
+                    != previous['service']['dropins']):
+                raise OnboardingError('receiving_guest_service_request_conflict')
         retained = self.manager.unit.with_name(self.manager.unit.name+'.'+original_hash+'.previous')
         original = current if hashlib.sha256(current).hexdigest() == original_hash else onboarding_release.regular(
             retained, uid=self.manager._unit_uid)
@@ -296,6 +337,7 @@ class GuestServiceBootstrap:
         inspected = self.manager.inspect(deadline_ns=deadline_ns)
         values = inspected['manager']
         if (inspected['unit_sha256'] not in {previous['service']['unit_sha256'], hashlib.sha256(candidate).hexdigest()}
+                or inspected.get('dropins', {}) != previous['service'].get('dropins', {})
                 or values['ActiveState'] != 'inactive' or values['SubState'] != 'dead'
                 or values['MainPID'] != '0' or values['InvocationID'] not in {'', previous['scope']['invocation_id']}):
             raise OnboardingError('receiving_guest_service_quiescence_required')
@@ -314,7 +356,7 @@ class GuestServiceBootstrap:
         return process
 
     def execute(self, action: str, request: dict, *, deadline_ns: int) -> dict:
-        from .owner_process import ProcessPresence, observe_process_exit
+        from .owner_process import PresenceError, ProcessPresence, observe_process_exit
         from contextlib import ExitStack
         if action not in {'validate', 'quiesce', 'select', 'start'}:
             raise OnboardingError('receiving_guest_service_request_required')
@@ -404,6 +446,8 @@ class GuestServiceBootstrap:
             current = self.manager.inspect(deadline_ns=deadline_ns)
             if current['unit_sha256'] != selected['selected_sha256']:
                 raise OnboardingError('receiving_guest_service_candidate_changed')
+            if current.get('dropins', {}) != previous['service'].get('dropins', {}):
+                raise OnboardingError('receiving_guest_service_candidate_changed')
             retained = self._retained(root, 'started')
             if retained is not None:
                 if (current['manager']['ActiveState'] != 'active'
@@ -414,11 +458,18 @@ class GuestServiceBootstrap:
                 self._budget(deadline_ns)
                 return retained
             intent = self._retained(root, 'start-intent')
+            pending_parent = self._retained(root, 'pending-parent')
             if current['manager']['ActiveState'] == 'inactive':
+                if pending_parent is not None:
+                    raise OnboardingError('receiving_guest_service_started_process_changed')
                 self._stopped(previous, candidate, deadline_ns=deadline_ns)
                 self._record(root/'start-intent.json', dict(selected_sha256=selected['selected_sha256']))
                 self._budget(deadline_ns)
-                self.manager.start(deadline_ns=deadline_ns)
+                def before_start() -> None:
+                    reloaded = self._stopped(previous, candidate, deadline_ns=deadline_ns)
+                    if reloaded['unit_sha256'] != selected['selected_sha256']:
+                        raise OnboardingError('receiving_guest_service_candidate_changed')
+                self.manager.start(deadline_ns=deadline_ns, pre_start=before_start)
             elif current['manager']['ActiveState'] not in {'active', 'activating'} or intent is None:
                 raise OnboardingError('receiving_guest_service_started_process_changed')
             while True:
@@ -426,13 +477,27 @@ class GuestServiceBootstrap:
                 current = self.manager.inspect(deadline_ns=deadline_ns)
                 if current['unit_sha256'] != selected['selected_sha256']:
                     raise OnboardingError('receiving_guest_service_candidate_changed')
+                if current.get('dropins', {}) != previous['service'].get('dropins', {}):
+                    raise OnboardingError('receiving_guest_service_candidate_changed')
                 if current['manager']['ActiveState'] == 'active':
-                    result = self._record(root/'started.json', dict(schema='cluster-guest-service-start/v1',
-                        manager=current['manager'], admission_parent=self._parent(current['manager']),
-                        receiving_readiness='unobserved'))
-                    self._budget(deadline_ns)
-                    return result
-                if current['manager']['ActiveState'] != 'activating':
+                    association = {key: current['manager'][key] for key in ('MainPID', 'InvocationID', 'ControlGroup')}
+                    if pending_parent is not None and association != pending_parent:
+                        raise OnboardingError('receiving_guest_service_started_process_changed')
+                    pending_parent = self._record(root/'pending-parent.json', association)
+                    try:
+                        parent = self._parent(current['manager'])
+                    except PresenceError:
+                        # Type=simple can become active before its fork switches
+                        # to User=agent. Observe this same invocation within the
+                        # budget; do not start again or adopt another process.
+                        pass
+                    else:
+                        result = self._record(root/'started.json', dict(schema='cluster-guest-service-start/v1',
+                            manager=current['manager'], admission_parent=parent,
+                            receiving_readiness='unobserved'))
+                        self._budget(deadline_ns)
+                        return result
+                elif current['manager']['ActiveState'] != 'activating' or pending_parent is not None:
                     raise OnboardingError('receiving_guest_service_start_unobserved')
                 time.sleep(min(0.05, max(0, (deadline_ns-time.monotonic_ns())/1_000_000_000)))
 

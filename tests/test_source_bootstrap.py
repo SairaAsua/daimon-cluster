@@ -249,6 +249,10 @@ def test_source_manager_uses_only_named_user_unit_and_rejects_different_fragment
     assert manager.inspect()['unit_sha256'] == hashlib.sha256(unit.read_bytes()).hexdigest()
     manager.stop()
     assert calls[-1] == ['systemctl', '--user', '--no-block', 'stop', unit.name]
+    values['DropInPaths'] = '/run/systemd/system/service.d/zzz-lxc-service.conf'
+    with pytest.raises(OnboardingError, match='scope_required'):
+        manager.inspect()
+    values['DropInPaths'] = ''
     values['FragmentPath'] = str(tmp_path / 'different.service')
     with pytest.raises(OnboardingError, match='scope_required'):
         manager.inspect()
