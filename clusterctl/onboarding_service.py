@@ -9,6 +9,7 @@ import os
 import re
 import stat
 import subprocess
+import threading
 import uuid
 from pathlib import Path
 
@@ -16,11 +17,19 @@ from . import being_seed, onboarding_code_successor, onboarding_release
 from .onboarding import OnboardingError, private_directory, validate_plan
 
 UNIT = 'daimon-onboarding-matrix.service'
+_selection_owners = threading.local()
 
 
 @contextmanager
 def selection_lock(unit: Path):
     """Shared ownership for first installation and subsequent Matrix selection."""
+    unit = being_seed._path(unit)
+    process_id = os.getpid()
+    owned: set[Path] = (getattr(_selection_owners, 'units', set())
+                        if getattr(_selection_owners, 'process_id', None) == process_id else set())
+    if unit in owned:
+        yield
+        return
     directory = unit.parent
     being_seed._path(directory)
     info = directory.stat()
@@ -28,7 +37,78 @@ def selection_lock(unit: Path):
         raise OnboardingError('onboarding_service_directory_rejected')
     lock = private_directory(directory / ('.' + unit.name + '.selection'), create=True)
     with being_seed._locked(lock):
-        yield
+        _selection_owners.units = owned | {unit}
+        _selection_owners.process_id = process_id
+        try:
+            yield
+        finally:
+            _selection_owners.units = owned
+
+
+class MatrixUserService:
+    """Existing owner-local systemd user route for one Matrix-only Source unit.
+
+    Inspection and mutation use that same named unit and owner. This is not a
+    sessions coordinator or a guest instance stop. The bootstrap controller
+    additionally binds its authenticated native PID to this manager scope.
+    """
+
+    def __init__(self, unit: Path, *, run=None):
+        if not re.fullmatch(r'daimon-matrix-[a-z0-9-]+\.service', unit.name):
+            raise OnboardingError('qualified_matrix_service_required')
+        self.unit = being_seed._path(unit)
+        self.run = run or self._run
+
+    def _run(self, argv: list[str]) -> str:
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=45, check=False,
+                env={'PATH': os.defpath, 'LANG': 'C.UTF-8',
+                     'XDG_RUNTIME_DIR': '/run/user/' + str(os.geteuid()),
+                     'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/' + str(os.geteuid()) + '/bus'})
+            if result.returncode or len(result.stdout.encode()) > 65536:
+                raise OnboardingError('receiving_matrix_manager_unavailable')
+            return result.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            raise OnboardingError('receiving_matrix_manager_unavailable') from None
+
+    def inspect(self) -> dict:
+        fields = {'Id', 'ActiveState', 'SubState', 'MainPID', 'ControlGroup', 'InvocationID',
+                  'FragmentPath', 'DropInPaths', 'KillMode', 'Result'}
+        raw = self.run(['systemctl', '--user', 'show', self.unit.name,
+                        '--property=' + ','.join(sorted(fields)), '--no-pager'])
+        lines = [line.split('=', 1) for line in raw.splitlines()]
+        if (any(len(row) != 2 for row in lines) or len(lines) != len(fields)
+                or {row[0] for row in lines} != fields):
+            raise OnboardingError('receiving_matrix_service_scope_required')
+        values = dict(lines)
+        if (values['Id'] != self.unit.name or values['FragmentPath'] != str(self.unit)
+                or values['DropInPaths'] or values['KillMode'] != 'control-group'
+                or not values['MainPID'].isdigit()
+                or values['ControlGroup'] and not values['ControlGroup'].endswith('/' + self.unit.name)):
+            raise OnboardingError('receiving_matrix_service_scope_required')
+        content = onboarding_release.regular(self.unit, uid=os.geteuid())
+        return dict(unit_sha256=hashlib.sha256(content).hexdigest(), manager=values)
+
+    def stop(self) -> None:
+        # Do not wait for the CLI to imply drain. The controller observes the
+        # pinned process and manager completion independently. StopUnit targets
+        # the named Matrix-only unit; it is not an atomic process/invocation CAS.
+        self.run(['systemctl', '--user', '--no-block', 'stop', self.unit.name])
+
+    def bind_process(self, process: dict, inspected: dict) -> dict:
+        values = inspected['manager']
+        if (values['ActiveState'] != 'active' or int(values['MainPID']) != process['pid']
+                or not values['ControlGroup']):
+            raise OnboardingError('receiving_matrix_process_scope_required')
+        lines = (Path('/proc') / str(process['pid']) / 'cgroup').read_text().splitlines()
+        if '0::' + values['ControlGroup'] not in lines:
+            raise OnboardingError('receiving_matrix_process_scope_required')
+        return dict(process=process, control_group=values['ControlGroup'],
+                    invocation_id=values['InvocationID'])
+
+    def start(self) -> None:
+        self.run(['systemctl', '--user', 'daemon-reload'])
+        self.run(['systemctl', '--user', '--no-block', 'start', self.unit.name])
 
 
 def code_command(python: Path, code: Path, module: str, arguments: list[str]) -> list[str]:

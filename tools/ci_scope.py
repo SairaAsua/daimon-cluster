@@ -291,6 +291,7 @@ RECEIVING_RUNTIME_FILES = {'clusterctl/onboarding_peer.py', 'clusterctl/onboardi
     'tests/test_onboarding_peer.py', 'tests/test_onboarding_runtime.py'}
 
 LOADED_STARTUP_FILES = {'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_target.py',
+    'clusterctl/onboarding_service.py', 'tests/test_source_bootstrap.py',
     'clusterctl/onboarding_runtime.py', 'clusterctl/onboarding_source.py', 'clusterctl/owner_process.py',
     'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_cohort_control.py',
     'tests/test_receiving_host_selection.py', 'tests/test_receiving_update_journal.py',
@@ -298,6 +299,7 @@ LOADED_STARTUP_FILES = {'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_t
     'tests/test_onboarding_source.py', 'tests/test_receiving_process_observation.py',
     'tests/test_receiving_update_preflight.py'}
 LOADED_STARTUP_TESTS = ('tests/test_onboarding_sdk.py', 'tests/test_onboarding_code_successor.py',
+    'tests/test_source_bootstrap.py',
     'tests/test_receiving_cohort_control.py', 'tests/test_receiving_host_selection.py',
     'tests/test_receiving_update_journal.py',
     'tests/test_receiving_update_selection.py', 'tests/test_receiving_update_preflight.py',
@@ -355,7 +357,7 @@ HOME_WORKER_TESTS = ('tests/test_home_worker_successor.py', 'tests/test_onboardi
 
 
 def select(changed: list[str], root: Path) -> tuple[str, list[str]]:
-    if ('tests/test_receiving_process_observation.py' in changed
+    if ({'tests/test_receiving_process_observation.py', 'tests/test_source_bootstrap.py'} & set(changed)
             and set(changed) <= LOADED_STARTUP_FILES | CI_FILES
             and all((root / path).is_file() for path in LOADED_STARTUP_TESTS)):
         # Actual same-connection/process startup, retained SDK and service paths.

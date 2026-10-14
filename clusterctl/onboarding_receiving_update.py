@@ -255,6 +255,360 @@ def freeze_senders(owners: dict[str, OwnerGroupClient], *, tribe_ref: str) -> li
     return senders
 
 
+def freeze_source_bootstrap(source, manager) -> dict:
+    """Freeze the Source's existing identity and actual Matrix manager scope."""
+    with OwnerGroupClient(source.root, source.root / 'matrix.sock') as owner:
+        predecessor = owner.base_status()
+        service = manager.inspect()
+        scope = manager.bind_process(predecessor['process'], service)
+        bundle = being_seed._read(source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+        if bundle['local_origin'] != predecessor['runtime_status']['local_origin']:
+            raise OnboardingError('receiving_bootstrap_identity_conflict')
+        visibility = onboarding_release.regular(source.visibility, uid=os.geteuid())
+        return dict(settings_sha256=digest(source.settings), unit=str(manager.unit),
+            service=service, scope=scope, predecessor=predecessor,
+            bundle_sha256=digest(bundle), visibility_sha256=hashlib.sha256(visibility).hexdigest(),
+            visibility_envelope=json.loads(visibility))
+
+
+class SourceBootstrapController:
+    """Journaled first controlled adoption through the existing Source owner.
+
+    A live caller needs the approved exact code/SDK and scoped interruption
+    consent before invoking this effect adapter. No global Stop is performed.
+    The guest's admitted-parent lifecycle is a separate receiving adapter.
+    """
+
+    def __init__(self, journal, operation_id: str, source, manager):
+        self.journal, self.operation_id = journal, operation_id
+        self.source, self.manager = source, manager
+
+    def _row(self):
+        row = self.journal.get(self.operation_id)
+        if (row is None or row['operation'] != 'receiving-update'
+                or row['state'] in {'degraded', 'compensated', 'completed'}):
+            raise OnboardingError('receiving_bootstrap_operation_required')
+        before, after = row['expected_precondition'], row['intended_transition']
+        call = row['intent'].get('runtime_call', {})
+        if (call.get('precondition_digest') != digest(before)
+                or call.get('transition_digest') != digest(after)
+                or not re.fullmatch(r'[0-9a-f]{64}', call.get('manifest_digest', ''))):
+            raise OnboardingError('receiving_bootstrap_operation_required')
+        frozen, candidate = before.get('source_bootstrap'), after.get('source_bootstrap')
+        if (not isinstance(frozen, dict) or not isinstance(candidate, dict)
+                or frozen.get('settings_sha256') != digest(self.source.settings)
+                or frozen.get('unit') != str(self.manager.unit)
+                or set(candidate) != {'transaction', 'expires_at_ms', 'argv'}):
+            raise OnboardingError('receiving_bootstrap_binding_conflict')
+        transaction = Path(candidate['transaction'])
+        if transaction.parent != self.source.root.parent or transaction == self.source.root:
+            raise OnboardingError('receiving_bootstrap_binding_conflict')
+        return row, frozen, candidate
+
+    def _record(self, key: str, value: dict):
+        row, _, _ = self._row()
+        observations = dict(row['runtime_observation'] or {})
+        bootstrap = dict(observations.get('source_bootstrap', {}))
+        if key in bootstrap and bootstrap[key] != value:
+            raise OnboardingError('receiving_bootstrap_observation_conflict')
+        bootstrap[key] = value
+        observations['source_bootstrap'] = bootstrap
+        self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
+                             expected_runtime_observation=row['runtime_observation'])
+
+    def _stopped(self, frozen: dict, candidate: dict):
+        from .onboarding_service import entrypoint
+        inspected = self.manager.inspect()
+        values = inspected['manager']
+        original = frozen['service']['unit_sha256']
+        current = onboarding_release.regular(self.manager.unit, uid=os.geteuid())
+        retained = self.manager.unit.with_name(self.manager.unit.name + '.' + original + '.previous')
+        prior = current if hashlib.sha256(current).hexdigest() == original else onboarding_release.regular(retained, uid=os.geteuid())
+        if (hashlib.sha256(prior).hexdigest() != original or current not in (prior, entrypoint(prior, candidate['argv']))
+                or values['ActiveState'] != 'inactive' or values['SubState'] != 'dead'
+                or values['MainPID'] != '0'
+                or values['InvocationID'] not in {'', frozen['scope']['invocation_id']}):
+            raise OnboardingError('receiving_bootstrap_quiescence_required')
+        return inspected
+
+    def _writer_quiesced(self) -> None:
+        from daimon_matrix.daemon import _prepare_socket
+        with self.source.writer():
+            # Supported stale-socket checks are safe only after exact process
+            # exit and stopped-manager proof. A forced exit may leave this
+            # ephemeral socket, which cannot be copied as a runtime artifact.
+            _prepare_socket(self.source.root / 'matrix.sock')
+
+    def _visibility_current(self, frozen: dict, observations: dict) -> bytes:
+        raw = onboarding_release.regular(self.source.visibility, uid=os.geteuid())
+        actual = hashlib.sha256(raw).hexdigest()
+        intended = observations.get('visibility_intent', {}).get('installation_sha256')
+        if actual not in {frozen['visibility_sha256'], intended}:
+            raise OnboardingError('receiving_bootstrap_visibility_changed')
+        return raw
+
+    def _recover_stage(self, upgrade, transaction: Path, intent: dict, frozen: dict, candidate: dict) -> None:
+        """Retain an unpublished interrupted attempt; never rewind publication.
+
+        The operation owns the path before dispatch. Native source/parent locks
+        and its unchanged inventory prove that no successor became active. An
+        archive intent precedes rename, so a lost rename ACK is reconcilable.
+        """
+        with upgrade._locks(self.source.root):
+            self._stopped(frozen, candidate)
+            if upgrade.inventory_digest(self.source.root) != intent['source_sha256']:
+                raise OnboardingError('receiving_bootstrap_source_changed')
+            observations = (self._row()[0]['runtime_observation'] or {}).get('source_bootstrap', {})
+            for attempt in range(8):
+                key = 'capability_archive_' + str(attempt)
+                done = key + '_retained'
+                archived = observations.get(key)
+                if done in observations:
+                    continue
+                if archived is None:
+                    if not transaction.exists():
+                        return
+                    archive = transaction.parent / ('.bootstrap-' + self.operation_id + '-' + str(attempt) + '.incomplete')
+                    if archive.exists() or archive.is_symlink():
+                        raise OnboardingError('receiving_bootstrap_archive_conflict')
+                    archived = dict(path=str(archive), sha256=upgrade.inventory_digest(transaction))
+                    self._record(key, archived)
+                archive = Path(archived['path'])
+                if archive.exists():
+                    if transaction.exists() or upgrade.inventory_digest(archive) != archived['sha256']:
+                        raise OnboardingError('receiving_bootstrap_archive_conflict')
+                else:
+                    if upgrade.inventory_digest(transaction) != archived['sha256']:
+                        raise OnboardingError('receiving_bootstrap_archive_conflict')
+                    os.rename(transaction, archive)
+                # A failed file fsync may be the reason this tree is partial.
+                # Preserve its bytes, not just the rename's directory entry.
+                snapshot = upgrade._snapshot(archive)
+                if upgrade._inventory(snapshot) != archived['sha256']:
+                    raise OnboardingError('receiving_bootstrap_archive_conflict')
+                for name in snapshot:
+                    if name.endswith('/'):
+                        continue
+                    descriptor = os.open(archive / name, os.O_RDONLY | os.O_NOFOLLOW)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                for name in sorted((key for key in snapshot if key.endswith('/')), key=len, reverse=True):
+                    upgrade._sync(archive / name)
+                upgrade._sync(archive)
+                if upgrade.inventory_digest(archive) != archived['sha256']:
+                    raise OnboardingError('receiving_bootstrap_archive_conflict')
+                upgrade._sync(transaction.parent)
+                self._record(done, archived)
+                return
+            raise OnboardingError('receiving_bootstrap_attempt_limit')
+
+    def _publish_visibility(self, upgrade, frozen: dict, transaction: Path) -> dict:
+        """Derive through the owning signer, then journal an exact envelope CAS."""
+        from daimon_matrix.canonical import canonical_bytes
+        from daimon_matrix.operator_messaging import _reissue_installation
+        from .onboarding_service import publish
+        observations = (self._row()[0]['runtime_observation'] or {}).get('source_bootstrap', {})
+        with self.source.writer():
+            self._visibility_current(frozen, observations)
+            intended = observations.get('visibility_intent')
+            if intended is None:
+                current = self.source._load(signed=False)
+                bundle = being_seed._read(self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+                # Only an isolated unpublished copy is passed to the existing
+                # reissue helper. Its source is the exact frozen envelope; all
+                # local/foreign attestation rules remain owned by Matrix.
+                with tempfile.TemporaryDirectory(prefix='.visibility-', dir=transaction) as scratch:
+                    copy = Path(scratch) / 'installation.json'
+                    publish(copy, canonical_bytes(frozen['visibility_envelope']))
+                    _reissue_installation(current, copy, application_sha256=digest(bundle))
+                    envelope = being_seed._read(copy, limit=being_seed.MAX_SELECTION)
+                raw = canonical_bytes(envelope)
+                intended = dict(envelope=envelope, installation_sha256=hashlib.sha256(raw).hexdigest(),
+                    runtime_sha256=hashlib.sha256(canonical_bytes(bundle)).hexdigest())
+                self._record('visibility_intent', intended)
+            raw = canonical_bytes(intended['envelope'])
+            if hashlib.sha256(raw).hexdigest() != intended['installation_sha256']:
+                raise OnboardingError('receiving_bootstrap_binding_conflict')
+            observations = (self._row()[0]['runtime_observation'] or {})['source_bootstrap']
+            actual = self._visibility_current(frozen, observations)
+            if actual != raw:
+                previous = self.source.visibility.with_name(self.source.visibility.name + '.' + frozen['visibility_sha256'] + '.previous')
+                publish(previous, actual)
+                temporary = self.source.visibility.with_name('.bootstrap-' + self.operation_id + '.json')
+                publish(temporary, raw)
+                if self._visibility_current(frozen, observations) != actual:
+                    raise OnboardingError('receiving_bootstrap_visibility_changed')
+                os.replace(temporary, self.source.visibility)
+            descriptor = os.open(self.source.visibility, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            upgrade._sync(self.source.visibility.parent)
+            self.source._load(signed=True).egress.validate_registered_catalogs()
+        return {key: intended[key] for key in ('installation_sha256', 'runtime_sha256')}
+
+    def quiesce(self, *, timeout_seconds: float = 30) -> dict:
+        """Retain exact process exit separately from graceful delivery/drain."""
+        from .onboarding_service import selection_lock
+        from .owner_process import observe_process_exit
+        if type(timeout_seconds) not in {int, float} or not 0 <= timeout_seconds <= 60:
+            raise OnboardingError('receiving_bootstrap_invalid_wait')
+        with self.journal.mutation_lock(self.operation_id), selection_lock(self.manager.unit):
+            row, frozen, candidate = self._row()
+            if row['state'] == 'planned':
+                self.journal.advance(self.operation_id, 'runtime-dispatching')
+            previous = (row['runtime_observation'] or {}).get('source_bootstrap', {}).get('quiesced')
+            if previous is not None:
+                self._stopped(frozen, candidate)
+                if not observe_process_exit(frozen['predecessor']['process']):
+                    raise OnboardingError('receiving_bootstrap_exit_unobserved')
+                # The operation retains exit proof, but a new/foreign writer
+                # still prevents another publication or selection effect.
+                self._writer_quiesced()
+                return previous
+            stop_intent = (row['runtime_observation'] or {}).get('source_bootstrap', {}).get('stop_intent')
+            if stop_intent is not None:
+                if stop_intent != dict(scope=frozen['scope'], unit_sha256=frozen['service']['unit_sha256']):
+                    raise OnboardingError('receiving_bootstrap_binding_conflict')
+                if not observe_process_exit(frozen['predecessor']['process']):
+                    from .owner_process import ProcessPresence
+                    current_manager = self.manager.inspect()
+                    values = current_manager['manager']
+                    if (current_manager['unit_sha256'] != frozen['service']['unit_sha256']
+                            or values['ActiveState'] not in {'active', 'deactivating'}
+                            or values['MainPID'] != str(frozen['predecessor']['process']['pid'])
+                            or values['InvocationID'] != frozen['scope']['invocation_id']):
+                        raise OnboardingError('receiving_bootstrap_predecessor_changed')
+                    with ProcessPresence(frozen['predecessor']['process']) as process:
+                        # A durable intent does not prove dispatch. Resume only
+                        # this unchanged active unit; deactivating means await.
+                        if values['ActiveState'] == 'active':
+                            try:
+                                self.manager.stop()
+                            except (OnboardingError, OSError):
+                                if not process.wait_for_exit(0):
+                                    raise
+                        if not process.wait_for_exit(timeout_seconds):
+                            raise OnboardingError('receiving_bootstrap_exit_unobserved')
+                stopped = self._stopped(frozen, candidate)
+                self._writer_quiesced()
+                result = dict(process=frozen['predecessor']['process'], manager=stopped,
+                    exit_observed=True, writer_available=True, graceful_delivery='unobserved')
+                self._record('quiesced', result)
+                return result
+            with OwnerGroupClient(self.source.root, self.source.root / 'matrix.sock') as owner:
+                observed = owner.base_status()
+                inspected = self.manager.inspect()
+                scope = self.manager.bind_process(observed['process'], inspected)
+                if (observed['process'] != frozen['predecessor']['process']
+                        or observed['server'] != frozen['predecessor']['server']
+                        or inspected != frozen['service'] or scope != frozen['scope']):
+                    raise OnboardingError('receiving_bootstrap_predecessor_changed')
+                # Intent precedes stop; a lost CLI reply is not proof of failure.
+                self._record('stop_intent', dict(scope=scope, unit_sha256=inspected['unit_sha256']))
+                try:
+                    self.manager.stop()
+                except (OnboardingError, OSError):
+                    if not owner.wait_for_exit(0):
+                        raise
+                if not owner.wait_for_exit(timeout_seconds):
+                    raise OnboardingError('receiving_bootstrap_exit_unobserved')
+                stopped = self._stopped(frozen, candidate)
+                self._writer_quiesced()
+                result = dict(process=observed['process'], manager=stopped,
+                    exit_observed=True, writer_available=True, graceful_delivery='unobserved')
+                self._record('quiesced', result)
+                return result
+
+    def publish(self) -> dict:
+        """Recover exact capability/visibility/unit publications while stopped."""
+        from daimon_matrix import operator_runtime_upgrade as upgrade
+        from .onboarding_service import select_entrypoint, selection_lock
+        with self.journal.mutation_lock(self.operation_id), selection_lock(self.manager.unit):
+            row, frozen, candidate = self._row()
+            observations = (row['runtime_observation'] or {}).get('source_bootstrap', {})
+            if observations.get('quiesced', {}).get('exit_observed') is not True:
+                raise OnboardingError('receiving_bootstrap_quiescence_required')
+            from .owner_process import observe_process_exit
+            if not observe_process_exit(frozen['predecessor']['process']):
+                raise OnboardingError('receiving_bootstrap_exit_unobserved')
+            self._stopped(frozen, candidate)
+            self._visibility_current(frozen, observations)
+            password = bytes(self.source._reader())
+            transaction = Path(candidate['transaction'])
+            ready_path = transaction / 'ready.json'
+            try:
+                ready_document = json.loads(onboarding_release.regular(ready_path, uid=os.geteuid()))
+                complete = isinstance(ready_document, dict) and ready_document.get('schema') == 'dm.operator.capability-upgrade/v1'
+            except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+                complete = False
+            if not complete:
+                bundle = being_seed._read(self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+                if digest(bundle) != frozen['bundle_sha256']:
+                    raise OnboardingError('receiving_bootstrap_identity_conflict')
+                intent = dict(source_sha256=upgrade.inventory_digest(self.source.root),
+                    counter=bundle['keystore']['counter'], control_head=bundle['control_head'],
+                    being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'])
+                retained_intent = observations.get('capability_intent', intent)
+                if retained_intent != intent:
+                    raise OnboardingError('receiving_bootstrap_source_changed')
+                self._record('capability_intent', intent)
+                stage_intent = observations.get('capability_stage_intent')
+                if stage_intent is None:
+                    if transaction.exists() or transaction.is_symlink():
+                        raise OnboardingError('receiving_bootstrap_unowned_stage')
+                    self._record('capability_stage_intent', dict(transaction=str(transaction)))
+                elif stage_intent != dict(transaction=str(transaction)):
+                    raise OnboardingError('receiving_bootstrap_binding_conflict')
+                self._recover_stage(upgrade, transaction, intent, frozen, candidate)
+                self._stopped(frozen, candidate)
+                upgrade.stage_capabilities(source=self.source.root, transaction=transaction,
+                    expected_source_sha256=intent['source_sha256'], expected_counter=intent['counter'],
+                    expected_control_head=intent['control_head'], expected_being_ref=intent['being_ref'],
+                    expected_origin=intent['origin'], add_methods={}, provision_receiving_controller=True,
+                    expires_at_ms=candidate['expires_at_ms'], password=password, externally_quiesced=True)
+            ready = onboarding_release.regular(ready_path, uid=os.geteuid())
+            receipt = json.loads(ready)
+            intent = (self._row()[0]['runtime_observation'] or {})['source_bootstrap']['capability_intent']
+            if (receipt.get('source_sha256') != intent['source_sha256']
+                    or receipt.get('origin') != intent['origin'] or receipt.get('control_head') != intent['control_head']
+                    or receipt.get('provision_receiving_controller') is not True
+                    or receipt.get('add_methods') != {} or receipt.get('expires_at_ms') != candidate['expires_at_ms']):
+                raise OnboardingError('receiving_bootstrap_binding_conflict')
+            ready_hash = hashlib.sha256(ready).hexdigest()
+            descriptor = os.open(ready_path, os.O_RDONLY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            upgrade._sync(transaction)
+            self._record('capability_ready', dict(ready_sha256=ready_hash))
+            self._stopped(frozen, candidate)
+            # After a lost publication ACK the native helper resolves the same
+            # atomic exchange. Never restage or restore its old checkpoint.
+            published = observations.get('capability_published')
+            if published is None:
+                publication = upgrade.publish(source=self.source.root, transaction=transaction,
+                    expected_receipt_sha256=ready_hash, password=password, externally_quiesced=True,
+                    capability_upgrade=True)
+                published = dict(publication=publication, runtime_sha256=hashlib.sha256(
+                    onboarding_release.regular(self.source.root / 'runtime.json', uid=os.geteuid())).hexdigest())
+                self._record('capability_published', published)
+            if hashlib.sha256(onboarding_release.regular(self.source.root / 'runtime.json', uid=os.geteuid())).hexdigest() != published['runtime_sha256']:
+                raise OnboardingError('receiving_bootstrap_source_changed')
+            self._stopped(frozen, candidate)
+            self._record('visibility_published', self._publish_visibility(upgrade, frozen, transaction))
+            self._stopped(frozen, candidate)
+            selected = select_entrypoint(self.manager.unit, candidate['argv'],
+                previous_sha256=frozen['service']['unit_sha256'])
+            self._record('unit_selected', selected)
+            return dict(schema='cluster-source-bootstrap-publication/v1', operation_id=self.operation_id,
+                        published=True, loaded_readiness='unobserved')
+
+
 class CohortController:
     """Durably fence the frozen senders before an existing selector effect.
 

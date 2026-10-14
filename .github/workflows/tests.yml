@@ -315,6 +315,7 @@ jobs:
           clusterctl/onboarding_receiving_update.py
           tests/test_receiving_update_preflight.py
           tests/test_receiving_update_selection.py
+          tests/test_source_bootstrap.py
           clusterctl/onboarding_target.py
           clusterctl/onboarding_existing.py
           clusterctl/onboarding_enrollment.py

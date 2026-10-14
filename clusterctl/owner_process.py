@@ -35,6 +35,38 @@ def validate_process(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
+def observe_process_exit(process: dict[str, Any]) -> bool:
+    """Resume a retained authenticated tuple after the original pin was lost.
+
+    Kernel absence or a readable pidfd proves exit. A different boot, recycled
+    PID, changed owner or unavailable observation is refused, never exit proof.
+    """
+    expected = validate_process(process)
+    if Path('/proc/sys/kernel/random/boot_id').read_text().strip() != expected['boot_id']:
+        raise PresenceError('owner_process_exit_observation_rejected')
+    try:
+        descriptor = os.pidfd_open(expected['pid'], 0)
+    except ProcessLookupError:
+        return True
+    try:
+        root = Path('/proc') / str(expected['pid'])
+        fields = (root / 'stat').read_text().rpartition(')')[2].split()
+        uids = [line.split()[1:] for line in (root / 'status').read_text().splitlines() if line.startswith('Uid:')]
+        if (int(fields[19]) != expected['start_ticks'] or len(uids) != 1
+                or [int(value) for value in uids[0]] != [expected['uid']] * 4):
+            raise PresenceError('owner_process_exit_observation_rejected')
+        poller = select.poll()
+        poller.register(descriptor, select.POLLIN | select.POLLERR | select.POLLHUP)
+        events = poller.poll(0)
+        if any(mask & (select.POLLERR | select.POLLNVAL) for _fd, mask in events):
+            raise PresenceError('owner_process_exit_observation_rejected')
+        return any(mask & (select.POLLIN | select.POLLHUP) for _fd, mask in events)
+    except (OSError, ValueError, IndexError) as error:
+        raise PresenceError('owner_process_exit_observation_rejected') from error
+    finally:
+        os.close(descriptor)
+
+
 class ProcessPresence:
     """Pin one kernel process; no signals, polling loop, runtime RPC or key I/O."""
 

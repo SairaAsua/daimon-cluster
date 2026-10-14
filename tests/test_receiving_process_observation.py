@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from clusterctl.owner_process import ConnectedProcessObserver, PresenceError
+from clusterctl.owner_process import ConnectedProcessObserver, PresenceError, observe_process_exit
 
 
 def test_both_actual_admitted_child_launchers_compile_before_spawn():
@@ -130,12 +130,16 @@ def test_pinned_exit_wait_distinguishes_running_exited_and_closed_observer():
             start_ticks=int((Path('/proc') / str(child.pid) / 'stat').read_text().rpartition(')')[2].split()[19]),
             boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
         with ProcessPresence(process) as presence:
+            assert observe_process_exit(process) is False
+            with pytest.raises(PresenceError, match='exit_observation_rejected'):
+                observe_process_exit({**process, 'start_ticks': process['start_ticks'] + 1})
             assert presence.wait_for_exit(0) is False
             child.stdin.write(b'exit\n')
             child.stdin.flush()
             assert presence.wait_for_exit(5) is True
             child.wait(timeout=5)
             assert presence.wait_for_exit(0) is True
+            assert observe_process_exit(process) is True
         with pytest.raises(PresenceError, match='exit_observation_rejected'):
             presence.wait_for_exit(0)
     finally:
