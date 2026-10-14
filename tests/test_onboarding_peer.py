@@ -13,6 +13,65 @@ from clusterctl.onboarding import OnboardingError, digest
 from tests.test_onboarding_target import receiving, files
 
 
+def test_legacy_history_tool_uses_exact_qualified_sdk_selection(tmp_path, monkeypatch):
+    """Guard-only fixture: real tiny install, not closed full-SDK startup proof."""
+    import json
+    import shutil
+    import sys
+    from clusterctl import onboarding_release, onboarding_sdk, onboarding_code_successor
+    from tests.test_onboarding_sdk import fixture
+    code, _old, home = fixture(tmp_path)
+    profile = json.loads((code/'release.json').read_bytes())['profile']
+    sdk = json.loads((code/'sdk/sdk.json').read_bytes())
+    revision, wheel_digest = 'b'*40, sdk['wheels'][0]['sha256']
+    sdk['matrix_commit'] = revision
+    (code/'sdk/sdk.json').write_text(json.dumps(sdk))
+    (code/onboarding_code_successor.MARKER).write_text(json.dumps(dict(
+        schema=onboarding_code_successor.QUALIFIED_SDK_SCHEMA,
+        matrix_commit=revision, matrix_wheel_sha256=wheel_digest)))
+    (code/'clusterctl').mkdir(exist_ok=True)
+    shutil.copyfile(Path(__file__).resolve().parents[1]/'clusterctl'/onboarding_peer.TOOL_MODULE,
+        code/'clusterctl'/onboarding_peer.TOOL_MODULE)
+    (code/'release.json').unlink()
+    for path in code.rglob('*'):
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    checksum = onboarding_release.seal(code, profile)
+    venv = onboarding_sdk.install(home,code,checksum,code_uid=os.geteuid(),
+        matrix_commit=revision,matrix_wheel_sha256=wheel_digest)
+    monkeypatch.setattr(sys, 'prefix', str(venv))
+    tool = onboarding_peer.native(code,uid=os.geteuid())
+    assert callable(tool.verify_identity)
+    receipt = venv.parent/'installation.json'
+    original = receipt.read_bytes()
+    wrong = json.loads(original)
+    wrong['matrix_commit'] = onboarding_sdk.MATRIX_COMMIT
+    receipt.write_text(json.dumps(wrong))
+    with pytest.raises(OnboardingError,match='qualified_native_peer_sdk_required'):
+        onboarding_peer.native(code,uid=os.geteuid())
+    receipt.write_bytes(original)
+    marker = code/onboarding_code_successor.MARKER
+    marker.write_text(json.dumps(dict(schema=onboarding_code_successor.QUALIFIED_SDK_SCHEMA,
+        matrix_commit=revision,matrix_wheel_sha256='f'*64)))
+    with pytest.raises(OnboardingError,match='onboarding_sdk_digest_mismatch'):
+        onboarding_peer.native(code,uid=os.geteuid())
+    marker.unlink()
+    with pytest.raises(OnboardingError,match='invalid_onboarding_sdk'):
+        onboarding_peer.native(code,uid=os.geteuid())
+
+
+def test_explicit_qualified_history_sdk_cannot_fall_back_to_installed_vcs(tmp_path, monkeypatch):
+    import json
+    import importlib.metadata
+    from clusterctl.onboarding_code_successor import MARKER, QUALIFIED_SDK_SCHEMA
+    (tmp_path/MARKER).write_text(json.dumps(dict(schema=QUALIFIED_SDK_SCHEMA,
+        matrix_commit='b'*40,matrix_wheel_sha256='c'*64)))
+    (tmp_path/MARKER).chmod(0o644)
+    monkeypatch.setattr(importlib.metadata, 'distribution', lambda *_:
+        pytest.fail('an explicit replacement SDK fell back to an unrelated installed VCS'))
+    with pytest.raises(OnboardingError,match='qualified_native_peer_sdk_required'):
+        onboarding_peer.native(tmp_path,uid=os.geteuid())
+
+
 @pytest.fixture
 def journey(tmp_path, monkeypatch):
     # Qualification must never reach Telegram or an external participant.

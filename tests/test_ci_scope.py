@@ -14,6 +14,12 @@ def test_loaded_startup_covers_actual_processes_and_preserves_broader_boundaries
     assert select(['clusterctl/onboarding_service.py', 'tests/test_source_bootstrap.py'], ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
     assert select(['clusterctl/onboarding_service.py', 'tests/test_onboarding_service.py',
         'clusterctl/owner_process.py', 'tests/test_receiving_process_observation.py'], ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    assert select(['clusterctl/onboarding_peer.py', 'tests/test_onboarding_peer.py',
+        'tests/test_source_bootstrap.py'], ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    native_only_profile, native_only_tests = select(
+        ['clusterctl/onboarding_peer.py', 'tests/test_onboarding_peer.py'], ROOT)
+    assert native_only_profile == 'peer' and 'tests/test_onboarding_peer.py' in native_only_tests
+    assert 'tests/test_onboarding_peer.py' in LOADED_STARTUP_TESTS
     assert select(['clusterctl/onboarding_service.py', 'tests/test_source_bootstrap.py',
         'tests/test_receiving_update_selection.py'], ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
     assert {'tests/test_receiving_process_observation.py', 'tests/test_onboarding_sdk.py',

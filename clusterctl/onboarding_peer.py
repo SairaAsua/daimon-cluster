@@ -28,21 +28,29 @@ TOOL_COMMIT = '63968130294c4db6eac51a94800a837f2c10bad5'
 def native(code: Path, *, uid: int = 0):
     import importlib.metadata
     import sys
-    from .onboarding_sdk import MATRIX_COMMIT
+    from .onboarding_code_successor import sdk_parameters
+    from .onboarding_sdk import MATRIX_COMMIT, verify
     # Entry points verify every installed wheel byte before importing Matrix.
     # The offline body has a pinned installation receipt, not VCS direct_url.
     # Host/source invocation instead retains the exact installed VCS guard.
     manifest = code / 'sdk/sdk.json'
     if manifest.exists():
-        sdk = json.loads(onboarding_release.regular(manifest, uid=uid))
+        # The selected code was verified before this helper. Its explicit
+        # successor pins the replacement wheel as well as the commit; legacy
+        # code retains the fixed pin. Validating historical peer publication
+        # must not reject an otherwise qualified SDK solely for being newer.
+        parameters = sdk_parameters(code, uid=uid)
+        sdk = verify(code, uid=uid, **parameters)
         prefix = Path(sys.prefix)
         receipt = json.loads(onboarding_release.regular(prefix.parent / 'installation.json', uid=os.geteuid()))
         expected = dict(schema='cluster-onboarding-sdk-installation/v1', sdk_digest=digest(sdk),
-            matrix_commit=MATRIX_COMMIT, wheel_count=len(sdk['wheels']))
-        if (sdk['matrix_commit'] != MATRIX_COMMIT or prefix.name != 'venv'
+            matrix_commit=sdk['matrix_commit'], wheel_count=len(sdk['wheels']))
+        if (prefix.name != 'venv'
                 or prefix.parent.name != digest(sdk) or receipt != expected):
             raise OnboardingError('qualified_native_peer_sdk_required')
     else:
+        if sdk_parameters(code, uid=uid):
+            raise OnboardingError('qualified_native_peer_sdk_required')
         installed = json.loads(importlib.metadata.distribution('daimon-matrix').read_text('direct_url.json') or '{}')
         if installed.get('vcs_info', {}).get('commit_id') != MATRIX_COMMIT:
             raise OnboardingError('qualified_native_peer_sdk_required')
