@@ -228,7 +228,7 @@ class Source:
         with self.writer():
             serve_views(self.views(), stop, ready_descriptor=ready_descriptor)
 
-    def observe(self, *, require_loaded: bool = False) -> dict:
+    def observe(self, *, require_loaded: bool = False, deadline_ns: int | None = None) -> dict:
         """Authenticate actual selected listeners without loading another runtime.
 
         A receiving controller must request loaded evidence explicitly. Legacy
@@ -247,16 +247,22 @@ class Source:
         connected = 'connection_observer' in getattr(LocalClient, '__dataclass_fields__', {})
         if require_loaded and not connected:
             raise OnboardingError('qualified_onboarding_client_required')
+        if deadline_ns is not None and 'deadline_ns' not in getattr(LocalClient, '__dataclass_fields__', {}):
+            raise OnboardingError('qualified_onboarding_deadline_client_required')
         with ExitStack() as ownership:
             observer = ownership.enter_context(ConnectedProcessObserver()) if connected else None
             options = {} if observer is None else {'connection_observer': observer}
             sockets = {}
 
             def client(path: Path, config_path: Path, key_path: Path):
+                remaining = 40 if deadline_ns is None else (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+                if remaining <= 0:
+                    raise OnboardingError('onboarding_observation_deadline_expired')
                 sockets[path] = path.lstat()
                 key = bytearray(onboarding_release.regular(key_path, uid=os.geteuid()))
                 config = ClientConfig.load(config_path, key)
-                return LocalClient(path, config, timeout_seconds=40, **options)
+                return LocalClient(path, config, timeout_seconds=40,
+                    **({} if deadline_ns is None else {'deadline_ns': deadline_ns}), **options)
 
             native = client(self.root / 'matrix.sock', self.root / 'client.json', self.root / 'client.key')
             base = native.runtime_status()[1]
@@ -315,6 +321,8 @@ class Source:
                 after = path.lstat()
                 if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
                     raise OnboardingError('onboarding_daemon_socket_changed')
+            if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
             return dict(running=True, applications=[] if group else self.settings['applications'], group=group,
                 base_runtime_status=base['result'], runtime_status=application_status,
                 process=None if observer is None else observer.process,
@@ -332,6 +340,7 @@ def main(argv=None) -> int:
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--ready-fd', type=int)
     parser.add_argument('--code-digest')
+    parser.add_argument('--code-owner', type=int, default=0)
     parser.add_argument('--observe', action='store_true')
     parser.add_argument('--require-loaded', action='store_true')
     control = parser.add_mutually_exclusive_group()
@@ -342,7 +351,9 @@ def main(argv=None) -> int:
     try:
         from . import onboarding_code_successor, onboarding_sdk
         code = Path(__file__).resolve().parents[1]
-        parameters = onboarding_code_successor.sdk_parameters(code)
+        if args.code_owner < 0:
+            raise OnboardingError('qualified_source_code_owner_required')
+        parameters = onboarding_code_successor.sdk_parameters(code, uid=args.code_owner)
         controlling = args.prepare_control is not None or args.apply_control is not None
         if (controlling and (args.observe or args.require_loaded or args.ready_fd is not None)
                 or (args.prepare_control is not None) != (args.control_command is not None)):
@@ -354,9 +365,9 @@ def main(argv=None) -> int:
         if parameters and args.code_digest is None:
             raise OnboardingError('qualified_onboarding_source_runtime_required')
         startup = (onboarding_sdk.qualified_startup(Path(sys.prefix), code,
-            code_digest=args.code_digest, **parameters) if parameters else None)
+            code_digest=args.code_digest, code_uid=args.code_owner, **parameters) if parameters else None)
         settings = being_seed._read(args.config)
-        source = Source(settings, code=code, code_digest=args.code_digest,
+        source = Source(settings, code=code, code_uid=args.code_owner, code_digest=args.code_digest,
                         qualified_startup=startup)
         if controlling:
             action = 'receiving-control-prepare' if args.prepare_control is not None else 'receiving-control-apply'

@@ -10,6 +10,7 @@ import re
 import stat
 import subprocess
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -58,10 +59,11 @@ class MatrixUserService:
             raise OnboardingError('qualified_matrix_service_required')
         self.unit = being_seed._path(unit)
         self.run = run or self._run
+        self._injected_run = run is not None
 
-    def _run(self, argv: list[str]) -> str:
+    def _run(self, argv: list[str], *, timeout_seconds: float = 45) -> str:
         try:
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=45, check=False,
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_seconds, check=False,
                 env={'PATH': os.defpath, 'LANG': 'C.UTF-8',
                      'XDG_RUNTIME_DIR': '/run/user/' + str(os.geteuid()),
                      'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/' + str(os.geteuid()) + '/bus'})
@@ -71,11 +73,21 @@ class MatrixUserService:
         except (OSError, subprocess.TimeoutExpired):
             raise OnboardingError('receiving_matrix_manager_unavailable') from None
 
-    def inspect(self) -> dict:
+    def _execute(self, argv: list[str], deadline_ns: int | None = None) -> str:
+        remaining = 45 if deadline_ns is None else (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+        if remaining <= 0:
+            raise OnboardingError('receiving_matrix_deadline_expired')
+        # Injected runners are explicit test seams, not a bounded live route.
+        result = self.run(argv) if self._injected_run else self._run(argv, timeout_seconds=min(45, remaining))
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('receiving_matrix_deadline_expired')
+        return result
+
+    def inspect(self, *, deadline_ns: int | None = None) -> dict:
         fields = {'Id', 'ActiveState', 'SubState', 'MainPID', 'ControlGroup', 'InvocationID',
                   'FragmentPath', 'DropInPaths', 'KillMode', 'Result'}
-        raw = self.run(['systemctl', '--user', 'show', self.unit.name,
-                        '--property=' + ','.join(sorted(fields)), '--no-pager'])
+        raw = self._execute(['systemctl', '--user', 'show', self.unit.name,
+                        '--property=' + ','.join(sorted(fields)), '--no-pager'], deadline_ns)
         lines = [line.split('=', 1) for line in raw.splitlines()]
         if (any(len(row) != 2 for row in lines) or len(lines) != len(fields)
                 or {row[0] for row in lines} != fields):
@@ -106,9 +118,9 @@ class MatrixUserService:
         return dict(process=process, control_group=values['ControlGroup'],
                     invocation_id=values['InvocationID'])
 
-    def start(self) -> None:
-        self.run(['systemctl', '--user', 'daemon-reload'])
-        self.run(['systemctl', '--user', '--no-block', 'start', self.unit.name])
+    def start(self, *, deadline_ns: int | None = None) -> None:
+        self._execute(['systemctl', '--user', 'daemon-reload'], deadline_ns)
+        self._execute(['systemctl', '--user', '--no-block', 'start', self.unit.name], deadline_ns)
 
 
 def code_command(python: Path, code: Path, module: str, arguments: list[str]) -> list[str]:

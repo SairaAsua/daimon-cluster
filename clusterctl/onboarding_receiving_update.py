@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 import uuid
 from contextlib import ExitStack
@@ -271,6 +272,66 @@ def freeze_source_bootstrap(source, manager) -> dict:
             visibility_envelope=json.loads(visibility))
 
 
+def prepare_source_bootstrap(source, *, home: Path, code: Path, code_digest: str,
+                             config: Path, manifest_path: Path, manifest_digest: str,
+                             transaction: Path, expires_at_ms: int, code_uid: int = 0,
+                             manifest_uid: int = 0) -> dict:
+    """Prepare the exact supported Source command before managed interruption.
+
+    Only owner-protected release/configuration inputs select executable code.
+    This installs an immutable SDK, not custody, authority or a running service.
+    """
+    from .onboarding_code_successor import sdk_parameters
+    for path in (home, code, config, manifest_path, transaction):
+        if not path.is_absolute() or '..' in path.parts:
+            raise OnboardingError('receiving_bootstrap_binding_conflict')
+    if being_seed._read(config) != source.settings:
+        raise OnboardingError('receiving_bootstrap_binding_conflict')
+    onboarding_release.regular(code / 'clusterctl/onboarding_source.py', uid=code_uid)
+    bundle = being_seed._read(source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+    group = source_bootstrap_group(source, bundle)
+    checked = prepare_sdk(home, code, code_digest, manifest_path, manifest_digest,
+        being_ref=bundle['manifest']['being_ref'], embodiment_id=bundle['local_origin']['embodiment_id'],
+        code_uid=code_uid, manifest_uid=manifest_uid)
+    parameters = sdk_parameters(code, uid=code_uid)
+    if parameters != dict(matrix_commit=checked['matrix_revision'], matrix_wheel_sha256=checked['matrix_wheel_sha256']):
+        raise OnboardingError('qualified_onboarding_source_runtime_required')
+    venv = onboarding_sdk.observe(home, code, code_uid=code_uid, **parameters)
+    imports = onboarding_sdk.runtime_imports(venv, code, code_uid=code_uid, **parameters)
+    argv = onboarding_sdk.runtime_command(venv, imports, code, 'clusterctl.onboarding_source',
+        ['--config', str(config), '--code-digest', code_digest, '--code-owner', str(code_uid)])
+    return dict(transaction=str(transaction), expires_at_ms=expires_at_ms, argv=argv,
+        qualification=dict(home=str(home), code=str(code), code_digest=code_digest, code_uid=code_uid, group=group,
+            config=str(config), manifest_path=str(manifest_path), manifest_uid=manifest_uid, prepared=checked))
+
+
+def source_bootstrap_group(source, bundle: dict) -> dict:
+    """Freeze the existing signed group selector and external publications."""
+    from types import SimpleNamespace
+    from .onboarding_peer import observed_group
+    from daimon_matrix.canonical import unb64url
+    from daimon_matrix.operator_rebirth import authority_from_runtime_bundle
+    from daimon_matrix.messaging_config import _public_identity, verify_public_binding, _read_verified_publication
+    group = observed_group(SimpleNamespace(root=source.outputs, package=source.outputs),
+        bundle, socket_root=source.outputs)
+    if group is None:
+        raise OnboardingError('qualified_onboarding_group_required')
+    authority = authority_from_runtime_bundle(bundle)
+    identity = _public_identity(authority, bundle['local_origin'], bundle['runtime_id'],
+        bundle['runtime_label'], time.time_ns() // 1000000)
+    key = unb64url(authority.credentials[identity['credential_id']]['body']['signing_key']['public'])
+    application, metadata, publication = _read_verified_publication(Path(group['application']),
+        lambda value, binding: verify_public_binding(identity, key, value, binding))
+    paths = dict(selection=source.outputs / 'tribe/selection.json',
+        publication=Path(group['application']) / 'publication.json',
+        application=metadata / 'application.json', binding=metadata / 'binding.json', visibility=Path(group['visibility']))
+    visibility = being_seed._read(Path(group['visibility']), limit=being_seed.MAX_SELECTION)
+    return dict(selected=group, application_sha256=digest(application), publication_sha256=digest(publication),
+        installation_sha256=digest(visibility['document']),
+        hashes={key: hashlib.sha256(onboarding_release.regular(
+        path, uid=os.geteuid())).hexdigest() for key, path in paths.items()})
+
+
 class SourceBootstrapController:
     """Journaled first controlled adoption through the existing Source owner.
 
@@ -298,12 +359,56 @@ class SourceBootstrapController:
         if (not isinstance(frozen, dict) or not isinstance(candidate, dict)
                 or frozen.get('settings_sha256') != digest(self.source.settings)
                 or frozen.get('unit') != str(self.manager.unit)
-                or set(candidate) != {'transaction', 'expires_at_ms', 'argv'}):
+                or set(candidate) not in ({'transaction', 'expires_at_ms', 'argv'},
+                    {'transaction', 'expires_at_ms', 'argv', 'qualification'})):
             raise OnboardingError('receiving_bootstrap_binding_conflict')
         transaction = Path(candidate['transaction'])
-        if transaction.parent != self.source.root.parent or transaction == self.source.root:
+        if (not transaction.is_absolute() or '..' in transaction.parts
+                or transaction.parent != self.source.root.parent or transaction == self.source.root):
             raise OnboardingError('receiving_bootstrap_binding_conflict')
         return row, frozen, candidate
+
+    def _qualify_candidate(self, row: dict, candidate: dict) -> dict:
+        from .onboarding_code_successor import sdk_parameters
+        qualification = candidate['qualification']
+        if (not isinstance(qualification, dict) or set(qualification) != {
+                'home', 'code', 'code_digest', 'code_uid', 'config', 'manifest_path', 'manifest_uid', 'prepared', 'group'}
+                or any(type(qualification[key]) is not int or qualification[key] < 0
+                       for key in ('code_uid', 'manifest_uid'))
+                or being_seed._read(Path(qualification['config'])) != self.source.settings):
+            raise OnboardingError('receiving_bootstrap_binding_conflict')
+        if any(not Path(qualification[key]).is_absolute() or '..' in Path(qualification[key]).parts
+               for key in ('home', 'code', 'config', 'manifest_path')):
+            raise OnboardingError('receiving_bootstrap_binding_conflict')
+        code = Path(qualification['code'])
+        onboarding_release.regular(code / 'clusterctl/onboarding_source.py', uid=qualification['code_uid'])
+        bundle = being_seed._read(self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+        if source_bootstrap_group(self.source, bundle) != qualification['group']:
+            raise OnboardingError('receiving_bootstrap_group_changed')
+        prepared = qualification['prepared']
+        predecessor = row['expected_precondition']['source_bootstrap']['predecessor']['server']
+        if (prepared.get('being_ref'), prepared.get('embodiment_id')) != (
+                predecessor['being_ref'], predecessor['embodiment_id']):
+            raise OnboardingError('receiving_bootstrap_binding_conflict')
+        checked = preflight(code, qualification['code_digest'], Path(qualification['manifest_path']),
+            row['intent']['runtime_call']['manifest_digest'], being_ref=prepared['being_ref'],
+            embodiment_id=prepared['embodiment_id'], code_uid=qualification['code_uid'],
+            manifest_uid=qualification['manifest_uid'])
+        if any(prepared.get(key) != value for key, value in checked.items()):
+            raise OnboardingError('receiving_bootstrap_candidate_changed')
+        parameters = sdk_parameters(code, uid=qualification['code_uid'])
+        if parameters != dict(matrix_commit=checked['matrix_revision'], matrix_wheel_sha256=checked['matrix_wheel_sha256']):
+            raise OnboardingError('qualified_onboarding_source_runtime_required')
+        venv = onboarding_sdk.observe(Path(qualification['home']), code, code_uid=qualification['code_uid'], **parameters)
+        if onboarding_sdk.interpreter(venv) != checked['reader']['contract']['interpreter']:
+            raise OnboardingError('incompatible_receiving_interpreter')
+        imports = onboarding_sdk.runtime_imports(venv, code, code_uid=qualification['code_uid'], **parameters)
+        argv = onboarding_sdk.runtime_command(venv, imports, code, 'clusterctl.onboarding_source',
+            ['--config', qualification['config'], '--code-digest', qualification['code_digest'],
+             '--code-owner', str(qualification['code_uid'])])
+        if argv != candidate['argv'] or prepared.get('prepared') is not True:
+            raise OnboardingError('receiving_bootstrap_candidate_changed')
+        return checked
 
     def _record(self, key: str, value: dict):
         row, _, _ = self._row()
@@ -316,9 +421,9 @@ class SourceBootstrapController:
         self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
                              expected_runtime_observation=row['runtime_observation'])
 
-    def _stopped(self, frozen: dict, candidate: dict):
+    def _stopped(self, frozen: dict, candidate: dict, *, deadline_ns: int | None = None):
         from .onboarding_service import entrypoint
-        inspected = self.manager.inspect()
+        inspected = self.manager.inspect() if deadline_ns is None else self.manager.inspect(deadline_ns=deadline_ns)
         values = inspected['manager']
         original = frozen['service']['unit_sha256']
         current = onboarding_release.regular(self.manager.unit, uid=os.geteuid())
@@ -458,6 +563,8 @@ class SourceBootstrapController:
             raise OnboardingError('receiving_bootstrap_invalid_wait')
         with self.journal.mutation_lock(self.operation_id), selection_lock(self.manager.unit):
             row, frozen, candidate = self._row()
+            if 'qualification' in candidate:
+                self._qualify_candidate(row, candidate)
             if row['state'] == 'planned':
                 self.journal.advance(self.operation_id, 'runtime-dispatching')
             previous = (row['runtime_observation'] or {}).get('source_bootstrap', {}).get('quiesced')
@@ -529,6 +636,8 @@ class SourceBootstrapController:
         from .onboarding_service import select_entrypoint, selection_lock
         with self.journal.mutation_lock(self.operation_id), selection_lock(self.manager.unit):
             row, frozen, candidate = self._row()
+            if 'qualification' in candidate:
+                self._qualify_candidate(row, candidate)
             observations = (row['runtime_observation'] or {}).get('source_bootstrap', {})
             if observations.get('quiesced', {}).get('exit_observed') is not True:
                 raise OnboardingError('receiving_bootstrap_quiescence_required')
@@ -607,6 +716,116 @@ class SourceBootstrapController:
             self._record('unit_selected', selected)
             return dict(schema='cluster-source-bootstrap-publication/v1', operation_id=self.operation_id,
                         published=True, loaded_readiness='unobserved')
+
+    def start(self, *, timeout_seconds: float = 30) -> dict:
+        """Start the selected exact command and retain actual controlled load.
+
+        Older publication-only operations cannot use this method. The supported
+        prepared candidate is requalified before the first lifecycle effect.
+        A retained load never authorizes replacing/restarting a later process.
+        """
+        from daimon_matrix.client import ClientError
+        from .onboarding_service import selection_lock
+        from .owner_process import observe_process_exit
+        if type(timeout_seconds) not in {int, float} or not 0 < timeout_seconds <= 60:
+            raise OnboardingError('receiving_bootstrap_invalid_wait')
+        with self.journal.mutation_lock(self.operation_id), selection_lock(self.manager.unit):
+            row, frozen, candidate = self._row()
+            if 'qualification' not in candidate:
+                raise OnboardingError('qualified_bootstrap_candidate_required')
+            checked = self._qualify_candidate(row, candidate)
+            observations = (row['runtime_observation'] or {}).get('source_bootstrap', {})
+            selected = observations.get('unit_selected')
+            if (not isinstance(selected, dict) or selected.get('selected') is not True
+                    or observations.get('capability_published') is None
+                    or observations.get('visibility_published') is None):
+                raise OnboardingError('receiving_bootstrap_publication_required')
+            # Artifact verification precedes the lifecycle budget. Local file
+            # hashing/fsync scheduling is not a hard realtime guarantee; check
+            # the shared monotonic deadline before dispatch and acceptance.
+            deadline_ns = time.monotonic_ns() + int(timeout_seconds * 1_000_000_000)
+            inspected = self.manager.inspect(deadline_ns=deadline_ns)
+            if inspected['unit_sha256'] != selected['selected_sha256']:
+                raise OnboardingError('receiving_bootstrap_candidate_changed')
+            retained = observations.get('controlled_loaded')
+            if retained is None:
+                if not observe_process_exit(frozen['predecessor']['process']):
+                    raise OnboardingError('receiving_bootstrap_exit_unobserved')
+                intent = dict(unit_sha256=selected['selected_sha256'], candidate_sha256=digest(candidate))
+                self._record('start_intent', intent)
+                if inspected['manager']['ActiveState'] == 'inactive':
+                    self._stopped(frozen, candidate, deadline_ns=deadline_ns)
+                    with self.source.writer():
+                        actual_bundle = hashlib.sha256(onboarding_release.regular(
+                            self.source.root / 'runtime.json', uid=os.geteuid())).hexdigest()
+                        actual_visibility = hashlib.sha256(onboarding_release.regular(
+                            self.source.visibility, uid=os.geteuid())).hexdigest()
+                        if (actual_bundle != observations['capability_published']['runtime_sha256']
+                                or actual_visibility != observations['visibility_published']['installation_sha256']
+                                or source_bootstrap_group(self.source, being_seed._read(
+                                    self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION))
+                                   != candidate['qualification']['group']):
+                            raise OnboardingError('receiving_bootstrap_publication_changed')
+                    # Named-unit scope, including recovery after lost dispatch
+                    # confirmation. An active candidate is only observed.
+                    try:
+                        self.manager.start(deadline_ns=deadline_ns)
+                    except (OnboardingError, OSError):
+                        if self.manager.inspect(deadline_ns=deadline_ns)['manager']['ActiveState'] not in {'active', 'activating'}:
+                            raise
+            while True:
+                if time.monotonic_ns() >= deadline_ns:
+                    raise OnboardingError('receiving_bootstrap_start_unobserved')
+                inspected = self.manager.inspect(deadline_ns=deadline_ns)
+                if inspected['unit_sha256'] != selected['selected_sha256']:
+                    raise OnboardingError('receiving_bootstrap_candidate_changed')
+                if inspected['manager']['ActiveState'] == 'active':
+                    try:
+                        actual = self.source.observe(require_loaded=True, deadline_ns=deadline_ns)
+                    except (ClientError, OSError):
+                        if retained is not None:
+                            raise OnboardingError('receiving_bootstrap_loaded_process_changed') from None
+                    else:
+                        if time.monotonic_ns() >= deadline_ns:
+                            raise OnboardingError('receiving_bootstrap_start_unobserved')
+                        scope = self.manager.bind_process(actual['process'], inspected)
+                        base = actual['base_runtime_status']['loaded_runtime']
+                        application = actual['runtime_status']['loaded_application']
+                        startup = base['qualified_startup']
+                        gate = actual['runtime_status'].get('receiving', {}).get('channels', {}).get('tribe')
+                        expected = dict(code_digest=checked['code_digest'], matrix_commit=checked['matrix_revision'],
+                            sdk_digest=checked['sdk_digest'], matrix_wheel_sha256=checked['matrix_wheel_sha256'],
+                            reader=checked['reader'])
+                        group = candidate['qualification']['group']
+                        if (any(startup.get(key) != value for key, value in expected.items())
+                                or startup.get('process_id') != actual['process']['pid']
+                                or base.get('runtime_bundle_sha256') != observations['capability_published']['runtime_sha256']
+                                or actual.get('responder_association') != 'same-connection'
+                                or not isinstance(gate, dict) or gate.get('controlled') is not True
+                                or gate.get('process_id') != actual['process']['pid']):
+                            raise OnboardingError('receiving_bootstrap_loaded_candidate_conflict')
+                        if (actual.get('group') != group['selected']
+                                or any(application.get(key) != group[key]
+                                       for key in ('application_sha256', 'publication_sha256'))
+                                or application.get('visibility', {}).get('installation_sha256') != group['installation_sha256']):
+                            raise OnboardingError('receiving_bootstrap_loaded_group_conflict')
+                        normalized = dict(process=actual['process'], manager=scope, loaded_runtime=base,
+                            loaded_application={key: value for key, value in application.items() if key != 'reader_gates'})
+                        if retained is not None:
+                            if any(retained.get(key) != value for key, value in normalized.items()):
+                                raise OnboardingError('receiving_bootstrap_loaded_process_changed')
+                            return retained
+                        if gate.get('phase') != 'unselected' or gate.get('readers') != []:
+                            raise OnboardingError('receiving_bootstrap_initial_gate_conflict')
+                        result = dict(schema='cluster-source-bootstrap-controlled-load/v1', **normalized,
+                            initial_gate=gate, receiving_readiness='unobserved')
+                        self._record('controlled_loaded', result)
+                        return result
+                elif retained is not None:
+                    raise OnboardingError('receiving_bootstrap_loaded_process_changed')
+                if time.monotonic_ns() >= deadline_ns:
+                    raise OnboardingError('receiving_bootstrap_start_unobserved')
+                time.sleep(min(0.1, max(0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)))
 
 
 class CohortController:

@@ -26,7 +26,7 @@ class FakeManager:
         self.stops = 0
         self.invocation = 'fixture-invocation'
 
-    def inspect(self):
+    def inspect(self, **_):
         return dict(unit_sha256=hashlib.sha256(self.unit.read_bytes()).hexdigest(), manager={
             'ActiveState': 'active' if self.live else 'inactive',
             'SubState': 'running' if self.live else 'dead', 'MainPID': '123' if self.live else '0',
@@ -278,3 +278,205 @@ def test_forked_child_cannot_reuse_parent_selection_ownership(tmp_path):
                 os._exit(3)
         _, status = os.waitpid(child, 0)
         assert os.waitstatus_to_exitcode(status) == 0
+
+
+def prepared_start_fixture(fixture, monkeypatch):
+    """Explicit fake loaded observations; no actual SDK/startup claim."""
+    source, manager, journal, identifier, _ = fixture
+    previous = journal.get(identifier)
+    group = dict(selected={'channel_id': 'tribe'}, application_sha256='7'*64,
+        publication_sha256='8'*64, installation_sha256='9'*64)
+    candidate = {**previous['intended_transition']['source_bootstrap'], 'qualification': {'group': group}}
+    monkeypatch.setattr('clusterctl.onboarding_receiving_update.source_bootstrap_group', lambda *_: group)
+    row = plan_update(journal, manifest_digest='a'*64, target='source-bootstrap:qualified-fixture',
+        expected_precondition=previous['expected_precondition'],
+        intended_transition={'source_bootstrap': candidate}, audit_identity={'actor': 'fixture'})
+    controller = SourceBootstrapController(journal, row['operation_id'], source, manager)
+    checked = dict(code_digest='b'*64, matrix_revision='c'*40, sdk_digest='d'*64,
+        matrix_wheel_sha256='e'*64, reader={'fixture': 'reader'})
+    monkeypatch.setattr(controller, '_qualify_candidate', lambda *_: checked)
+    selected = hashlib.sha256(manager.unit.read_bytes()).hexdigest()
+    controller._record('unit_selected', dict(selected=True, selected_sha256=selected))
+    published_bundle = hashlib.sha256((source.root / 'runtime.json').read_bytes()).hexdigest()
+    controller._record('capability_published', dict(runtime_sha256=published_bundle))
+    controller._record('visibility_published', dict(installation_sha256=hashlib.sha256(source.visibility.read_bytes()).hexdigest()))
+    monkeypatch.setattr('clusterctl.owner_process.observe_process_exit', lambda *_: True)
+    process = dict(pid=456, uid=1, start_ticks=3, boot_id='fixture')
+    gate = dict(controlled=True, process_id=456, process_instance_id='new-instance', phase='unselected', readers=[])
+    startup = dict(code_digest=checked['code_digest'], matrix_commit=checked['matrix_revision'],
+        sdk_digest=checked['sdk_digest'], matrix_wheel_sha256=checked['matrix_wheel_sha256'],
+        reader=checked['reader'], process_id=456)
+    actual = dict(process=process, group=group['selected'], responder_association='same-connection',
+        base_runtime_status=dict(loaded_runtime=dict(qualified_startup=startup, runtime_bundle_sha256=published_bundle)),
+        runtime_status=dict(loaded_application=dict(application_sha256='7'*64, publication_sha256='8'*64,
+            visibility={'installation_sha256': '9'*64}, reader_gates=gate),
+            receiving=dict(channels=dict(tribe=gate))))
+    manager.starts = 0
+    manager.live = False
+    inspect = manager.inspect
+    def observed_manager(**_):
+        value = inspect()
+        value['manager']['MainPID'] = '456' if manager.live else '0'
+        return value
+    monkeypatch.setattr(manager, 'inspect', observed_manager)
+    def start(**_):
+        manager.starts += 1
+        manager.live = True
+    monkeypatch.setattr(manager, 'start', start, raising=False)
+    monkeypatch.setattr(source, 'observe', lambda **_: copy.deepcopy(actual), raising=False)
+    return controller, manager, actual
+
+
+def test_publication_only_operation_cannot_start_an_unqualified_command(fixture):
+    source, manager, journal, identifier, _ = fixture
+    with pytest.raises(OnboardingError, match='qualified_bootstrap_candidate_required'):
+        SourceBootstrapController(journal, identifier, source, manager).start()
+    assert manager.stops == 0
+
+
+def test_start_retains_controlled_load_without_positive_readiness_and_no_restart(fixture, monkeypatch):
+    controller, manager, actual = prepared_start_fixture(fixture, monkeypatch)
+    result = controller.start()
+    assert result['initial_gate']['phase'] == 'unselected'
+    assert result['receiving_readiness'] == 'unobserved'
+    assert controller.start() == result and manager.starts == 1
+    # Current normal control can move on; retained startup evidence is stable.
+    actual['runtime_status']['receiving']['channels']['tribe']['phase'] = 'revoke'
+    assert controller.start() == result and manager.starts == 1
+    manager.live = False
+    with pytest.raises(OnboardingError, match='loaded_process_changed'):
+        controller.start()
+    assert manager.starts == 1
+
+
+def test_lost_start_reply_observes_existing_candidate_without_second_start(fixture, monkeypatch):
+    controller, manager, _ = prepared_start_fixture(fixture, monkeypatch)
+    start = manager.start
+    def lost(**arguments):
+        start(**arguments)
+        raise OSError('fixture lost start reply')
+    monkeypatch.setattr(manager, 'start', lost)
+    assert controller.start()['process']['pid'] == 456
+    assert controller.start()['process']['pid'] == 456 and manager.starts == 1
+
+
+@pytest.mark.parametrize('correction', ['sdk', 'bundle', 'gate'])
+def test_wrong_actual_candidate_or_preselected_gate_cannot_become_load_proof(fixture, monkeypatch, correction):
+    controller, manager, actual = prepared_start_fixture(fixture, monkeypatch)
+    if correction == 'sdk':
+        actual['base_runtime_status']['loaded_runtime']['qualified_startup']['matrix_commit'] = '0'*40
+    elif correction == 'bundle':
+        actual['base_runtime_status']['loaded_runtime']['runtime_bundle_sha256'] = '0'*64
+    else:
+        actual['runtime_status']['receiving']['channels']['tribe']['phase'] = 'select'
+    with pytest.raises(OnboardingError, match='loaded_candidate_conflict|initial_gate_conflict'):
+        controller.start()
+    row = controller.journal.get(controller.operation_id)
+    assert 'controlled_loaded' not in row['runtime_observation']['source_bootstrap']
+    assert manager.starts == 1
+
+
+def test_candidate_requalification_failure_precedes_any_start(fixture, monkeypatch):
+    controller, manager, _ = prepared_start_fixture(fixture, monkeypatch)
+    def changed(*_):
+        raise OnboardingError('receiving_bootstrap_candidate_changed')
+    monkeypatch.setattr(controller, '_qualify_candidate', changed)
+    with pytest.raises(OnboardingError, match='candidate_changed'):
+        controller.start()
+    assert manager.starts == 0
+
+
+@pytest.mark.parametrize('part', ['runtime', 'visibility'])
+def test_changed_stopped_publication_cannot_start_uncontrolled_legacy(fixture, monkeypatch, part):
+    controller, manager, _ = prepared_start_fixture(fixture, monkeypatch)
+    path = controller.source.root / 'runtime.json' if part == 'runtime' else controller.source.visibility
+    path.write_bytes(path.read_bytes() + b' ')
+    with pytest.raises(OnboardingError, match='publication_changed'):
+        controller.start()
+    assert manager.starts == 0
+
+
+@pytest.mark.parametrize('part', ['publication_sha256', 'installation_sha256'])
+def test_unrelated_controlled_group_does_not_satisfy_the_frozen_selection(fixture, monkeypatch, part):
+    controller, manager, actual = prepared_start_fixture(fixture, monkeypatch)
+    application = actual['runtime_status']['loaded_application']
+    if part == 'installation_sha256':
+        application['visibility'][part] = '0'*64
+    else:
+        application[part] = '0'*64
+    with pytest.raises(OnboardingError, match='loaded_group_conflict'):
+        controller.start()
+    assert 'controlled_loaded' not in controller.journal.get(controller.operation_id)['runtime_observation']['source_bootstrap']
+    assert manager.starts == 1
+
+
+def test_deadline_expiry_after_start_cannot_record_a_late_loaded_success(fixture, monkeypatch):
+    controller, manager, _ = prepared_start_fixture(fixture, monkeypatch)
+    from clusterctl import onboarding_receiving_update
+    current = [1_000_000_000]
+    monkeypatch.setattr(onboarding_receiving_update.time, 'monotonic_ns', lambda: current[0])
+    start = manager.start
+    def slow(**arguments):
+        start(**arguments)
+        current[0] += 2_000_000_000
+    monkeypatch.setattr(manager, 'start', slow)
+    with pytest.raises(OnboardingError, match='start_unobserved'):
+        controller.start(timeout_seconds=1)
+    assert 'controlled_loaded' not in controller.journal.get(controller.operation_id)['runtime_observation']['source_bootstrap']
+    assert manager.starts == 1
+
+
+def test_expired_manager_budget_dispatches_no_command(tmp_path):
+    unit = tmp_path / 'daimon-matrix-fixture.service'
+    calls = []
+    manager = MatrixUserService(unit, run=lambda command: calls.append(command))
+    with pytest.raises(OnboardingError, match='deadline_expired'):
+        manager.start(deadline_ns=0)
+    assert calls == []
+
+
+def test_actual_prepared_command_is_rechecked_before_quiescence(tmp_path, fixture, monkeypatch):
+    import json
+    from clusterctl import onboarding_code_successor, onboarding_release
+    from clusterctl.onboarding_receiving_update import prepare_source_bootstrap
+    # This case qualifies the real SDK/command path; signed group selection
+    # has its separate composition coverage and is an explicit seam here.
+    monkeypatch.setattr('clusterctl.onboarding_receiving_update.source_bootstrap_group',
+        lambda *_: dict(selected={'channel_id': 'tribe'}, hashes={'fixture': 'group'}))
+    from tests.test_receiving_update_preflight import fixture as sdk_fixture, manifest_digest, BEING, BODY, REVISION
+    workspace = tmp_path / 'sdk-fixture'
+    workspace.mkdir()
+    code, _, home, path, manifest, marker = sdk_fixture(workspace)
+    (code / 'clusterctl').mkdir(exist_ok=True)
+    (code / 'clusterctl').chmod(0o755)
+    (code / 'clusterctl/onboarding_source.py').write_text('raise RuntimeError("never execute during preparation")\n')
+    (code / onboarding_code_successor.MARKER).write_text(json.dumps(dict(
+        schema=onboarding_code_successor.QUALIFIED_SDK_SCHEMA, matrix_commit=REVISION,
+        matrix_wheel_sha256=manifest['artifacts']['matrix_sdk'])))
+    (code / onboarding_code_successor.MARKER).chmod(0o644)
+    (code / 'clusterctl/onboarding_source.py').chmod(0o644)
+    profile = json.loads((code / 'release.json').read_bytes())['profile']
+    (code / 'release.json').unlink()
+    checksum = onboarding_release.seal(code, profile)
+    manifest['required_receivers'][0]['artifacts']['receiving_code'] = checksum
+    path.write_text(json.dumps(manifest))
+    source, manager, journal, identifier, _ = fixture
+    bundle = being_seed._read(source.root / 'runtime.json')
+    bundle.update(manifest={'being_ref': BEING}, local_origin={'embodiment_id': BODY})
+    being_seed._write(source.root / 'runtime.json', bundle)
+    config = tmp_path / 'source-config.json'
+    being_seed._write(config, source.settings)
+    candidate = prepare_source_bootstrap(source, home=home, code=code, code_digest=checksum,
+        config=config, manifest_path=path, manifest_digest=manifest_digest(manifest),
+        transaction=source.root.parent / 'prepared-upgrade', expires_at_ms=12345,
+        code_uid=os.geteuid(), manifest_uid=os.geteuid())
+    original = journal.get(identifier)
+    before = copy.deepcopy(original['expected_precondition'])
+    before['source_bootstrap']['predecessor']['server'] = dict(being_ref=BEING, embodiment_id=BODY)
+    candidate['argv'].append('--unapproved-option')
+    row = plan_update(journal, manifest_digest=manifest_digest(manifest), target='source-bootstrap:real-candidate-fixture',
+        expected_precondition=before, intended_transition=dict(source_bootstrap=candidate),
+        audit_identity={'actor': 'fixture'})
+    with pytest.raises(OnboardingError, match='candidate_changed'):
+        SourceBootstrapController(journal, row['operation_id'], source, manager).quiesce()
+    assert manager.stops == 0 and not marker.exists()
