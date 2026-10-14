@@ -18,6 +18,7 @@ import tempfile
 import time
 import zipfile
 import uuid
+from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -402,6 +403,118 @@ class GuestGroupClient:
         return self._call('receiving-control-apply', control_file=path)
 
 
+class SourceGroupClient:
+    """Host coordination through the approved receiving owner's closed CLI.
+
+    Private SDK/config/control files are never opened by the root coordinator.
+    subprocess drops all supplementary groups and the selected UID/GID before
+    executing the private interpreter. Locators/selection come from the protected
+    operation, not model or peer content. A timeout retains uncertain effects.
+    """
+
+    def __init__(self, *, config: Path, config_sha256: str, owner_uid: int, owner_gid: int,
+                 code: Path, code_digest: str, code_uid: int, venv: Path, imports: Path,
+                 root: Path, socket_path: Path, timeout_seconds: float = 30):
+        if (os.geteuid() != 0 or any(type(item) is not int or item <= 0 for item in (owner_uid, owner_gid))
+                or type(code_uid) is not int or code_uid < 0
+                or type(timeout_seconds) not in {int, float} or not 0 < timeout_seconds <= 60
+                or any(not isinstance(value, str) or re.fullmatch('[0-9a-f]{64}', value) is None
+                       for value in (config_sha256, code_digest))
+                or any(not path.is_absolute() or '..' in path.parts
+                       for path in (config, code, venv, imports, root, socket_path))):
+            raise OnboardingError('receiving_source_owner_binding_required')
+        self.config, self.config_sha256 = config, config_sha256
+        self.owner_uid, self.owner_gid = owner_uid, owner_gid
+        self.code, self.code_digest, self.code_uid = code, code_digest, code_uid
+        self.venv, self.imports = venv, imports
+        self.root, self.socket = root, socket_path
+        self.timeout_seconds = timeout_seconds
+        self.deadline_ns: int | None = None
+
+    def _call(self, arguments: list[str], *, command: dict | None = None) -> dict:
+        deadline = time.monotonic_ns() + int(self.timeout_seconds * 1_000_000_000)
+        if self.deadline_ns is not None:
+            deadline = min(deadline, self.deadline_ns)
+        if deadline <= time.monotonic_ns():
+            raise OnboardingError('receiving_owner_deadline_expired')
+        info = self.config.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077
+                or (info.st_uid, info.st_gid) != (self.owner_uid, self.owner_gid)):
+            raise OnboardingError('receiving_source_owner_binding_required')
+        payload = None if command is None else json.dumps(command, separators=(',', ':'))
+        if payload is not None and len(payload.encode()) > being_seed.MAX_SELECTION:
+            raise OnboardingError('invalid_receiving_control_request')
+        argv = onboarding_sdk.runtime_command(self.venv, self.imports, self.code, 'clusterctl.onboarding_source', [
+            '--config', str(self.config), '--expected-config-sha256', self.config_sha256,
+            '--code-owner', str(self.code_uid), '--code-digest', self.code_digest,
+            '--observation-deadline-ns', str(deadline), *arguments])
+        remaining = (deadline - time.monotonic_ns()) / 1_000_000_000
+        if remaining <= 0:
+            raise OnboardingError('receiving_owner_deadline_expired')
+        try:
+            # user/group/extra_groups are applied by subprocess BEFORE exec.
+            # Do not stat, prepare or import this private interpreter as root.
+            result = subprocess.run(argv, input=payload, text=True, capture_output=True,
+                timeout=remaining,
+                user=self.owner_uid, group=self.owner_gid, extra_groups=(),
+                env={'PATH': os.defpath, 'LANG': 'C.UTF-8', 'PYTHONDONTWRITEBYTECODE': '1'})
+            if time.monotonic_ns() >= deadline:
+                raise OnboardingError('receiving_owner_deadline_expired')
+            if result.returncode or len(result.stdout.encode()) > being_seed.MAX_SELECTION:
+                raise OnboardingError('receiving_source_owner_unavailable')
+            value = json.loads(result.stdout)
+            if not isinstance(value, dict) or 'error' in value:
+                raise OnboardingError('receiving_source_owner_unavailable')
+            after = self.config.lstat()
+            if (after.st_dev, after.st_ino, after.st_uid, after.st_gid, after.st_mode) != (
+                    info.st_dev, info.st_ino, info.st_uid, info.st_gid, info.st_mode):
+                raise OnboardingError('receiving_source_configuration_changed')
+            if time.monotonic_ns() >= deadline:
+                raise OnboardingError('receiving_owner_deadline_expired')
+            return value
+        except OnboardingError:
+            raise
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            raise OnboardingError('receiving_source_owner_unavailable') from None
+
+    def _observation(self, value: dict) -> dict:
+        gate, status, group = value.get('gate'), value.get('runtime_status'), value.get('group')
+        if (not isinstance(gate, dict) or gate.get('controlled') is not True
+                or not isinstance(status, dict) or not isinstance(value.get('process'), dict)
+                or type(value['process'].get('pid')) is not int or value['process']['pid'] <= 0
+                or not isinstance(value.get('server'), dict) or not value['server']
+                or not isinstance(group, dict) or group.get('socket') != str(self.socket)
+                or gate.get('process_id') != value['process'].get('pid')
+                or status.get('local_origin') != value.get('server')
+                or not isinstance(status.get('loaded_runtime'), dict)
+                or status['loaded_runtime'].get('process_id') != value['process'].get('pid')
+                or not isinstance(status.get('loaded_application'), dict)):
+            raise OnboardingError('receiving_source_owner_observation_conflict')
+        return value
+
+    def status(self) -> dict:
+        return self._observation(self._call(['--owner-status']))
+
+    def qualified_identity(self, *, expires_at_ms: int, require_admitted: bool = False) -> dict:
+        if require_admitted:
+            raise OnboardingError('receiving_source_guest_admission_unsupported')
+        if type(expires_at_ms) is not int or not time.time_ns() // 1_000_000 < expires_at_ms < 2**53:
+            raise OnboardingError('receiving_identity_horizon_expired')
+        value = self._observation(self._call(['--qualified-identity', '--identity-expires-at-ms', str(expires_at_ms)]))
+        verified = value.get('verified_identity')
+        if (not isinstance(verified, dict) or type(verified.get('expires_at_ms')) is not int
+                or verified['expires_at_ms'] <= time.time_ns() // 1_000_000
+                or verified['expires_at_ms'] > expires_at_ms):
+            raise OnboardingError('receiving_source_owner_observation_conflict')
+        return value
+
+    def prepare_control(self, command: dict, path: Path) -> dict:
+        return self._call(['--prepare-control', str(path), '--control-command', '-'], command=command)
+
+    def apply_control(self, path: Path) -> dict:
+        return self._call(['--apply-control', str(path)])
+
+
 def owner_control(root: Path, group: dict, observed: dict, action: str, path: Path,
                   *, command: dict | None = None, status_key: str = 'runtime_status',
                   deadline_ns: int | None = None) -> dict:
@@ -438,7 +551,7 @@ def _owner_identity(observed: dict) -> tuple[str, str]:
     return being, body
 
 
-def freeze_senders(owners: dict[str, OwnerGroupClient], *, tribe_ref: str) -> list[dict]:
+def freeze_senders(owners: Mapping[str, OwnerGroupClient | GuestGroupClient | SourceGroupClient], *, tribe_ref: str) -> list[dict]:
     """Observe the required sender vector before planning the update intent."""
     senders = []
     identities = set()
@@ -1490,7 +1603,8 @@ class CohortController:
     communication acceptance remains independently observed evidence.
     """
 
-    def __init__(self, journal, operation_id: str, owners: dict[str, OwnerGroupClient]):
+    def __init__(self, journal, operation_id: str,
+                 owners: Mapping[str, OwnerGroupClient | GuestGroupClient | SourceGroupClient]):
         self.journal = journal
         self.operation_id = operation_id
         self.owners = dict(owners)

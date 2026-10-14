@@ -18,7 +18,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import being_seed, onboarding_peer, onboarding_release
-from .onboarding import OnboardingError, private_directory
+from .onboarding import OnboardingError, digest, private_directory
 from .onboarding_views import serve_views
 
 
@@ -329,10 +329,30 @@ class Source:
                 responder_association='same-connection' if observer is not None else 'legacy-probe',
                 receiving_readiness='unobserved')
 
-    def receiving_control(self, action: str, path: Path, *, command: dict | None = None) -> dict:
+    def receiving_observation(self, *, expires_at_ms: int | None = None,
+                              deadline_ns: int | None = None) -> dict:
+        from .onboarding_receiving_update import OwnerGroupClient
+        observed = self.observe(require_loaded=True,
+            **({} if deadline_ns is None else {'deadline_ns': deadline_ns}))
+        with OwnerGroupClient(self.root, Path(observed['group']['socket']), deadline_ns=deadline_ns) as owner:
+            current = (owner.status() if expires_at_ms is None else
+                owner.qualified_identity(expires_at_ms=expires_at_ms, require_admitted=False))
+            if (current['process'] != observed['process']
+                    or current['server'] != observed['runtime_status']['local_origin']
+                    or any(current['runtime_status'].get(key) != observed['runtime_status'].get(key)
+                           for key in ('loaded_runtime', 'loaded_application'))):
+                raise OnboardingError('receiving_source_process_changed')
+            return {**current, 'group': observed['group']}
+
+    def receiving_control(self, action: str, path: Path, *, command: dict | None = None,
+                          deadline_ns: int | None = None) -> dict:
         from .onboarding_receiving_update import owner_control
-        observed = self.observe(require_loaded=True)
-        return owner_control(self.root, observed['group'], observed, action, path, command=command)
+        observed = (self.observe(require_loaded=True) if deadline_ns is None else
+            self.observe(require_loaded=True, deadline_ns=deadline_ns))
+        if deadline_ns is None:
+            return owner_control(self.root, observed['group'], observed, action, path, command=command)
+        return owner_control(self.root, observed['group'], observed, action, path,
+            command=command, deadline_ns=deadline_ns)
 
 
 def main(argv=None) -> int:
@@ -347,18 +367,47 @@ def main(argv=None) -> int:
     control.add_argument('--prepare-control', type=Path)
     control.add_argument('--apply-control', type=Path)
     parser.add_argument('--control-command', type=Path)
+    parser.add_argument('--owner-status', action='store_true')
+    parser.add_argument('--qualified-identity', action='store_true')
+    parser.add_argument('--identity-expires-at-ms', type=int)
+    parser.add_argument('--observation-deadline-ns', type=int)
+    parser.add_argument('--expected-config-sha256')
     args = parser.parse_args(argv)
     try:
         from . import onboarding_code_successor, onboarding_sdk
         code = Path(__file__).resolve().parents[1]
         if args.code_owner < 0:
             raise OnboardingError('qualified_source_code_owner_required')
-        parameters = onboarding_code_successor.sdk_parameters(code, uid=args.code_owner)
         controlling = args.prepare_control is not None or args.apply_control is not None
+        receiving = args.owner_status or args.qualified_identity or controlling
+        if (sum((args.observe, args.owner_status, args.qualified_identity, controlling)) > 1
+                or args.qualified_identity != (args.identity_expires_at_ms is not None)
+                or args.identity_expires_at_ms is not None and not 0 < args.identity_expires_at_ms < 2**53
+                or (args.owner_status or args.qualified_identity) and (args.ready_fd is not None or args.require_loaded)
+                or args.expected_config_sha256 is not None and not receiving
+                or args.observation_deadline_ns is not None and not receiving):
+            raise OnboardingError('invalid_receiving_control_request')
+        if (args.owner_status or args.qualified_identity) and args.observation_deadline_ns is None:
+            args.observation_deadline_ns = time.monotonic_ns() + 30_000_000_000
+        def accept_deadline():
+            if args.observation_deadline_ns is not None and time.monotonic_ns() >= args.observation_deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
+        if args.observation_deadline_ns is not None and not 0 < args.observation_deadline_ns - time.monotonic_ns() <= 60_000_000_000:
+            raise OnboardingError('onboarding_observation_deadline_expired')
         if (controlling and (args.observe or args.require_loaded or args.ready_fd is not None)
                 or (args.prepare_control is not None) != (args.control_command is not None)):
             raise OnboardingError('invalid_receiving_control_request')
-        if controlling and not parameters:
+        stdin_command = None
+        if args.control_command == Path('-'):
+            raw = sys.stdin.buffer.read(being_seed.MAX_SELECTION + 1)
+            if len(raw) > being_seed.MAX_SELECTION:
+                raise OnboardingError('invalid_receiving_control_request')
+            stdin_command = json.loads(raw)
+            if not isinstance(stdin_command, dict):
+                raise OnboardingError('invalid_receiving_control_request')
+        accept_deadline()
+        parameters = onboarding_code_successor.sdk_parameters(code, uid=args.code_owner)
+        if receiving and not parameters:
             raise OnboardingError('qualified_onboarding_source_observer_required')
         if args.require_loaded and (not args.observe or not parameters):
             raise OnboardingError('qualified_onboarding_source_observer_required')
@@ -366,15 +415,32 @@ def main(argv=None) -> int:
             raise OnboardingError('qualified_onboarding_source_runtime_required')
         startup = (onboarding_sdk.qualified_startup(Path(sys.prefix), code,
             code_digest=args.code_digest, code_uid=args.code_owner, **parameters) if parameters else None)
+        accept_deadline()
         settings = being_seed._read(args.config)
+        if args.expected_config_sha256 is not None and digest(settings) != args.expected_config_sha256:
+            raise OnboardingError('receiving_source_configuration_changed')
+        accept_deadline()
         source = Source(settings, code=code, code_uid=args.code_owner, code_digest=args.code_digest,
                         qualified_startup=startup)
         if controlling:
             action = 'receiving-control-prepare' if args.prepare_control is not None else 'receiving-control-apply'
             path = args.prepare_control if args.prepare_control is not None else args.apply_control
-            command = (None if args.control_command is None
-                       else being_seed._read(args.control_command, limit=being_seed.MAX_SELECTION))
-            print(json.dumps(source.receiving_control(action, path, command=command)))
+            if args.control_command == Path('-'):
+                command = stdin_command
+            else:
+                command = (None if args.control_command is None
+                    else being_seed._read(args.control_command, limit=being_seed.MAX_SELECTION))
+            accept_deadline()
+            result = source.receiving_control(action, path, command=command,
+                **({} if args.observation_deadline_ns is None else {'deadline_ns': args.observation_deadline_ns}))
+            accept_deadline()
+            print(json.dumps(result))
+            return 0
+        if args.owner_status or args.qualified_identity:
+            result = source.receiving_observation(expires_at_ms=args.identity_expires_at_ms,
+                deadline_ns=args.observation_deadline_ns)
+            accept_deadline()
+            print(json.dumps(result))
             return 0
         if args.observe:
             if args.ready_fd is not None:
