@@ -4,6 +4,8 @@ import ast
 import inspect
 import multiprocessing
 import socket
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -115,3 +117,44 @@ def test_guest_control_cli_refuses_invalid_modes_before_owner_state(tmp_path, mo
                 '--plan', str(tmp_path / 'plan.json'), '--genesis', str(tmp_path / 'genesis.json')]
     assert onboarding_target.main([*required, *arguments]) == 1
     assert capsys.readouterr().out == '{"error": "native_onboarding_target_refused"}\n'
+
+
+def test_pinned_exit_wait_distinguishes_running_exited_and_closed_observer():
+    from clusterctl.owner_process import ProcessPresence
+    child = subprocess.Popen([sys.executable, '-I', '-c',
+        'import sys; print("READY", flush=True); sys.stdin.readline()'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        assert child.stdout.readline() == b'READY\n'
+        process = dict(uid=os.geteuid(), pid=child.pid,
+            start_ticks=int((Path('/proc') / str(child.pid) / 'stat').read_text().rpartition(')')[2].split()[19]),
+            boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
+        with ProcessPresence(process) as presence:
+            assert presence.wait_for_exit(0) is False
+            child.stdin.write(b'exit\n')
+            child.stdin.flush()
+            assert presence.wait_for_exit(5) is True
+            child.wait(timeout=5)
+            assert presence.wait_for_exit(0) is True
+        with pytest.raises(PresenceError, match='exit_observation_rejected'):
+            presence.wait_for_exit(0)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)
+        child.stdin.close()
+        child.stdout.close()
+
+
+@pytest.mark.parametrize('timeout', [True, -1, 61, 2**2048, float('nan'), float('inf')])
+def test_exit_observation_rejects_invalid_bound_without_signal(timeout):
+    with ConnectedProcessObserver() as observer:
+        left, right = socket.socketpair()
+        try:
+            with observer(left):
+                pass
+            with pytest.raises(PresenceError, match='exit_observation_rejected'):
+                observer.wait_for_exit(timeout)
+        finally:
+            left.close()
+            right.close()

@@ -62,7 +62,7 @@ class OwnerGroupClient:
         options = {'connection_observer': self._observer, 'timeout_seconds': 40}
         return LocalClient(self.socket, config, **options)
 
-    def status(self) -> dict:
+    def _observe_status(self) -> dict:
         before = self.socket.lstat()
         client = self._client('status')
         response = client.runtime_status()[1]
@@ -81,13 +81,33 @@ class OwnerGroupClient:
         loaded = status.get('loaded_runtime')
         if loaded is not None and loaded.get('process_id') != process['pid']:
             raise OnboardingError('receiving_group_responder_conflict')
-        gate = status.get('receiving', {}).get('channels', {}).get('tribe')
+        return dict(process=process, server=response['server'], runtime_status=status,
+                    receiving_readiness='unobserved')
+
+    def base_status(self) -> dict:
+        """Pin an authenticated predecessor without claiming loaded readiness.
+
+        The client-side observer also works with the unchanged predecessor API.
+        No reader gate, selected group or candidate load is inferred from this.
+        """
+        if self.socket != self.root / 'matrix.sock':
+            raise OnboardingError('receiving_base_socket_required')
+        observed = self._observe_status()
+        return dict(schema='cluster-receiving-base-observation/v1', **observed)
+
+    def wait_for_exit(self, timeout_seconds: float) -> bool:
+        """Observe the already-authenticated peer; lifecycle ownership is separate."""
+        if self._observer is None:
+            raise OnboardingError('receiving_owner_scope_required')
+        return self._observer.wait_for_exit(timeout_seconds)
+
+    def status(self) -> dict:
+        observed = self._observe_status()
+        gate = observed['runtime_status'].get('receiving', {}).get('channels', {}).get('tribe')
         if (not isinstance(gate, dict) or gate.get('controlled') is not True
-                or gate.get('process_id') != process['pid']):
+                or gate.get('process_id') != observed['process']['pid']):
             raise OnboardingError('receiving_group_control_required')
-        return dict(schema='cluster-receiving-owner-observation/v1', process=process,
-            server=response['server'], runtime_status=status, gate=gate,
-            receiving_readiness='unobserved')
+        return dict(schema='cluster-receiving-owner-observation/v1', gate=gate, **observed)
 
     def prepare_control(self, command: dict, path: Path) -> dict:
         """Persist one exact native request before attempting its effect."""

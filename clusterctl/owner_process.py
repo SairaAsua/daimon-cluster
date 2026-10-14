@@ -7,6 +7,7 @@ import struct
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 import select
+import math
 from typing import Any
 import uuid
 
@@ -75,6 +76,33 @@ class ProcessPresence:
             os.close(self.descriptor)
             self.descriptor = -1
 
+    def wait_for_exit(self, timeout_seconds: float) -> bool:
+        """Bounded observation of this pinned process, never a stop or a signal.
+
+        False means the wait ended without exit proof. An invalid/unavailable
+        observation raises; a generic verify failure is never treated as exit.
+        """
+        if (type(timeout_seconds) not in {int, float}
+                or not 0 <= timeout_seconds <= 60 or self.descriptor < 0):
+            raise PresenceError('owner_process_exit_observation_rejected')
+        poller = select.poll()
+        poller.register(self.descriptor, select.POLLIN | select.POLLERR | select.POLLHUP)
+        def exited(events) -> bool:
+            if any(mask & (select.POLLERR | select.POLLNVAL) for _fd, mask in events):
+                raise PresenceError('owner_process_exit_observation_rejected')
+            return any(mask & (select.POLLIN | select.POLLHUP) for _fd, mask in events)
+        if exited(poller.poll(math.ceil(timeout_seconds * 1000))):
+            return True
+        try:
+            self.verify()
+        except PresenceError:
+            # Exit may race the timeout. Only the pinned kernel descriptor,
+            # not the exception or a vanished path, supplies the exit proof.
+            if exited(poller.poll(0)):
+                return True
+            raise
+        return False
+
     def __enter__(self) -> ProcessPresence:
         return self
 
@@ -133,6 +161,11 @@ class ConnectedProcessObserver:
         if not self._active or self._presence is None:
             raise PresenceError("owner_process_observation_rejected")
         self._presence.verify()
+
+    def wait_for_exit(self, timeout_seconds: float) -> bool:
+        if not self._active or self._presence is None:
+            raise PresenceError('owner_process_exit_observation_rejected')
+        return self._presence.wait_for_exit(timeout_seconds)
 
     def __exit__(self, *_args: Any) -> None:
         self._active = False
