@@ -158,6 +158,21 @@ if sys.argv[3] == 'import-drift':
     sys.path.append('/unqualified-import-drift')
 ''')
         archive.writestr('daimon_matrix/native_egress.py', '# Synthetic egress.\n')
+        # Model only the third-party proxy contract. The actual cryptography
+        # wheel and complete Source are qualified separately at receiving time.
+        archive.writestr('cryptography/__init__.py', '# Synthetic provenance fixture.\n')
+        archive.writestr('cryptography/utils.py', '''from types import ModuleType
+class _ModuleWithDeprecations(ModuleType):
+    def __init__(self, original):
+        super().__init__(original.__name__)
+        self.__dict__['_module'] = original
+    def __getattr__(self, name):
+        return getattr(self._module, name)
+''')
+        archive.writestr('cryptography/wrapper_fixture.py', '''import sys
+from cryptography.utils import _ModuleWithDeprecations
+sys.modules[__name__] = _ModuleWithDeprecations(sys.modules[__name__])
+''')
         codecs = Path(__file__).parent / 'fixtures/receiving_reader'
         for name in ('canonical.py', 'release_compatibility.py'):
             archive.writestr('daimon_matrix/' + name, (codecs / name).read_bytes())
@@ -187,6 +202,39 @@ elif mode == 'package-path':
 elif mode == 'cluster-path':
     import clusterctl
     clusterctl.__spec__.submodule_search_locations.append('/unqualified-cluster-search')
+elif mode == 'native-alias-no-owner':
+    import types
+    sys.modules['_openssl.lib'] = types.ModuleType('_openssl.lib')
+elif mode == 'native-alias-stdlib':
+    sys.modules['_openssl.lib'] = json
+elif mode in ('native-owner-stdlib', 'native-owner-builtin'):
+    import types
+    from importlib.machinery import ExtensionFileLoader, ModuleSpec
+    name = 'cryptography.hazmat.bindings._rust'
+    filename = json.__file__ if mode == 'native-owner-stdlib' else 'built-in'
+    native = types.ModuleType(name)
+    native.__spec__ = ModuleSpec(name, ExtensionFileLoader(name, filename), origin=filename)
+    if mode == 'native-owner-stdlib':
+        native.__file__ = filename
+    native._openssl = types.ModuleType('_openssl')
+    native._openssl.lib = types.ModuleType('_openssl.lib')
+    sys.modules[name] = native
+    sys.modules['_openssl'] = native._openssl
+    sys.modules['_openssl.lib'] = native._openssl.lib
+elif mode in ('valid-wrapper', 'wrapper-path', 'wrapper-nonmodule', 'wrapper-spec-name', 'wrapper-outside-tree'):
+    import cryptography.wrapper_fixture as wrapped
+    original = wrapped._module
+    if mode == 'wrapper-path':
+        wrapped.__dict__['__path__'] = ['/unqualified-wrapper-search']
+    elif mode == 'wrapper-nonmodule':
+        from types import SimpleNamespace
+        wrapped.__dict__['_module'] = SimpleNamespace(__name__=original.__name__, __file__=original.__file__, __spec__=original.__spec__)
+    elif mode == 'wrapper-spec-name':
+        original.__spec__.name = 'cryptography.unrelated'
+    elif mode == 'wrapper-outside-tree':
+        from importlib.util import spec_from_file_location
+        original.__file__ = json.__file__
+        original.__spec__ = spec_from_file_location(original.__name__, json.__file__)
 try:
     observation = onboarding_sdk.qualified_startup(Path(sys.prefix), code,
         code_digest=fingerprint, code_uid=os.geteuid())
@@ -211,7 +259,9 @@ except OnboardingError as error:
                                        + ').write_text("executed")\n')
     snapshots = []
     for mode in ('valid', 'valid', 'path-tail', 'installed-module', 'installed-dependency',
-                 'package-path', 'cluster-path', 'import-drift', 'stdlib-escape'):
+                 'package-path', 'cluster-path', 'import-drift', 'stdlib-escape',
+                 'native-alias-no-owner', 'native-alias-stdlib', 'native-owner-stdlib', 'native-owner-builtin',
+                 'valid-wrapper', 'wrapper-path', 'wrapper-nonmodule', 'wrapper-spec-name', 'wrapper-outside-tree'):
         command = onboarding_sdk.runtime_command(venv, imports, code,
             'clusterctl.startup_probe', [str(code), fingerprint, mode,
                 str(ordinary_dependency if mode == 'stdlib-escape' else installed_module)])
@@ -219,7 +269,7 @@ except OnboardingError as error:
                                 env={'PATH': os.defpath, 'LANG': 'C.UTF-8',
                                      'LD_LIBRARY_PATH': str(Path(sys.base_prefix) / 'lib')})
         observed = json.loads(result.stdout)
-        assert observed['ok'] is (mode == 'valid'), result.stdout
+        assert observed['ok'] is (mode in {'valid', 'valid-wrapper'}), (mode, result.stdout)
         if observed['ok']:
             snapshot = observed['observation']
             assert snapshot['process_id'] == observed['pid'] != os.getpid()

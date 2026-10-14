@@ -291,6 +291,7 @@ def qualified_startup(venv: Path, code: Path, *, code_digest: str, code_uid: int
     status-time wheel verification or model-visible qualification override.
     """
     import importlib
+    from types import ModuleType
     release = onboarding_release.verify(code, code_digest, uid=code_uid)
     imports, sdk, files = _runtime_imports(venv, code, code_uid=code_uid,
         matrix_commit=matrix_commit, matrix_wheel_sha256=matrix_wheel_sha256)
@@ -312,9 +313,37 @@ def qualified_startup(venv: Path, code: Path, *, code_digest: str, code_uid: int
     def origins() -> None:
         # Check preloaded packages before importing the selected Matrix. A
         # correct sys.path must never launder an installed/preloaded module.
+        # Cryptography's native extension publishes two CFFI objects without
+        # file/spec metadata. Accept only its actual exports; the extension
+        # itself still undergoes the full inventory/origin checks below.
+        native = sys.modules.get('cryptography.hazmat.bindings._rust')
+        native_spec = getattr(native, '__spec__', None)
+        exports = {}
+        if (native_spec is not None
+                and isinstance(native_spec.loader, importlib.machinery.ExtensionFileLoader)
+                and native_spec.name == 'cryptography.hazmat.bindings._rust'):
+            openssl = getattr(native, '_openssl', None)
+            exports = {'_openssl': openssl, '_openssl.lib': getattr(openssl, 'lib', None)}
+        wrappers = getattr(sys.modules.get('cryptography.utils'), '_ModuleWithDeprecations', None)
         for name, module in list(sys.modules.items()):
+            if name in {'_openssl', '_openssl.lib'}:
+                if module is None or module is not exports.get(name):
+                    raise OnboardingError('qualified_runtime_module_required')
+                continue
+            wrapped = wrappers is not None and type(module) is wrappers
+            if wrapped:
+                original = getattr(module, '_module', None)
+                if (not name.startswith('cryptography.') or not isinstance(original, ModuleType)
+                        or getattr(module, '__name__', None) != name
+                        or getattr(original, '__name__', None) != name
+                        or getattr(getattr(original, '__spec__', None), 'name', None) != name
+                        or getattr(module, '__file__', None) != getattr(original, '__file__', None)
+                        or getattr(module, '__path__', ()) != getattr(original, '__path__', ())):
+                    raise OnboardingError('qualified_runtime_module_required')
+                module = original
             managed = (name == 'clusterctl' or name.startswith('clusterctl.')
                     or name == 'daimon_matrix' or name.startswith('daimon_matrix.')
+                    or name in {'cryptography.hazmat.bindings._rust', 'cryptography.utils'} or wrapped
                     or name == '__main__' and getattr(getattr(module, '__spec__', None),
                                                    'name', '').startswith('clusterctl.'))
             spec = getattr(module, '__spec__', None)
