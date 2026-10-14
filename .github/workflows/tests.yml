@@ -312,6 +312,8 @@ jobs:
           clusterctl/onboarding_credential.py
           clusterctl/onboarding_holder_backup.py
           clusterctl/onboarding_sdk.py
+          clusterctl/onboarding_receiving_update.py
+          tests/test_receiving_update_preflight.py
           clusterctl/onboarding_target.py
           clusterctl/onboarding_existing.py
           clusterctl/onboarding_enrollment.py

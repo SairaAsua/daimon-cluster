@@ -40,6 +40,30 @@ and resume must use those retained vectors under actual selection/writer locks.
 Preparation itself does not select code, accept authority, load a receiver or
 enable egress; actual adapters and readiness/communication remain #232 work.
 
+`onboarding_receiving_update.preflight` consumes that operation's approved external
+Matrix release manifest and exact receiving-code digest. It verifies the manifest
+before using it to select executable bytes, checks the shared wheel and exact
+per-receiver code selection, and executes only the qualified pure contract modules
+in a hook-free `-I -S` process. The candidate package initializer, installed site
+hooks and dependencies never execute in this probe. The manifest is kept outside
+the code artifact to avoid a circular pair of content hashes. A new SDK revision
+requires both its revision and exact approved wheel hash; a version label alone
+cannot relax the historical pin guard.
+
+`prepare_sdk` then uses the existing offline installer and actual installation
+receipt. A hook-free probe through the returned generation's actual interpreter
+must match the assessed implementation/version, including on a completed retry;
+a compatible pure-Python wheel does not prove that this interpreter is current.
+Mismatch refuses preparation without replacing the completed generation.
+Exact retries observe the same content-addressed generation and preserve
+old environments. Both return `receiving_readiness: unobserved`; this checks only
+code/SDK integrity and candidate support. Selected worker/owner-client/Telecodex
+roles are explicitly listed as unverified, not silently counted as qualified.
+Actual current-selection/roster CAS, authority/application/store preflight,
+adoption, service load, egress and communication remain separate controller stages.
+Neither helper opens native state, rotates identity, restarts services, or modifies
+the independent provider account and native conversations.
+
 Retain the actual currently selected Telegram artifact. Where Telegram already
 has its own qualified successor, keep that independent selection. If building a
 combined V3 successor, pass its current qualified artifact explicitly: building
