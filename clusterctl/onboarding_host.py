@@ -287,7 +287,8 @@ class HostBackend:
         self.input_cache = input_cache if input_cache is not None else onboarding_input.VerificationCache()
 
     @staticmethod
-    def _run(argv: list[str], *, timeout_seconds: float | None = None) -> str:
+    def _run(argv: list[str], *, timeout_seconds: float | None = None,
+             input_data: str | None = None) -> str:
         # No shell, no source-supplied program, and never leak captured stderr.
         # Preserving tens of thousands of source files includes durable fsyncs.
         # Give only the typed context installation a larger finite window;
@@ -298,9 +299,13 @@ class HostBackend:
         if timeout_seconds is not None and (not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 65):
             raise OnboardingError('receiving_host_deadline_required')
         timeout = timeout_seconds if timeout_seconds is not None else (7200 if context_install else 1800)
+        if input_data is not None and (not isinstance(input_data, str)
+                                      or len(input_data.encode()) > being_seed.MAX_SELECTION):
+            raise OnboardingError('invalid_receiving_control_request')
         try:
+            options: dict = {} if input_data is None else {'input': input_data}
             result = subprocess.run(["incus", *argv], capture_output=True, text=True,
-                                    timeout=timeout, check=False)
+                                    timeout=timeout, check=False, **options)
         except (OSError, subprocess.TimeoutExpired):
             raise OnboardingError("onboarding_host_operation_failed") from None
         if result.returncode:
@@ -937,7 +942,8 @@ class HostBackend:
                      bootstrap_request: dict | None = None,
                      bootstrap_ready_sha256: str | None = None,
                      bootstrap_timeout_seconds: float | None = None,
-                     control_file: Path | None = None, control_command: Path | None = None) -> dict:
+                     control_file: Path | None = None, control_command: Path | None = None,
+                     control_value: dict | None = None, identity_expires_at_ms: int | None = None) -> dict:
         """Probe prepared receiving code without changing active selectors.
 
         Candidate calls require the already verified public read-only mount.
@@ -947,6 +953,11 @@ class HostBackend:
         deadline_ns = None
         bootstrapping = action in {'receiving-bootstrap-freeze', 'receiving-bootstrap-stage', 'receiving-bootstrap-publish'}
         controlling = action in {'receiving-control-prepare', 'receiving-control-apply'}
+        if (action == 'receiving-identity') != (identity_expires_at_ms is not None):
+            raise OnboardingError('invalid_receiving_identity_request')
+        if identity_expires_at_ms is not None and (type(identity_expires_at_ms) is not int
+                or not 0 < identity_expires_at_ms < 2**53):
+            raise OnboardingError('invalid_receiving_identity_request')
         if bootstrapping:
             if (candidate is None or bootstrap_timeout_seconds is None
                     or observation_timeout_seconds is not None
@@ -958,16 +969,21 @@ class HostBackend:
         elif any(item is not None for item in (bootstrap_request, bootstrap_ready_sha256, bootstrap_timeout_seconds)):
             raise OnboardingError('invalid_receiving_bootstrap_request')
         if controlling:
-            if control_file is None or (action == 'receiving-control-prepare') != (control_command is not None):
+            if (control_file is None
+                    or (action == 'receiving-control-prepare') != (control_command is not None or control_value is not None)
+                    or control_command is not None and control_value is not None
+                    or control_value is not None and not isinstance(control_value, dict)):
                 raise OnboardingError('invalid_receiving_control_request')
-        elif control_file is not None or control_command is not None:
+        elif control_file is not None or control_command is not None or control_value is not None:
             raise OnboardingError('invalid_receiving_control_request')
         if observation_timeout_seconds is not None:
-            if (action not in {'running', 'admitted-running'}
+            if (action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply'}
                     or not math.isfinite(observation_timeout_seconds)
                     or not 0 < observation_timeout_seconds <= 60):
                 raise OnboardingError('receiving_host_deadline_required')
             deadline_ns = time.monotonic_ns() + int(observation_timeout_seconds * 1_000_000_000)
+        if action == 'receiving-identity' and observation_timeout_seconds is None:
+            raise OnboardingError('receiving_host_deadline_required')
         if require_loaded and action not in {'running', 'admitted-running'}:
             raise OnboardingError('qualified_onboarding_target_observer_required')
         if self.config.custody is None or self.config.custody_grants is None:
@@ -980,7 +996,7 @@ class HostBackend:
         if candidate is not None:
             if (action not in {'sdk-observe', 'sdk-prepare', 'observe', 'running', 'admitted-running',
                     'receiving-control-prepare', 'receiving-control-apply', 'receiving-bootstrap-freeze',
-                    'receiving-bootstrap-stage', 'receiving-bootstrap-publish'}
+                    'receiving-bootstrap-stage', 'receiving-bootstrap-publish', 'receiving-identity'}
                     or profile is not None or peer_packet is not None or peer_being_ref is not None
                     or not onboarding_code_successor.sdk_parameters(candidate[0], uid=os.geteuid())
                     or not self._mounted(plan, mounts, deadline_ns=deadline_ns)):
@@ -1013,6 +1029,14 @@ class HostBackend:
             arguments += ['--control-file', str(control_file)]
         if control_command is not None:
             arguments += ['--control-command', str(control_command)]
+        input_data = None
+        if control_value is not None:
+            input_data = json.dumps(control_value, sort_keys=True, separators=(',', ':'))
+            if len(input_data.encode()) > being_seed.MAX_SELECTION:
+                raise OnboardingError('invalid_receiving_control_request')
+            arguments += ['--control-command', '-']
+        if identity_expires_at_ms is not None:
+            arguments += ['--identity-expires-at-ms', str(identity_expires_at_ms)]
         if bootstrap_request is not None:
             encoded = json.dumps(bootstrap_request, sort_keys=True, separators=(',', ':'))
             if len(encoded.encode()) > 131072:
@@ -1031,8 +1055,9 @@ class HostBackend:
         command = ["exec", self.instance(plan), "--user", "1000", "--group", "1000",
             "--env", "HOME=/home/agent", "--", *code_command(Path('/usr/bin/python3'), runtime_code,
                 'clusterctl.onboarding_target', arguments)]
-        result = (self._dispatch(plan, command) if deadline_ns is None
-            else self._dispatch(plan, command, timeout_seconds=remaining, deadline_ns=deadline_ns))
+        dispatch: dict = {} if input_data is None else {'input_data': input_data}
+        result = (self._dispatch(plan, command, **dispatch) if deadline_ns is None
+            else self._dispatch(plan, command, timeout_seconds=remaining, deadline_ns=deadline_ns, **dispatch))
         value = json.loads(result)
         if not isinstance(value, dict):
             raise OnboardingError('invalid_onboarding_observation')
@@ -1147,7 +1172,7 @@ class HostBackend:
             marker['schema'] == onboarding_code_successor.TELEGRAM_SCHEMA and 'sdk_digest' in marker)
 
     def _dispatch(self, plan: dict, argv: list[str], *, timeout_seconds: float | None = None,
-                  deadline_ns: int | None = None) -> str:
+                  deadline_ns: int | None = None, input_data: str | None = None) -> str:
         # A revoked plan stops before the next concrete effect, including
         # revocation while an earlier long Incus operation was in flight.
         if not self.authorize(plan, digest(plan)):
@@ -1157,4 +1182,7 @@ class HostBackend:
             if remaining <= 0:
                 raise OnboardingError('receiving_host_deadline_expired')
             timeout_seconds = remaining if timeout_seconds is None else min(remaining, timeout_seconds)
-        return self.run(argv) if timeout_seconds is None else self.run(argv, timeout_seconds=timeout_seconds)
+        options: dict = {} if timeout_seconds is None else {'timeout_seconds': timeout_seconds}
+        if input_data is not None:
+            options['input_data'] = input_data
+        return self.run(argv, **options)

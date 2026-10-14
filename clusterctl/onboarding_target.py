@@ -602,18 +602,37 @@ class Target:
                 receiving_readiness='unobserved',
                 responder_association='same-connection' if connected else 'legacy-probe')
 
-    def receiving_control(self, action: str, path: Path, *, command: dict | None = None) -> dict:
+    def receiving_control(self, action: str, path: Path, *, command: dict | None = None,
+                          deadline_ns: int | None = None) -> dict:
         """Use the selected admitted group; preserve exact retained controls."""
         from .onboarding_receiving_update import owner_control
-        observed = self.running(admitted=True, require_loaded=True)
-        return owner_control(self.package / 'runtime', observed['group'], observed,
-            action, path, command=command, status_key='group_runtime_status')
+        observed = self.running(admitted=True, require_loaded=True, deadline_ns=deadline_ns)
+        result = owner_control(self.package / 'runtime', observed['group'], observed,
+            action, path, command=command, status_key='group_runtime_status', deadline_ns=deadline_ns)
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('onboarding_observation_deadline_expired')
+        return result
+
+    def qualified_receiving_identity(self, *, expires_at_ms: int, deadline_ns: int) -> dict:
+        from .onboarding_receiving_update import OwnerGroupClient
+        observed = self.running(admitted=True, require_loaded=True, deadline_ns=deadline_ns)
+        with OwnerGroupClient(self.package / 'runtime', Path(observed['group']['socket']),
+                              deadline_ns=deadline_ns) as owner:
+            current = owner.qualified_identity(expires_at_ms=expires_at_ms, require_admitted=True)
+            if (current['process'] != observed['process'] or current['server'] != observed['origin']
+                    or any(current['runtime_status'].get(key) != observed['group_runtime_status'].get(key)
+                           for key in ('loaded_runtime', 'loaded_application'))):
+                raise OnboardingError('receiving_control_process_changed')
+            if time.monotonic_ns() >= deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
+            return {**current, 'admission_parent': observed['admission_parent'],
+                    'plan_digest': observed['plan_digest'], 'responder_association': 'same-connection'}
 
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "receiving-control-prepare", "receiving-control-apply", "receiving-bootstrap-freeze", "receiving-bootstrap-stage", "receiving-bootstrap-publish"))
+    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "receiving-control-prepare", "receiving-control-apply", "receiving-identity", "receiving-bootstrap-freeze", "receiving-bootstrap-stage", "receiving-bootstrap-publish"))
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--genesis", type=Path, required=True)
@@ -634,14 +653,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ready-fd", type=int)
     parser.add_argument('--require-loaded', action='store_true')
     parser.add_argument('--observation-timeout-seconds', type=float)
+    parser.add_argument('--observation-deadline-ns', type=int)
     parser.add_argument('--control-file', type=Path)
     parser.add_argument('--control-command', type=Path)
+    parser.add_argument('--identity-expires-at-ms', type=int)
     parser.add_argument('--bootstrap-request-json')
     parser.add_argument('--bootstrap-ready-sha256')
     parser.add_argument('--bootstrap-timeout-seconds', type=float)
     args = parser.parse_args(argv)
     try:
         controlling = args.action in {'receiving-control-prepare', 'receiving-control-apply'}
+        identity_query = args.action == 'receiving-identity'
+        if identity_query != (args.identity_expires_at_ms is not None):
+            raise OnboardingError('invalid_receiving_identity_request')
+        if identity_query and not 0 < args.identity_expires_at_ms < 2**53:
+            raise OnboardingError('invalid_receiving_identity_request')
         bootstrapping = args.action.startswith('receiving-bootstrap-')
         if bootstrapping:
             if (args.bootstrap_timeout_seconds is None or not math.isfinite(args.bootstrap_timeout_seconds)
@@ -654,9 +680,18 @@ def main(argv: list[str] | None = None) -> int:
                 args.bootstrap_ready_sha256, args.bootstrap_timeout_seconds)):
             raise OnboardingError('invalid_receiving_bootstrap_request')
         timeout = args.observation_timeout_seconds
-        if timeout is not None and (args.action not in {'running', 'admitted-running'}
+        if timeout is not None and (args.action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply'}
                 or not math.isfinite(timeout) or not 0 < timeout <= 60):
             raise OnboardingError('invalid_receiving_observation_timeout')
+        now_ns = time.monotonic_ns()
+        observation_deadline_ns = None if timeout is None else now_ns + int(timeout * 1_000_000_000)
+        if args.observation_deadline_ns is not None:
+            if (observation_deadline_ns is None or args.observation_deadline_ns <= now_ns
+                    or args.observation_deadline_ns > observation_deadline_ns):
+                raise OnboardingError('onboarding_observation_deadline_expired')
+            observation_deadline_ns = args.observation_deadline_ns
+        if identity_query and timeout is None:
+            raise OnboardingError('invalid_receiving_identity_request')
         if (args.require_loaded and args.action not in {'running', 'admitted-running'}
                 or controlling and (args.control_file is None
                     or (args.action == 'receiving-control-prepare') != (args.control_command is not None))
@@ -667,7 +702,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime = onboarding_code_successor.selection(args.runtime_code, args.runtime_digest,
             args.code, plan['release_digest'], uid=0)
         sdk_parameters = onboarding_code_successor.sdk_parameters(runtime)
-        if (controlling or bootstrapping or args.require_loaded) and not sdk_parameters:
+        if (controlling or identity_query or bootstrapping or args.require_loaded) and not sdk_parameters:
             raise OnboardingError('qualified_onboarding_target_observer_required')
         matrix_commit = sdk_parameters.get('matrix_commit', onboarding_sdk.MATRIX_COMMIT)
         if args.action == 'sdk-prepare':
@@ -687,7 +722,13 @@ def main(argv: list[str] | None = None) -> int:
         qualified_context = (imports is not None
             and onboarding_sdk.startup_context(venv, imports, runtime))
         if Path(sys.prefix) != venv or sdk_parameters and not qualified_context:
-            arguments = argv if argv is not None else sys.argv[1:]
+            arguments = list(argv if argv is not None else sys.argv[1:])
+            if observation_deadline_ns is not None:
+                if time.monotonic_ns() >= observation_deadline_ns:
+                    raise OnboardingError('onboarding_observation_deadline_expired')
+                # Same process/guest monotonic clock across exec. Import/startup
+                # time must consume this budget rather than reset its duration.
+                arguments += ['--observation-deadline-ns', str(observation_deadline_ns)]
             if sdk_parameters:
                 imports = onboarding_sdk.runtime_imports(venv, runtime, **sdk_parameters)
                 command = onboarding_sdk.runtime_command(venv, imports, runtime,
@@ -715,9 +756,24 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(result))
             return 0
         if controlling:
-            control_command = (None if args.control_command is None
-                               else being_seed._read(args.control_command, limit=being_seed.MAX_SELECTION))
-            print(json.dumps(target.receiving_control(args.action, args.control_file, command=control_command)))
+            if args.control_command == Path('-'):
+                raw = sys.stdin.buffer.read(being_seed.MAX_SELECTION + 1)
+                if len(raw) > being_seed.MAX_SELECTION:
+                    raise OnboardingError('invalid_receiving_control_request')
+                control_command = json.loads(raw)
+                if not isinstance(control_command, dict):
+                    raise OnboardingError('invalid_receiving_control_request')
+            else:
+                control_command = (None if args.control_command is None
+                                   else being_seed._read(args.control_command, limit=being_seed.MAX_SELECTION))
+            print(json.dumps(target.receiving_control(args.action, args.control_file,
+                command=control_command, deadline_ns=observation_deadline_ns)))
+            return 0
+        if identity_query:
+            if observation_deadline_ns is None:
+                raise OnboardingError('invalid_receiving_identity_request')
+            print(json.dumps(target.qualified_receiving_identity(expires_at_ms=args.identity_expires_at_ms,
+                deadline_ns=observation_deadline_ns)))
             return 0
         if args.action == 'peer-identity':
             from .onboarding_peer import identity
@@ -745,7 +801,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.action in {"running", "admitted-running"}:
             print(json.dumps(target.running(admitted=args.action == 'admitted-running',
                 require_loaded=args.require_loaded,
-                deadline_ns=None if timeout is None else time.monotonic_ns()+int(timeout*1_000_000_000))))
+                deadline_ns=observation_deadline_ns)))
             return 0
         if args.action in {'admission-check', 'admission-enroll'}:
             from .onboarding_admission import ReceivingHolder

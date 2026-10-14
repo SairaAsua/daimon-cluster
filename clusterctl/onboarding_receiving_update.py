@@ -112,9 +112,10 @@ class OwnerGroupClient:
     verified observations. Reading/control never claims candidate readiness.
     """
 
-    def __init__(self, root: Path, socket_path: Path):
+    def __init__(self, root: Path, socket_path: Path, *, deadline_ns: int | None = None):
         self.root = private_directory(root)
         self.socket = socket_path
+        self.deadline_ns = deadline_ns
         self._observer: ConnectedProcessObserver | None = None
 
     def __enter__(self) -> OwnerGroupClient:
@@ -129,6 +130,10 @@ class OwnerGroupClient:
             self._observer.__exit__(*args)
             self._observer = None
 
+    def _accept_deadline(self) -> None:
+        if self.deadline_ns is not None and time.monotonic_ns() >= self.deadline_ns:
+            raise OnboardingError('receiving_owner_deadline_expired')
+
     def _client(self, role: str):
         from daimon_matrix.client import ClientConfig, LocalClient
         from daimon_matrix.operator_capabilities import host_capability_profile
@@ -139,6 +144,11 @@ class OwnerGroupClient:
         key = bytearray(onboarding_release.regular(directory / profile['client_key_filename'], uid=os.geteuid()))
         config = ClientConfig.load(directory / profile['client_config_filename'], key)
         options = {'connection_observer': self._observer, 'timeout_seconds': 40}
+        if self.deadline_ns is not None:
+            if ('deadline_ns' not in LocalClient.__dataclass_fields__
+                    or time.monotonic_ns() >= self.deadline_ns):
+                raise OnboardingError('qualified_receiving_deadline_client_required')
+            options['deadline_ns'] = self.deadline_ns
         return LocalClient(self.socket, config, **options)
 
     def _observe_status(self) -> dict:
@@ -160,6 +170,7 @@ class OwnerGroupClient:
         loaded = status.get('loaded_runtime')
         if loaded is not None and loaded.get('process_id') != process['pid']:
             raise OnboardingError('receiving_group_responder_conflict')
+        self._accept_deadline()
         return dict(process=process, server=response['server'], runtime_status=status,
                     receiving_readiness='unobserved')
 
@@ -222,7 +233,9 @@ class OwnerGroupClient:
         """Persist one exact native request before attempting its effect."""
         parent = self._control_directory(path)
         with being_seed._locked(parent):
-            return self._prepare_control(command, path)
+            result = self._prepare_control(command, path)
+            self._accept_deadline()
+            return result
 
     def _control_directory(self, path: Path) -> Path:
         parent = private_directory(self.root / 'receiving-control', create=True)
@@ -283,7 +296,9 @@ class OwnerGroupClient:
     def apply_control(self, path: Path) -> dict:
         """Exact retry or observed same-process completion; never re-author."""
         with being_seed._locked(self._control_directory(path)):
-            return self._apply_control(path)
+            result = self._apply_control(path)
+            self._accept_deadline()
+            return result
 
     def _apply_control(self, path: Path) -> dict:
         from daimon_matrix.local_api import request_hash
@@ -319,8 +334,67 @@ class OwnerGroupClient:
             'command_sha256': digest(command)}
 
 
+class GuestGroupClient:
+    """Host adapter to receiving-owner controls without opening guest custody.
+
+    Private request files remain inside the guest. Only its closed qualified
+    owner CLI observes or writes them; the host retains public observations.
+    """
+
+    def __init__(self, backend, plan: dict, candidate: tuple[Path, str],
+                 *, root: Path, timeout_seconds: float = 30):
+        if (not root.is_absolute() or '..' in root.parts or not 0 < timeout_seconds <= 60):
+            raise OnboardingError('receiving_guest_owner_locator_required')
+        self.backend, self.plan, self.candidate = backend, dict(plan), candidate
+        self.root, self.socket = root, root / 'tribe.sock'
+        self.timeout_seconds = timeout_seconds
+
+    def _call(self, action: str, **arguments) -> dict:
+        return self.backend._target_call(self.plan, action, candidate=self.candidate,
+            observation_timeout_seconds=self.timeout_seconds, **arguments)
+
+    def status(self) -> dict:
+        value = self._call('admitted-running', require_loaded=True)
+        status = value.get('group_runtime_status')
+        gate = None if not isinstance(status, dict) else status.get('receiving', {}).get('channels', {}).get('tribe')
+        if (value.get('responder_association') != 'same-connection'
+                or not isinstance(status, dict)
+                or not isinstance(value.get('admission_parent'), dict)
+                or value.get('group', {}).get('socket') != str(self.socket)
+                or not isinstance(gate, dict) or gate.get('controlled') is not True
+                or not isinstance(status.get('loaded_runtime'), dict)
+                or not isinstance(status.get('loaded_application'), dict)
+                or gate.get('process_id') != value['process']['pid']
+                or status.get('local_origin') != value['origin']
+                or status.get('loaded_runtime') != value['runtime_status'].get('loaded_runtime')):
+            raise OnboardingError('receiving_guest_owner_observation_conflict')
+        return dict(schema='cluster-receiving-owner-observation/v1', process=value['process'],
+            server=value['origin'], gate=gate, runtime_status=status,
+            admission_parent=value['admission_parent'], identity=value.get('receiving_identity'),
+            receiving_readiness='unobserved')
+
+    def qualified_identity(self, *, expires_at_ms: int, require_admitted: bool = True) -> dict:
+        value = self._call('receiving-identity', identity_expires_at_ms=expires_at_ms)
+        if (value.get('responder_association') != 'same-connection'
+                or value.get('plan_digest') != digest(self.plan)
+                or not isinstance(value.get('admission_parent'), dict)
+                or value.get('runtime_status', {}).get('local_origin') != value.get('server')
+                or not isinstance(value.get('verified_identity'), dict)
+                or value['verified_identity'].get('expires_at_ms', 0) > expires_at_ms
+                or value['verified_identity'].get('expires_at_ms', 0) <= time.time_ns() // 1_000_000):
+            raise OnboardingError('receiving_guest_owner_observation_conflict')
+        return value
+
+    def prepare_control(self, command: dict, path: Path) -> dict:
+        return self._call('receiving-control-prepare', control_file=path, control_value=command)
+
+    def apply_control(self, path: Path) -> dict:
+        return self._call('receiving-control-apply', control_file=path)
+
+
 def owner_control(root: Path, group: dict, observed: dict, action: str, path: Path,
-                  *, command: dict | None = None, status_key: str = 'runtime_status') -> dict:
+                  *, command: dict | None = None, status_key: str = 'runtime_status',
+                  deadline_ns: int | None = None) -> dict:
     """Reuse qualified Source/guest observation for the same finite owner RPC.
 
     The prepared request stays on its receiving owner. Only observation and
@@ -331,7 +405,8 @@ def owner_control(root: Path, group: dict, observed: dict, action: str, path: Pa
             or not isinstance(group, dict) or group.get('channel_id') != 'tribe'
             or observed.get('responder_association') != 'same-connection'):
         raise OnboardingError('invalid_receiving_control_request')
-    with OwnerGroupClient(root, Path(group['socket'])) as owner:
+    options = {} if deadline_ns is None else {'deadline_ns': deadline_ns}
+    with OwnerGroupClient(root, Path(group['socket']), **options) as owner:
         current = owner.status()
         previous = observed[status_key]
         if (current['process'] != observed['process']
@@ -1459,14 +1534,12 @@ class CohortController:
                     continue
                 owner = self.owners[name]
                 observed = owner.status()
-                if (observed['process'] != sender['process'] or observed['server'] != sender['server']
-                        or observed['gate'] != sender['gate']):
-                    # A prepare-before-reply retry may already have effected the
-                    # exact retained control. The owner helper resolves it; a
-                    # fresh command is never rebound to this changed gate.
-                    path = owner.root / 'receiving-control' / (control_id + '-revoke.json')
-                    if not path.exists():
-                        raise OnboardingError('receiving_sender_precondition_changed')
+                if observed['process'] != sender['process'] or observed['server'] != sender['server']:
+                    raise OnboardingError('receiving_sender_precondition_changed')
+                # The receiving owner reconciles its retained private file. A
+                # host must not inspect that path in its own filesystem; a
+                # changed gate without the exact retained request is refused
+                # by prepare_control before any new native request is authored.
                 gate = sender['gate']
                 command = dict(process_instance_id=gate['process_instance_id'], channel_id='tribe',
                     expected_head=gate['head'], operation_id=control_id, release_digest=release,

@@ -477,3 +477,44 @@ def test_host_forwards_control_paths_without_fabricating_a_native_request(tmp_pa
     argv = calls[0][0]
     assert argv[argv.index('--control-file') + 1] == str(private)
     assert argv[argv.index('--control-command') + 1] == str(command)
+
+
+def test_guest_control_uses_bounded_stdin_and_owner_retained_request_path(tmp_path, monkeypatch):
+    from pathlib import Path
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    command = {'phase': 'revoke', 'readers': [], 'operation_id': 'synthetic'}
+    backend._target_call(value, 'receiving-control-prepare', candidate=candidate,
+        control_file=Path('/home/agent/body/runtime/receiving-control/test.json'),
+        control_value=command, observation_timeout_seconds=5)
+    argv, options = calls[0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    assert argv[argv.index('--control-command') + 1] == '-'
+    assert not any('synthetic' in part for part in argv)
+    assert json.loads(options['input_data']) == command
+    assert 0 < options['timeout_seconds'] <= 5
+
+
+def test_receiving_identity_uses_prepared_candidate_and_one_finite_owner_budget(tmp_path, monkeypatch):
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    backend._target_call(value, 'receiving-identity', candidate=candidate,
+        identity_expires_at_ms=12345, observation_timeout_seconds=5)
+    argv, options = calls[0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    assert argv[argv.index('--identity-expires-at-ms') + 1] == '12345'
+    assert 0 < options['timeout_seconds'] <= 5
+
+
+def test_incus_stdin_is_bounded_and_never_routed_through_a_shell(monkeypatch):
+    from clusterctl import onboarding_host
+    calls = []
+    def execute(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout='{}')
+    monkeypatch.setattr(onboarding_host.subprocess, 'run', execute)
+    HostBackend._run(['exec', 'fixture'], timeout_seconds=3, input_data='{"phase":"revoke"}')
+    assert calls[0][0] == ['incus', 'exec', 'fixture']
+    assert calls[0][1]['input'] == '{"phase":"revoke"}'
+    assert calls[0][1]['timeout'] == 3 and 'shell' not in calls[0][1]
+    with pytest.raises(OnboardingError, match='invalid_receiving_control_request'):
+        HostBackend._run(['exec', 'fixture'], input_data='x' * (being_seed.MAX_SELECTION + 1))
+    assert len(calls) == 1

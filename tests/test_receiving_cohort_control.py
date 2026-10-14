@@ -14,7 +14,7 @@ import pytest
 from clusterctl import being_seed
 from clusterctl.onboarding import OnboardingError, digest
 from clusterctl.onboarding_code_successor import plan_update
-from clusterctl.onboarding_receiving_update import CohortController, OwnerGroupClient, apply_host_selection, freeze_senders, receiving_identity, verify_receiving_identity
+from clusterctl.onboarding_receiving_update import CohortController, GuestGroupClient, OwnerGroupClient, apply_host_selection, freeze_senders, receiving_identity, verify_receiving_identity
 from clusterctl.operation_journal import OperationJournal
 from tests.test_receiving_host_selection import fixture as host_fixture
 
@@ -186,6 +186,68 @@ class FakeOwner:
                 'head': digest([self.gate['head'], request]), 'request_sha256': request}
         return {**self.status(), 'request_sha256': request, 'request_id': request,
                 'command_sha256': digest(command)}
+
+
+def test_guest_owner_adapter_keeps_private_request_paths_receiving_local(monkeypatch):
+    from types import SimpleNamespace
+    from tests.test_onboarding import plan
+    calls = []
+    root = Path('/not-mounted-on-host/receiving/runtime')
+    origin = dict(body_ref='body:eko', embodiment_id='embodiment:eko', incarnation_id='incarnation:eko')
+    gate = dict(controlled=True, process_id=123, phase='revoke', head='a'*64)
+    loaded = dict(process_id=123, local_origin=origin)
+    status = dict(local_origin=origin, loaded_runtime=loaded, loaded_application={'view':'fixture'},
+                  receiving={'channels':{'tribe':gate}})
+    def call(_plan, action, **arguments):
+        calls.append((action, arguments))
+        if action == 'admitted-running':
+            return dict(responder_association='same-connection', admission_parent={'pid':122},
+                group={'socket':str(root/'tribe.sock')}, group_runtime_status=status,
+                runtime_status={'loaded_runtime':loaded}, process={'pid':123}, origin=origin)
+        return dict(request_sha256='b'*64)
+    native_exists = Path.exists
+    def no_host_private_access(path):
+        if path == root or root in path.parents:
+            pytest.fail('host inspected a guest-private path')
+        return native_exists(path)
+    monkeypatch.setattr(Path, 'exists', no_host_private_access)
+    guest = GuestGroupClient(SimpleNamespace(_target_call=call), plan(), (Path('/candidate'),'c'*64), root=root)
+    assert guest.status()['server'] == origin
+    private = root/'receiving-control'/'request.json'
+    assert guest.prepare_control({'phase':'revoke','readers':[]}, private)['request_sha256'] == 'b'*64
+    assert guest.apply_control(private)['request_sha256'] == 'b'*64
+    assert [action for action,_ in calls] == ['admitted-running','receiving-control-prepare','receiving-control-apply']
+    assert calls[1][1]['control_value'] == {'phase':'revoke','readers':[]}
+    assert all(options['observation_timeout_seconds'] == 30 for _,options in calls)
+
+
+def test_late_durable_prepare_keeps_exact_request_without_reporting_success(tmp_path, monkeypatch):
+    from clusterctl import onboarding_receiving_update as module
+    root = tmp_path/'owner'
+    root.mkdir(mode=0o700)
+    clock = [10]
+    monkeypatch.setattr(module.time,'monotonic_ns',lambda:clock[0])
+    owner = OwnerGroupClient(root, root/'tribe.sock', deadline_ns=100)
+    command = dict(channel_id='tribe',process_instance_id='fixture',expected_head='a'*64,phase='revoke')
+    monkeypatch.setattr(owner,'status',lambda:dict(gate={'process_instance_id':'fixture','head':'a'*64},process={},server={}))
+    authored = []
+    class Client:
+        def prepare(self, method, params):
+            authored.append(True)
+            return dict(method=method,params=params,request_id='one-retained-request')
+    monkeypatch.setattr(owner,'_client',lambda _role:Client())
+    durable = owner._durable_control
+    def late(path):
+        durable(path)
+        clock[0]=101
+    monkeypatch.setattr(owner,'_durable_control',late)
+    private = root/'receiving-control'/'revoke.json'
+    with pytest.raises(OnboardingError,match='deadline_expired'):
+        owner.prepare_control(command,private)
+    retained = private.read_bytes()
+    owner.deadline_ns=200
+    assert owner.prepare_control(command,private)['request_id'] == 'one-retained-request'
+    assert private.read_bytes() == retained and authored == [True]
 
 
 def fixture(tmp_path):

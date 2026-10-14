@@ -191,6 +191,53 @@ def test_guest_control_cli_refuses_invalid_modes_before_owner_state(tmp_path, mo
     assert capsys.readouterr().out == '{"error": "native_onboarding_target_refused"}\n'
 
 
+@pytest.mark.parametrize('option', ['--observation-timeout-seconds=5', '--observation-timeout-seconds'])
+def test_guest_reexec_does_not_refund_slow_import_preparation(tmp_path, monkeypatch, capsys, option):
+    from clusterctl import onboarding_target as module
+    from tests.test_onboarding import plan
+    clock = [1_000_000_000]
+    reads = []
+    monkeypatch.setattr(module.time, 'monotonic_ns', lambda: clock[0])
+    monkeypatch.setattr(module.being_seed, '_read', lambda *_: (reads.append(True), plan())[1])
+    monkeypatch.setattr(module.onboarding_code_successor, 'selection', lambda *_args, **_kw: tmp_path)
+    monkeypatch.setattr(module.onboarding_code_successor, 'sdk_parameters', lambda *_: {'matrix_commit': 'a'*40})
+    monkeypatch.setattr(module.onboarding_sdk, 'observe', lambda *_args, **_kw: tmp_path / 'venv')
+    monkeypatch.setattr(module.onboarding_sdk, 'startup_context', lambda *_: False)
+    def slow(*_args, **_kw):
+        clock[0] += 10_000_000_000
+        return tmp_path / 'imports'
+    monkeypatch.setattr(module.onboarding_sdk, 'runtime_imports', slow)
+    monkeypatch.setattr(module.onboarding_sdk, 'runtime_command',
+        lambda _venv, _imports, _code, _module, arguments: ['python', *arguments])
+    monkeypatch.setattr(module, 'Target', lambda *_args, **_kw: pytest.fail('expired handoff opened target custody'))
+    def reenter(_path, arguments):
+        assert arguments[arguments.index('--observation-deadline-ns')+1] == '6000000000'
+        raise SystemExit(module.main(arguments[1:]))
+    monkeypatch.setattr(module.os, 'execv', reenter)
+    budget = [option] if '=' in option else [option, '5']
+    arguments = ['receiving-control-prepare', '--home', str(tmp_path), '--code', str(tmp_path),
+        '--plan', str(tmp_path/'plan.json'), '--genesis', str(tmp_path/'genesis.json'),
+        '--control-file', 'revoke.json', '--control-command', '-', *budget]
+    with pytest.raises(SystemExit) as stopped:
+        module.main(arguments)
+    assert stopped.value.code == 1 and reads == [True]
+    assert capsys.readouterr().out == '{"error": "native_onboarding_target_refused"}\n'
+
+
+@pytest.mark.parametrize('action,arguments', [
+    ('receiving-identity', ['--identity-expires-at-ms','1']),
+    ('running', ['--identity-expires-at-ms','1']),
+    ('running', ['--observation-deadline-ns','100']),
+    ('running', ['--observation-timeout-seconds','5','--observation-deadline-ns','-1']),
+])
+def test_invalid_identity_or_absolute_budget_refuses_before_plan_read(tmp_path, monkeypatch, capsys, action, arguments):
+    from clusterctl import onboarding_target as module
+    monkeypatch.setattr(module.being_seed, '_read', lambda *_: pytest.fail('invalid request read owner plan'))
+    assert module.main([action,'--home',str(tmp_path),'--code',str(tmp_path),
+        '--plan',str(tmp_path/'plan.json'),'--genesis',str(tmp_path/'genesis.json'),*arguments]) == 1
+    assert capsys.readouterr().out == '{"error": "native_onboarding_target_refused"}\n'
+
+
 def test_pinned_exit_wait_distinguishes_running_exited_and_closed_observer():
     from clusterctl.owner_process import ProcessPresence
     child = subprocess.Popen([sys.executable, '-I', '-c',
