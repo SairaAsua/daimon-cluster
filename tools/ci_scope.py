@@ -301,7 +301,10 @@ LOADED_STARTUP_FILES = {'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_t
     'tests/test_receiving_update_preflight.py', 'tests/test_receiving_update_selection.py',
     'tests/test_onboarding_service.py', 'clusterctl/onboarding_peer.py',
     'tests/test_onboarding_peer.py', 'tests/test_guest_service_bootstrap.py', 'tests/test_guest_owner_bootstrap.py',
-    'tests/test_guest_bootstrap_controller.py'}
+    'tests/test_guest_bootstrap_controller.py',
+    'tests/fixtures/receiving_reader/canonical.py',
+    'tests/fixtures/receiving_reader/release_compatibility.py',
+    'tests/fixtures/receiving_reader/PROVENANCE.json'}
 LOADED_STARTUP_TESTS = ('tests/test_onboarding_sdk.py', 'tests/test_onboarding_code_successor.py',
     'tests/test_source_bootstrap.py',
     'tests/test_receiving_cohort_control.py', 'tests/test_receiving_host_selection.py',

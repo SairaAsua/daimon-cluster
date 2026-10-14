@@ -7,6 +7,7 @@ import copy
 import hashlib
 import os
 import time
+import uuid
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,7 @@ import pytest
 from clusterctl import being_seed
 from clusterctl.onboarding import OnboardingError, digest
 from clusterctl.onboarding_code_successor import plan_update
-from clusterctl.onboarding_receiving_update import CohortController, GuestGroupClient, OwnerGroupClient, apply_host_selection, freeze_senders, receiving_identity, verify_receiving_identity
+from clusterctl.onboarding_receiving_update import CohortController, GuestGroupClient, OwnerGroupClient, apply_host_selection, freeze_senders, preflight, receiving_identity, verify_receiving_identity
 from clusterctl.operation_journal import OperationJournal
 from tests.test_receiving_host_selection import fixture as host_fixture
 
@@ -180,6 +181,8 @@ class FakeOwner:
         command = self.requests[path]
         request = digest(command)
         if self.gate['request_sha256'] != request:
+            if self.gate['phase'] == 'revoke' and self.gate['operation_id'] != command['operation_id']:
+                raise OnboardingError('receiving_control_operation_reserved')
             assert self.gate['head'] == command['expected_head']
             self.effects += 1
             self.gate = {**self.gate, **{k: v for k, v in command.items() if k != 'expected_head'},
@@ -264,6 +267,421 @@ def fixture(tmp_path):
             host_config_sha256=digest(original), senders=senders),
         intended_transition={'host_runtime': runtime}, audit_identity={'actor': 'fixture'})
     return path, original, runtime, owners, journal, row['operation_id']
+
+
+def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profile='source', assessment_fault=None):
+    """Fake RPC/import/load seams; actual protected manifest and journal."""
+    from types import MethodType
+    from tests.test_receiving_update_preflight import fixture as reader_fixture, call as qualify_reader
+    _, _, _, owners, _, _ = fixture(tmp_path)
+    reader_root=tmp_path/'reader'
+    reader_root.mkdir()
+    code,code_digest,_,reader_path,reader_manifest,_=reader_fixture(reader_root)
+    baseline=qualify_reader(code,code_digest,reader_path,reader_manifest)
+    reader=baseline['reader']
+    until = time.time_ns() // 1_000_000 + 300000
+    epochs = ['1'*64,'2'*64,'3'*64]
+    recipes, before, required = {}, {}, []
+    for name, owner in owners.items():
+        owner.server['incarnation_id'] = 'incarnation:'+name
+        startup = dict(code_digest=code_digest,matrix_commit=baseline['matrix_revision'],
+            matrix_wheel_sha256=baseline['matrix_wheel_sha256'],sdk_digest=baseline['sdk_digest'],
+            reader=reader,process_id=owner.process['pid'],startup_instance_id=name)
+        owner.loaded = dict(process_id=owner.process['pid'], qualified_startup=startup,
+            runtime_bundle_sha256='f'*64,authority_epoch={'accepted_manifest_hashes':epochs})
+        owner.application = dict(loaded_view_sha256='9'*64,application_sha256='a'*64,
+            tribe={'policy':{'tribe_ref':'tribe:fixture'}},
+            publication_sha256='b'*64,shared_relationships=True,communication_store_role='ledger',
+            shared_stores={'ledger':{'schema_versions':{'communication':4}}},
+            visibility=dict(catalog_mode='validate',catalog_validation='validated',release_enabled=True,
+                installation_sha256='4'*64,catalog_schema_version=1),
+            authorities={who.being:{'accepted_manifest_hashes':epochs,'active_manifest_hash':epochs[0],
+                'active_control_head':'control:fixture'} for who in owners.values()})
+        owner.roster = dict(schema='dm.runtime.tribe-roster/v1',roster_sha256='5'*64,
+                            required_authority_epochs=epochs)
+        owner.identity = dict(being_ref=owner.being,manifest_hash=epochs[0],credential_ref='credential:'+name)
+        owner.parent = dict(uid=1,pid=1,start_ticks=2,boot_id='fixture')
+        original_status = owner.status
+        def status(self, original=original_status):
+            result = original()
+            result['runtime_status'].update(loaded_runtime=copy.deepcopy(self.loaded),
+                loaded_application=copy.deepcopy(self.application),
+                receiving={'features':['signed-roster-cas/v1'],'rosters':{'tribe':copy.deepcopy(self.roster)}})
+            return result
+        owner.status = MethodType(status,owner)
+        def qualified(self, *, expires_at_ms, require_admitted):
+            assert require_admitted == (profile == 'guest')
+            return {**self.status(),'identity':copy.deepcopy(self.identity),
+                **({'admission_parent':copy.deepcopy(self.parent)} if require_admitted else {}),
+                'verified_identity':dict(identity=copy.deepcopy(self.identity),runtime_bundle_sha256='f'*64,
+                                         authority_control_head='control:fixture',
+                                         expires_at_ms=expires_at_ms)}
+        owner.qualified_identity=MethodType(qualified,owner)
+        selection=dict(receiving_code=code_digest,matrix_sdk=baseline['matrix_wheel_sha256'],runtime_bundle_sha256='f'*64,
+            application_sha256='a'*64,publication_sha256='b'*64,visibility_installation_sha256='4'*64)
+        before[name]={'old':name}
+        required.append(dict(being_ref=owner.being,embodiment_id=owner.server['embodiment_id'],
+                             expected_selection_sha256=digest(before[name])))
+        recipes[name]=dict(profile=profile,selection=selection)
+    authorities=[dict(being_ref=who.being,manifest_hash=epochs[0],control_head='control:fixture')
+                 for who in owners.values()]
+    manifest=dict(schema='dm.receiving-release/v1',
+        artifacts={'receiving_code':code_digest,'matrix_sdk':baseline['matrix_wheel_sha256']},required_receivers=required,
+        provenance={**reader_manifest['provenance']},contract=copy.deepcopy(reader['contract']),
+        authorities={'current':authorities,'candidate':copy.deepcopy(authorities)})
+    manifest_path=tmp_path/'activation-manifest.json'
+    being_seed._write(manifest_path,manifest)
+    journal=OperationJournal(tmp_path/'activation-journal')
+    frozen_senders = freeze_senders(owners,tribe_ref='tribe:fixture')
+    # Separate actual lifecycle observations are required for each receiver.
+    for name, owner in owners.items():
+        recipes[name]['prepared']=preflight(code,code_digest,manifest_path,digest(manifest),
+            being_ref=owner.being,embodiment_id=owner.server['embodiment_id'],
+            code_uid=os.geteuid(),manifest_uid=os.geteuid())
+        previous = owner.status()
+        if profile == 'guest':
+            previous['admission_parent'] = copy.deepcopy(owner.parent)
+        if replacement:
+            owner.process = {**owner.process, 'start_ticks': owner.process['start_ticks'] + 1}
+            owner.parent = {**owner.parent, 'start_ticks': owner.parent['start_ticks'] + 1}
+            owner.gate = {**owner.gate, 'process_instance_id': name + ':replacement'}
+        loaded = dict(process=owner.process,loaded_runtime=owner.loaded,loaded_application=owner.application)
+        if profile == 'source':
+            precondition={'source_bootstrap':{'predecessor':previous}}
+            effects={'source_bootstrap':{'quiesced':dict(process=previous['process'],
+                exit_observed=exit_observed,writer_available=True),'controlled_loaded':loaded}}
+        else:
+            precondition={'guest_bootstraps':{name:{'owner':{'predecessor':previous}}}}
+            loaded['admission_parent']=owner.parent
+            effects={'guest_bootstraps':{name:{'quiesced':dict(schema='cluster-guest-service-quiescence/v1',
+                process=previous['process'],admission_parent=previous['admission_parent'],
+                exits={'process':exit_observed,'admission_parent':exit_observed}),'controlled_loaded':loaded}}}
+        life=plan_update(journal,manifest_digest=digest(manifest),target='lifecycle:'+name,
+            expected_precondition=precondition,
+            intended_transition=({'source_bootstrap':{'qualification':{'code':str(code),'code_uid':os.geteuid()}}}
+                if profile=='source' else {'guest_bootstraps':{name:{'runtime_code':str(code),'code_uid':os.geteuid()}}}),
+            audit_identity={'actor':'fixture'})
+        journal.advance(life['operation_id'],'runtime-dispatching',runtime_observation=effects)
+        recipes[name]['lifecycle_operation_id']=life['operation_id']
+        recipes[name]['prepared']['release_digest']=digest(manifest)
+    if assessment_fault == 'unsupported':
+        manifest['contract']['capabilities']=sorted([*manifest['contract']['capabilities'],'unsupported-fixture/v1'])
+        being_seed._write(manifest_path,manifest)
+        for recipe in recipes.values():
+            recipe['prepared']['release_digest']=digest(manifest)
+    elif assessment_fault is not None:
+        recipes['eko']['prepared']['assessment'][assessment_fault]='0'*64
+    row=plan_update(journal,manifest_digest=digest(manifest),target='receiving:activation-fixture',
+        expected_precondition=dict(senders=frozen_senders,receiver_selections=before),
+        intended_transition={'cohort_activation':dict(manifest_path=str(manifest_path),manifest_uid=os.geteuid(),
+            roster_sha256='5'*64,expires_at_ms=until,observation_window_ms=60000,receivers=recipes)},
+        audit_identity={'actor':'fixture'})
+    controller=CohortController(journal,row['operation_id'],owners)
+    if replacement:
+        # Model the retained original revoke before the separately observed
+        # bootstrap replacement. No ACK from the replacement substitutes it.
+        observations = {}
+        for sender in frozen_senders:
+            owner = owners[sender['name']]
+            process, gate = owner.process, owner.gate
+            owner.process, owner.gate = sender['process'], sender['gate']
+            owner.effects = 0
+            # Revoke the frozen original while the other frozen sender is also
+            # represented below through its actual journal ACK.
+            control_id = str(uuid.uuid5(uuid.NAMESPACE_URL,'receiving-control:'+row['operation_id']))
+            command=dict(process_instance_id=owner.gate['process_instance_id'],channel_id='tribe',
+                expected_head=owner.gate['head'],operation_id=control_id,release_digest=digest(manifest),phase='revoke',readers=[])
+            path=owner.root/'receiving-control'/(control_id+'-revoke.json')
+            owner.prepare_control(command,path)
+            observations[sender['name']]=owner.apply_control(path)
+            owner.process, owner.gate = process, gate
+        journal.advance(row['operation_id'],'runtime-dispatching',runtime_observation={'sender_revocations':observations})
+    else:
+        controller.revoke_senders()
+    return controller,owners,journal,row['operation_id']
+
+
+@pytest.mark.parametrize('profile',['source','guest'])
+def test_observed_replacements_get_fresh_fences_without_replacing_old_acks(tmp_path,profile):
+    controller,owners,journal,identifier=activation_fixture(tmp_path,replacement=True,profile=profile)
+    before=copy.deepcopy(journal.get(identifier)['runtime_observation']['sender_revocations'])
+    first=controller.activate()
+    after=journal.get(identifier)['runtime_observation']
+    assert after['sender_revocations']==before
+    assert set(after['sender_replacements'])==set(owners)
+    assert all(owner.effects==3 for owner in owners.values())
+    assert controller.activate()==first
+    assert all(owner.effects==3 for owner in owners.values())
+
+
+@pytest.mark.parametrize('profile',['source','guest'])
+def test_replacement_without_old_exit_evidence_cannot_enable_any_sender(tmp_path,profile):
+    controller,owners,_,_=activation_fixture(tmp_path,replacement=True,exit_observed=False,profile=profile)
+    with pytest.raises(OnboardingError,match='replacement_unobserved'):
+        controller.activate()
+    assert all(owner.effects==1 and owner.gate['phase']=='unselected' for owner in owners.values())
+
+
+def test_lost_replacement_revoke_reply_reconciles_exact_request(tmp_path,monkeypatch):
+    controller,owners,journal,identifier=activation_fixture(tmp_path,replacement=True)
+    apply=owners['oliva'].apply_control
+    lost=[True]
+    def lose(path):
+        result=apply(path)
+        if lost[0]:
+            lost[0]=False
+            raise OSError('synthetic replacement revoke reply loss')
+        return result
+    monkeypatch.setattr(owners['oliva'],'apply_control',lose)
+    with pytest.raises(OSError):
+        controller.activate()
+    retained=copy.deepcopy(journal.get(identifier)['runtime_observation']['sender_replacements'])
+    assert 'accepted' not in retained['oliva']
+    assert all(owner.effects==2 for owner in owners.values())
+    controller.activate()
+    assert all(owner.effects==3 for owner in owners.values())
+    assert journal.get(identifier)['runtime_observation']['sender_replacements']['eko']==retained['eko']
+
+
+def test_completed_observation_window_covers_the_first_receiver_too(tmp_path,monkeypatch):
+    from clusterctl import onboarding_receiving_update as module
+    from types import SimpleNamespace
+    controller,owners,journal,identifier=activation_fixture(tmp_path)
+    activation=controller.prepare_activation()
+    row=journal.get(identifier)
+    plan,manifest=controller._activation(row)
+    instant=[time.time_ns()//1_000_000]
+    qualify=owners['oliva'].qualified_identity
+    def slow_last(**options):
+        instant[0]+=plan['observation_window_ms']+1
+        return qualify(**options)
+    monkeypatch.setattr(owners['oliva'],'qualified_identity',slow_last)
+    monkeypatch.setattr(module,'time',SimpleNamespace(time_ns=lambda:instant[0]*1_000_000,monotonic_ns=time.monotonic_ns))
+    with pytest.raises(OnboardingError,match='activation_changed'):
+        controller._current_activation(row,plan,manifest,activation)
+    assert all(owner.effects==1 for owner in owners.values())
+
+
+@pytest.mark.parametrize('fault',['unsupported','release_digest','reader_sha256'])
+def test_current_release_cannot_reuse_an_unbound_compatible_assessment(tmp_path,fault):
+    controller,owners,_,_=activation_fixture(tmp_path,assessment_fault=fault)
+    with pytest.raises(OnboardingError,match='incompatible_receiving_reader|preflight_changed'):
+        controller.activate()
+    assert all(owner.effects==1 and owner.gate['phase']=='revoke' for owner in owners.values())
+    controller.reconcile_reassessment()
+    assert all(owner.gate['phase']=='select' and owner.gate['readers']==[] for owner in owners.values())
+    assert_new_operation_can_revoke(owners)
+
+
+@pytest.mark.parametrize('stage',['query','prepare','apply','final-status'])
+def test_slow_observation_or_control_cannot_report_fresh_activation(tmp_path,monkeypatch,stage):
+    from clusterctl import onboarding_receiving_update as module
+    from types import SimpleNamespace
+    controller,owners,_,_=activation_fixture(tmp_path)
+    base_ms=time.time_ns()//1_000_000
+    elapsed=[0]
+    monkeypatch.setattr(module,'time',SimpleNamespace(
+        time_ns=lambda:(base_ms*1_000_000+elapsed[0]),monotonic_ns=lambda:elapsed[0]))
+    def consume_window():
+        elapsed[0]+=60_001_000_000
+    if stage=='query':
+        qualify=owners['eko'].qualified_identity
+        def slow(**options):
+            result=qualify(**options)
+            consume_window()
+            return result
+        monkeypatch.setattr(owners['eko'],'qualified_identity',slow)
+    elif stage in {'prepare','apply'}:
+        attribute='prepare_control' if stage=='prepare' else 'apply_control'
+        original=getattr(owners['oliva'],attribute)
+        def slow(*arguments):
+            result=original(*arguments)
+            if arguments[-1].name.endswith('-select.json'):
+                consume_window()
+            return result
+        monkeypatch.setattr(owners['oliva'],attribute,slow)
+    else:
+        fresh=set()
+        for name,owner in owners.items():
+            qualify=owner.qualified_identity
+            def record(*,who=name,original=qualify,**options):
+                result=original(**options)
+                if all(item.gate['phase']=='select' for item in owners.values()):
+                    fresh.add(who)
+                return result
+            monkeypatch.setattr(owner,'qualified_identity',record)
+        status=owners['oliva'].status
+        def slow_status():
+            result=status()
+            if fresh==set(owners):
+                consume_window()
+            return result
+        monkeypatch.setattr(owners['oliva'],'status',slow_status)
+    with pytest.raises(OnboardingError,match='observation_expired|activation_changed'):
+        controller.activate()
+    assert all(owner.gate['readers']==[] for owner in owners.values())
+
+
+def test_roster_drift_during_native_select_repairs_prior_positive_sender(tmp_path,monkeypatch):
+    controller,owners,journal,identifier=activation_fixture(tmp_path)
+    prepare=owners['oliva'].prepare_control
+    apply=owners['oliva'].apply_control
+    def drift(command,path):
+        result=prepare(command,path)
+        if command['readers']:
+            owners['oliva'].roster['roster_sha256']='8'*64
+        return result
+    def native_cas(path):
+        if owners['oliva'].requests[path]['readers']:
+            raise OnboardingError('receiving_control_not_accepted')
+        return apply(path)
+    monkeypatch.setattr(owners['oliva'],'prepare_control',drift)
+    monkeypatch.setattr(owners['oliva'],'apply_control',native_cas)
+    with pytest.raises(OnboardingError,match='not_accepted'):
+        controller.activate()
+    assert all(owner.gate['readers']==[] for owner in owners.values())
+    assert set(journal.get(identifier)['runtime_observation']['cohort_reassessment'])==set(owners)
+    assert_new_operation_can_revoke(owners)
+
+
+@pytest.mark.parametrize('missing',['process','gate','request_sha256','command_sha256'])
+def test_malformed_select_completion_keeps_effect_and_repairs_conservatively(tmp_path,monkeypatch,missing):
+    controller,owners,journal,identifier=activation_fixture(tmp_path)
+    apply=owners['oliva'].apply_control
+    def malformed(path):
+        result=apply(path)
+        if path.name.endswith('-select.json'):
+            result.pop(missing)
+        return result
+    monkeypatch.setattr(owners['oliva'],'apply_control',malformed)
+    with pytest.raises(OnboardingError,match='selection_uncertain'):
+        controller.activate()
+    assert all(owner.gate['readers']==[] for owner in owners.values())
+    assert set(journal.get(identifier)['runtime_observation']['cohort_reassessment'])==set(owners)
+    assert_new_operation_can_revoke(owners)
+
+
+@pytest.mark.parametrize('fault',['offline','epoch','roster','selection','catalog','lifecycle'])
+def test_required_receiver_failure_blocks_first_positive_selection(tmp_path,monkeypatch,fault):
+    controller,owners,_,_=activation_fixture(tmp_path)
+    owner=owners['oliva']
+    if fault=='offline':
+        monkeypatch.setattr(owner,'qualified_identity',lambda **_:(_ for _ in ()).throw(OSError('synthetic offline')))
+    elif fault=='epoch':
+        owner.loaded['authority_epoch']['accepted_manifest_hashes']=[]
+        for authority in owner.application['authorities'].values():
+            authority['accepted_manifest_hashes']=['1'*64]
+    elif fault=='roster':
+        owner.roster['roster_sha256']='8'*64
+    elif fault=='selection':
+        owner.application['publication_sha256']='8'*64
+    elif fault=='catalog':
+        owner.application['visibility']['catalog_validation']='pending'
+    else:
+        owner.process['start_ticks']+=1
+    with pytest.raises((OnboardingError,OSError)):
+        controller.activate()
+    assert all(owner.effects==1 and owner.gate['phase']=='revoke' for owner in owners.values())
+
+
+def test_all_required_adoption_precedes_select_and_exact_retry_keeps_expiries(tmp_path):
+    controller,owners,journal,identifier=activation_fixture(tmp_path)
+    first=controller.activate()
+    assert first['receiving_readiness']=='qualified-local-projection'
+    assert first['communication_acceptance']=='unobserved'
+    assert len(first['readers'])==2 and all(owner.effects==2 for owner in owners.values())
+    assert controller.activate()==first
+    assert all(owner.effects==2 for owner in owners.values())
+    assert set(journal.get(identifier)['runtime_observation']['sender_selections'])==set(owners)
+
+
+def test_partial_select_lost_reply_resumes_exact_same_vector(tmp_path,monkeypatch):
+    controller,owners,journal,identifier=activation_fixture(tmp_path)
+    apply=owners['oliva'].apply_control
+    lost=[True]
+    def lose(path):
+        result=apply(path)
+        if lost[0]:
+            lost[0]=False
+            raise OSError('synthetic selected reply loss')
+        return result
+    monkeypatch.setattr(owners['oliva'],'apply_control',lose)
+    with pytest.raises(OSError):
+        controller.activate()
+    retained=copy.deepcopy(journal.get(identifier)['runtime_observation']['cohort_activation'])
+    assert set(journal.get(identifier)['runtime_observation']['sender_selections'])=={'eko'}
+    assert all(owner.effects==2 for owner in owners.values())
+    assert controller.activate()['readers']==retained['readers']
+    assert journal.get(identifier)['runtime_observation']['cohort_activation']==retained
+    assert all(owner.effects==2 for owner in owners.values())
+
+
+def test_changed_proof_after_partial_activation_fences_and_retains_reassessment(tmp_path,monkeypatch):
+    controller,owners,journal,identifier=activation_fixture(tmp_path)
+    apply=owners['eko'].apply_control
+    def mutate(path):
+        result=apply(path)
+        if path.name.endswith('-select.json'):
+            owners['oliva'].roster['roster_sha256']='8'*64
+        return result
+    monkeypatch.setattr(owners['eko'],'apply_control',mutate)
+    with pytest.raises(OnboardingError,match='roster_unready'):
+        controller.activate()
+    assert owners['eko'].gate['readers']==[] and owners['eko'].effects==4
+    assert owners['oliva'].effects==2 and owners['oliva'].gate['readers']==[]
+    repair=journal.get(identifier)['runtime_observation']['cohort_reassessment']
+    assert repair['eko']['state']=='disabled'
+    with pytest.raises(OnboardingError,match='reassessment_required'):
+        controller.activate()
+    assert controller.reconcile_reassessment()==repair
+    assert_new_operation_can_revoke(owners)
+
+
+def assert_new_operation_can_revoke(owners):
+    """Mirror native operation-reservation behavior, never grant readers."""
+    for owner in owners.values():
+        identifier=str(uuid.uuid4())
+        command=dict(process_instance_id=owner.gate['process_instance_id'],channel_id='tribe',
+            expected_head=owner.gate['head'],operation_id=identifier,release_digest='a'*64,phase='revoke',readers=[])
+        path=owner.root/'receiving-control'/(identifier+'-revoke.json')
+        owner.prepare_control(command,path)
+        assert owner.apply_control(path)['gate']['operation_id']==identifier
+
+
+def test_expired_all_revoked_stage_clears_reservations_without_positive_grants(tmp_path,monkeypatch):
+    from clusterctl import onboarding_receiving_update as module
+    from types import SimpleNamespace
+    controller,owners,journal,identifier=activation_fixture(tmp_path)
+    retained=controller.prepare_activation()
+    expired=max(item['expires_at_ms'] for item in retained['readers'])+1
+    monkeypatch.setattr(module,'time',SimpleNamespace(time_ns=lambda:expired*1_000_000,monotonic_ns=time.monotonic_ns))
+    with pytest.raises(OnboardingError,match='observation_expired'):
+        controller.activate()
+    assert all(owner.effects==2 and owner.gate['readers']==[] for owner in owners.values())
+    assert set(journal.get(identifier)['runtime_observation']['cohort_reassessment'])==set(owners)
+    assert_new_operation_can_revoke(owners)
+
+
+def test_expired_vector_cannot_renew_its_reader_horizon(tmp_path,monkeypatch):
+    from clusterctl import onboarding_receiving_update as module
+    from types import SimpleNamespace
+    controller,owners,journal,identifier=activation_fixture(tmp_path)
+    first=controller.activate()
+    expired=max(item['expires_at_ms'] for item in first['readers'])+1
+    monkeypatch.setattr(module,'time',SimpleNamespace(time_ns=lambda:expired*1_000_000,monotonic_ns=time.monotonic_ns))
+    with pytest.raises(OnboardingError,match='observation_expired'):
+        controller.activate()
+    assert journal.get(identifier)['runtime_observation']['cohort_activation']['readers']==first['readers']
+    assert all(owner.gate['readers']==[] for owner in owners.values())
+
+
+def test_changed_process_cannot_reuse_retained_lifecycle_or_select_ack(tmp_path):
+    controller,owners,_,_=activation_fixture(tmp_path)
+    controller.activate()
+    owners['oliva'].process['start_ticks']+=1
+    with pytest.raises(OnboardingError,match='lifecycle_unobserved'):
+        controller.activate()
+    assert owners['eko'].gate['readers']==[]
 
 
 @pytest.mark.parametrize('part', ['being_ref', 'local_origin'])
