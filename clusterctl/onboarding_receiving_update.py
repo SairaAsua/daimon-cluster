@@ -26,6 +26,32 @@ from .onboarding import JobStore, OnboardingError, digest, private_directory
 from .owner_process import ConnectedProcessObserver
 
 
+def receiving_identity(response: dict, runtime_status: dict, server: dict,
+                       *, require_admitted: bool = True) -> dict:
+    """Keep only the authenticated current identity/admission subset of scope.me.
+
+    Both responses must belong to the caller's same observed connection. This
+    contains no ledger projection, inbox, capabilities or readiness inference.
+    """
+    scope = response.get('result')
+    body = scope.get('body') if isinstance(scope, dict) else None
+    if (response.get('ok') is not True or response.get('server') != server
+            or not isinstance(scope, dict) or scope.get('schema') != 'dm.scope.me/v1'
+            or scope.get('origin') != server or runtime_status.get('local_origin') != server
+            or scope.get('being_ref') != runtime_status.get('being_ref')
+            or scope.get('manifest_hash') != runtime_status.get('manifest_hash')
+            or type(scope.get('evaluated_at_ms')) is not int or scope['evaluated_at_ms'] < 0
+            or any(not isinstance(scope.get(key), str) or not scope[key]
+                   for key in ('being_ref', 'manifest_hash', 'credential_ref', 'incarnation_authorization_ref'))
+            or require_admitted and (not isinstance(body, dict) or body.get('state') != 'running'
+                or any(body.get(key) != server.get(key)
+                       for key in ('body_ref', 'embodiment_id', 'incarnation_id')))):
+        raise OnboardingError('receiving_identity_admission_conflict')
+    return {**{key: scope[key] for key in ('schema', 'being_ref', 'manifest_hash', 'evaluated_at_ms',
+                                         'credential_ref', 'incarnation_authorization_ref')},
+            'origin': dict(server)}
+
+
 class OwnerGroupClient:
     """Finite owner-local control of the actual selected group daemon.
 
@@ -109,6 +135,25 @@ class OwnerGroupClient:
                 or gate.get('process_id') != observed['process']['pid']):
             raise OnboardingError('receiving_group_control_required')
         return dict(schema='cluster-receiving-owner-observation/v1', gate=gate, **observed)
+
+    def identity(self, *, require_admitted: bool = False) -> dict:
+        """Use the status grant; require admission only for the guest profile.
+
+        Current credential expiry still requires public-bundle verification;
+        neither this query nor Source's user-service proves Cluster admission.
+        """
+        observed = self.status()
+        before = self.socket.lstat()
+        response = self._client('status').scope_me()[1]
+        after = self.socket.lstat()
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise OnboardingError('receiving_group_socket_changed')
+        if self._observer is None:
+            raise OnboardingError('receiving_owner_scope_required')
+        self._observer.verify()
+        identity = receiving_identity(response, observed['runtime_status'], observed['server'],
+                                      require_admitted=require_admitted)
+        return {**observed, 'identity': identity}
 
     def prepare_control(self, command: dict, path: Path) -> dict:
         """Persist one exact native request before attempting its effect."""

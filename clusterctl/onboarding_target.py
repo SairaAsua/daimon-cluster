@@ -568,6 +568,7 @@ class Target:
                         or not isinstance(application, dict)
                         or application.get('loaded_base_sha256') != hashlib.sha256(canonical_bytes(loaded)).hexdigest()):
                     raise OnboardingError('qualified_onboarding_loaded_view_required')
+            identity = None
             if admitted:
                 _, observed = client.scope_me()
                 scope_result = observed.get('result')
@@ -576,6 +577,8 @@ class Target:
                         or any(body.get(field) != expected[field] for field in
                                ('body_ref', 'embodiment_id', 'incarnation_id'))):
                     raise OnboardingError('onboarding_admission_not_current')
+                from .onboarding_receiving_update import receiving_identity
+                identity = receiving_identity(observed, status['result'], status['server'])
             parent = None
             if admitted and connected:
                 child_process = presence.process
@@ -595,6 +598,7 @@ class Target:
                 admission_parent=None if parent is None else parent.process,
                 runtime_sha256=prepared.get('receiving_controller', prepared['receipt'])["runtime_sha256"],
                 runtime_status=status['result'], group=group, group_runtime_status=group_status,
+                receiving_identity=identity,
                 receiving_readiness='unobserved',
                 responder_association='same-connection' if connected else 'legacy-probe')
 

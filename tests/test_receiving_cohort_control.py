@@ -12,9 +12,54 @@ import pytest
 from clusterctl import being_seed
 from clusterctl.onboarding import OnboardingError, digest
 from clusterctl.onboarding_code_successor import plan_update
-from clusterctl.onboarding_receiving_update import CohortController, OwnerGroupClient, apply_host_selection, freeze_senders
+from clusterctl.onboarding_receiving_update import CohortController, OwnerGroupClient, apply_host_selection, freeze_senders, receiving_identity
 from clusterctl.operation_journal import OperationJournal
 from tests.test_receiving_host_selection import fixture as host_fixture
+
+
+def identity_fixture():
+    origin = dict(body_ref='codex:fixture:eko', embodiment_id='body:eko', incarnation_id='incarnation:eko')
+    status = dict(being_ref='being:eko', manifest_hash='a'*64, local_origin=origin)
+    scope = dict(schema='dm.scope.me/v1', being_ref=status['being_ref'], manifest_hash=status['manifest_hash'],
+        origin=origin, evaluated_at_ms=100, credential_ref='credential:eko',
+        incarnation_authorization_ref='authorization:eko', body={**origin, 'state': 'running'},
+        heads={'private': 'excluded'}, effective={'private': 'excluded'}, body_capabilities=['excluded'])
+    return dict(ok=True, server=origin, result=scope), status, origin
+
+
+def test_current_identity_projection_excludes_ledger_and_capability_data():
+    response, status, origin = identity_fixture()
+    result = receiving_identity(response, status, origin)
+    assert result['credential_ref'] == 'credential:eko'
+    assert result['incarnation_authorization_ref'] == 'authorization:eko'
+    assert not {'body', 'heads', 'effective', 'body_capabilities'} & set(result)
+    result['origin']['embodiment_id'] = 'changed'
+    assert origin['embodiment_id'] == 'body:eko'
+
+
+def test_source_identity_does_not_invent_a_cluster_admission_requirement():
+    response, status, origin = identity_fixture()
+    response['result']['body'] = None
+    assert receiving_identity(response, status, origin, require_admitted=False)['origin'] == origin
+    with pytest.raises(OnboardingError, match='receiving_identity_admission_conflict'):
+        receiving_identity(response, status, origin)
+
+
+@pytest.mark.parametrize('part', ['server', 'origin', 'being_ref', 'manifest_hash', 'body',
+                                  'credential_ref', 'incarnation_authorization_ref', 'evaluated_at_ms'])
+def test_identity_projection_refuses_unbound_or_missing_current_admission(part):
+    response, status, origin = identity_fixture()
+    response = copy.deepcopy(response)
+    if part == 'server':
+        response['server']['embodiment_id'] = 'another-body'
+    elif part == 'body':
+        response['result']['body']['state'] = 'stopped'
+    elif part == 'evaluated_at_ms':
+        response['result'][part] = True
+    else:
+        response['result'][part] = None
+    with pytest.raises(OnboardingError, match='receiving_identity_admission_conflict'):
+        receiving_identity(response, status, origin)
 
 
 class FakeOwner:
