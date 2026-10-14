@@ -247,6 +247,8 @@ class Target:
             raise OnboardingError("onboarding_target_runtime_conflict")
         store = keystore.EncryptedKeystore(self.package / "runtime/custody.json").open(
             self._reader, minimum_counter=1, required_control_head=authority.state.head)
+        if store.counter != bundle['keystore']['counter']:
+            raise OnboardingError('existing_onboarding_target_preserved')
         signing = store.secrets[bundle["keystore"]["signing_slot"]]
         if identity.signing_descriptor(signing) != activation["body"]["credential"]["body"]["signing_key"]:
             raise OnboardingError("onboarding_target_runtime_conflict")
@@ -258,16 +260,20 @@ class Target:
             complete = self.credential / "receipt.json"
             if complete.exists() and document(complete) != current_receipt:
                 raise OnboardingError("onboarding_target_runtime_conflict")
-            if bundle != expected:
+            comparison, controller = self._controller_comparison(expected, bundle, store,
+                activation['body']['credential']['body']['signing_key'])
+            if comparison != expected:
                 if (not complete.exists() or not (self.root / 'peer/accepted-private.json').is_file()
-                        or set(bundle) != set(expected) or any(bundle[key] != expected[key]
+                        or set(comparison) != set(expected) or any(comparison[key] != expected[key]
                             for key in expected if key not in {'sources', 'relationships'})):
                     raise OnboardingError('existing_onboarding_target_preserved')
                 from .onboarding_peer import augmented
-                peer_receipt, peer_complete = augmented(self, expected, bundle)
-                result = dict(phase='v8' if peer_complete else 'peer-published', request=request, receipt=peer_receipt)
+                peer_receipt, peer_complete = augmented(self, expected, comparison)
+                result: dict = dict(phase='v8' if peer_complete else 'peer-published', request=request, receipt=peer_receipt)
             else:
                 result = dict(phase="v8" if complete.exists() else "v8-published", request=request, receipt=current_receipt)
+            if controller is not None:
+                result['receiving_controller'] = {**controller, 'historical_receipt_sha256': digest(result['receipt'])}
             if result['phase'] == 'v8':
                 from .onboarding_peer import observed_group
                 group = observed_group(self, bundle)
@@ -275,6 +281,61 @@ class Target:
                     result['group'] = group
             return result
         return dict(phase="credential-pending" if self.existing else "v7", request=request, receipt=receipt)
+
+    def _controller_comparison(self, expected: dict, bundle: dict, store, signing_key: dict) -> tuple[dict, dict | None]:
+        """Observe the native one-controller successor without changing history.
+
+        Normalize only for the retained credential/peer comparison. Current
+        group validation and loaded evidence always use the actual bundle.
+        Authenticity remains inspectable after expiry; this grants no control.
+        """
+        from daimon_matrix import canonical, local_api, operator_capabilities as profiles
+        fields = ('capabilities', 'operator_capability_binding', 'keystore')
+        if all(bundle.get(key) == expected[key] for key in fields):
+            return bundle, None
+        try:
+            profile = profiles.host_capability_profile('receiving-controller')
+            previous = expected['capabilities']
+            current = bundle['capabilities']
+            if (len(current) != len(previous) + 1 or current[:-1] != previous
+                    or any(row['profile'] == profile for row in previous)
+                    or bundle['keystore'] != {**expected['keystore'], 'counter': expected['keystore']['counter'] + 1}
+                    or store.counter != bundle['keystore']['counter']):
+                raise ValueError
+            label = expected['runtime_label']
+            slot = profiles.host_capability_slot(label, 'receiving-controller')
+            row = current[-1]
+            key = store.secrets[slot]
+            if (len(key) != 32 or any(value == key for name, value in store.secrets.items() if name != slot)
+                    or row != dict(profile=profile, runtime_id=expected['runtime_id'],
+                        secret_slot=slot, descriptor=row['descriptor'])):
+                raise ValueError
+            for capability in current:
+                local_api.LocalCapability.from_value(capability['descriptor'], store.secrets[capability['secret_slot']])
+            capability = local_api.LocalCapability.from_value(row['descriptor'], key)
+            if (capability.client_id != f'client:host:{label}:receiving-controller'
+                    or frozenset(capability.methods) != profiles.OPTIONAL_HOST_CAPABILITY_PROFILES['receiving-controller']
+                    or capability.descriptor['status'] != 'active'
+                    or capability.descriptor['schema'] != local_api.CAPABILITY_SCHEMA):
+                raise ValueError
+            profiles.verify_operator_capability_binding(bundle['operator_capability_binding'],
+                runtime_id=expected['runtime_id'], runtime_label=label,
+                being_ref=expected['manifest']['being_ref'], origin=expected['local_origin'],
+                signing_key=signing_key, capability_rows=current)
+            directory = private_directory(self.package / 'runtime' / profile['client_directory'])
+            key_path = directory / profile['client_key_filename']
+            if (onboarding_release.regular(key_path, uid=os.geteuid()) != key or key_path.stat().st_mode & 0o077
+                    or document(directory / profile['client_config_filename']) != dict(
+                        schema='dm.local.client-config/v3', capability=capability.descriptor,
+                        expected_server=expected['local_origin'], runtime_id=expected['runtime_id'], runtime_label=label)):
+                raise ValueError
+            comparison = {**bundle, **{field: expected[field] for field in fields}}
+            observation = dict(schema='cluster-receiving-controller-observation/v1',
+                runtime_sha256=hashlib.sha256(canonical.canonical_bytes(bundle)).hexdigest(),
+                counter=store.counter, capability_id=capability.capability_id, control_usability='unobserved')
+            return comparison, observation
+        except (KeyError, TypeError, ValueError, OSError):
+            raise OnboardingError('existing_onboarding_target_preserved') from None
 
     def credential_request(self) -> dict:
         """Persist one Body-accepted native proposal before contacting Root."""
@@ -514,7 +575,7 @@ class Target:
             return dict(schema="cluster-onboarding-runtime-presence/v1", plan_digest=digest(self.plan),
                 origin=expected, process=presence.process, runtime_id=config.runtime_id,
                 admission_parent=None if parent is None else parent.process,
-                runtime_sha256=prepared["receipt"]["runtime_sha256"],
+                runtime_sha256=prepared.get('receiving_controller', prepared['receipt'])["runtime_sha256"],
                 runtime_status=status['result'], group=group, group_runtime_status=group_status,
                 receiving_readiness='unobserved',
                 responder_association='same-connection' if connected else 'legacy-probe')

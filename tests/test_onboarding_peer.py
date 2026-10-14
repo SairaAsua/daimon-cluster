@@ -10,7 +10,7 @@ import pytest
 
 from clusterctl import onboarding_peer
 from clusterctl.onboarding import OnboardingError, digest
-from tests.test_onboarding_target import receiving, files
+from tests.test_onboarding_target import receiving, files, provision_receiving_controller
 
 
 def test_legacy_history_tool_uses_exact_qualified_sdk_selection(tmp_path, monkeypatch):
@@ -148,6 +148,30 @@ def test_actual_native_peer_accept_keeps_credential_receipt_and_receiving_writes
     after = files(onboarding_peer.root(target))
     assert onboarding_peer.accept(target, packet, expected_being=sender) == response
     assert files(onboarding_peer.root(target)) == after
+
+
+def test_native_receiving_controller_observes_retained_peer_history_without_completing_it(journey):
+    _,sources,public,packet,_=journey
+    target=sources[1][1]
+    sender=public[0]['document']['authority']['manifest']['being_ref']
+    onboarding_peer.accept(target,packet,expected_being=sender)
+    before=target.observe()
+    credential=files(target.credential)
+    peer=files(onboarding_peer.root(target))
+    provision_receiving_controller(target)
+    observed=target.observe()
+    assert observed['phase']=='v8' and observed['receipt']==before['receipt']
+    assert observed['receiving_controller']['runtime_sha256']==digest(target.document_bundle())
+    assert observed['receiving_controller']['runtime_sha256']!=before['receipt']['runtime_sha256']
+    assert files(target.credential)==credential and files(onboarding_peer.root(target))==peer
+    marker=onboarding_peer.root(target)/'ready.json'
+    raw=marker.read_bytes()
+    marker.unlink()
+    try:
+        assert target.observe()['phase']=='peer-published'
+    finally:
+        marker.write_bytes(raw)
+        marker.chmod(0o600)
 
 
 def test_peer_cannot_substitute_identity_or_unsigned_plan(journey):

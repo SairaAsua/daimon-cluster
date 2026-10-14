@@ -9,6 +9,132 @@ from clusterctl.onboarding_target import Target
 from tests.test_onboarding_custody import fixture
 
 
+def provision_receiving_controller(target):
+    """Publish through the actual native upgrade; only synthetic caller custody."""
+    import importlib.metadata
+    import inspect
+    import json
+    import time
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    if 'provision_receiving_controller' not in inspect.signature(upgrade.stage_capabilities).parameters:
+        from clusterctl.onboarding_sdk import MATRIX_COMMIT
+        selected=json.loads(importlib.metadata.distribution('daimon-matrix').read_text('direct_url.json'))
+        assert selected['vcs_info']['commit_id']==MATRIX_COMMIT
+        pytest.skip('retained legacy SDK has no optional controller; qualifies under the selected successor SDK')
+    root=target.package/'runtime'
+    original=target.document_bundle()
+    transaction=root.parent/'receiving-controller-upgrade'
+    password=target._reader()
+    try:
+        upgrade.stage_capabilities(source=root,transaction=transaction,
+            expected_source_sha256=upgrade.inventory_digest(root), expected_counter=original['keystore']['counter'],
+            expected_control_head=original['control_head'], expected_being_ref=original['manifest']['being_ref'],
+            expected_origin=original['local_origin'],add_methods={},expires_at_ms=time.time_ns()//1_000_000+3_600_000,
+            password=bytes(password),externally_quiesced=True,provision_receiving_controller=True)
+        upgrade.publish(source=root,transaction=transaction,
+            expected_receipt_sha256=hashlib.sha256((transaction/'ready.json').read_bytes()).hexdigest(),
+            password=bytes(password),externally_quiesced=True,capability_upgrade=True)
+    finally:
+        password[:]=b'\0'*len(password)
+
+
+def test_native_receiving_controller_preserves_historical_acceptance_and_reports_current_bundle(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from clusterctl import onboarding_target
+    from daimon_matrix.local_api import LocalCapability
+    from daimon_matrix.keystore import EncryptedKeystore
+    ceremony,plan,target=receiving(tmp_path)
+    target.activate(ceremony.authorize_target(plan,target.prepare()))
+    target.apply_credential(ceremony.authorize_credential(plan,target.credential_request()))
+    before=target.observe()
+    retained=files(target.credential)
+    provision_receiving_controller(target)
+    observed=target.observe()
+    assert observed['phase']=='v8' and observed['receipt']==before['receipt']
+    assert observed['receiving_controller']['runtime_sha256']==digest(target.document_bundle())
+    assert observed['receiving_controller']['historical_receipt_sha256']==digest(before['receipt'])
+    assert observed['receiving_controller']['control_usability']=='unobserved'
+    assert files(target.credential)==retained
+    # Expiry is a controlled clock seam, not new control or live waiting.
+    row=target.document_bundle()['capabilities'][-1]
+    custody=EncryptedKeystore(target.package/'runtime/custody.json').open(target._reader)
+    capability=LocalCapability.from_value(row['descriptor'],custody.secrets[row['secret_slot']])
+    expired=capability.descriptor['not_after_ms']
+    assert not capability.active_at(expired)
+    monkeypatch.setattr(onboarding_target,'time',SimpleNamespace(time_ns=lambda:expired*1_000_000))
+    assert target.observe()==observed
+    # Missing credential acceptance stays pending, despite an issued controller.
+    marker=target.credential/'receipt.json'
+    raw=marker.read_bytes()
+    marker.unlink()
+    try:
+        assert target.observe()['phase']=='v8-published'
+    finally:
+        marker.write_bytes(raw)
+        marker.chmod(0o600)
+
+
+def test_native_receiving_controller_rejects_tampering_and_wrong_custody(tmp_path):
+    import copy
+    from daimon_matrix import canonical, keystore, operator_capabilities
+    ceremony,plan,target=receiving(tmp_path)
+    target.activate(ceremony.authorize_target(plan,target.prepare()))
+    target.apply_credential(ceremony.authorize_credential(plan,target.credential_request()))
+    provision_receiving_controller(target)
+    root=target.package/'runtime'
+    bundle=target.document_bundle()
+    profile=operator_capabilities.host_capability_profile('receiving-controller')
+    directory=root/profile['client_directory']
+    key_path=directory/profile['client_key_filename']
+    config_path=directory/profile['client_config_filename']
+    preserved={path:path.read_bytes() for path in (root/'runtime.json',root/'custody.json',key_path,config_path)}
+    store=keystore.EncryptedKeystore(root/'custody.json').open(target._reader)
+    slot=bundle['capabilities'][-1]['secret_slot']
+    for change in ('old-grant','counter','baseline-bundle','binding','client-origin','client-mode','missing-key','reused-file-key',
+                   'missing-custody-key','reused-custody-key'):
+        try:
+            changed=copy.deepcopy(bundle)
+            if change=='old-grant':
+                changed['capabilities'][0]['descriptor']['status']='revoked'
+            elif change=='counter':
+                changed['keystore']['counter']+=1
+            elif change=='baseline-bundle':
+                changed=document(target.credential/'candidate.json')
+            elif change=='binding':
+                changed['operator_capability_binding']['signature']['value']='forged'
+            elif change=='client-origin':
+                config=document(config_path)
+                config['expected_server']['body_ref']='wrong-body'
+                config_path.write_bytes(canonical.canonical_bytes(config))
+            elif change=='client-mode':
+                key_path.chmod(0o644)
+            elif change=='missing-key':
+                key_path.unlink()
+            elif change=='reused-file-key':
+                key_path.write_bytes(store.secrets[bundle['capabilities'][0]['secret_slot']])
+            else:
+                secrets=dict(store.secrets)
+                if change=='missing-custody-key':
+                    del secrets[slot]
+                else:
+                    secrets[slot]=secrets[bundle['capabilities'][0]['secret_slot']]
+                # Genuine encrypted fault artifact at the same counter; no
+                # fake custody reader or observation acceptance seam.
+                fault=keystore.EncryptedKeystore.create(root/(change+'.json'),target._reader,
+                    control_head=store.control_head,secrets=secrets)
+                fault.rotate(target._reader,target._reader,expected_counter=1,
+                    control_head=store.control_head,secrets=secrets)
+                (root/'custody.json').write_bytes(fault.path.read_bytes())
+            (root/'runtime.json').write_bytes(canonical.canonical_bytes(changed))
+            with pytest.raises(OnboardingError,match='existing_onboarding_target_preserved'):
+                target.observe()
+        finally:
+            for path,raw in preserved.items():
+                path.write_bytes(raw)
+                path.chmod(0o600)
+        assert target.observe()['phase']=='v8'
+
+
 def receiving(tmp_path):
     ceremony, plan, _ = fixture(tmp_path)
     ceremony.prepare(plan, identity_mode="first")
