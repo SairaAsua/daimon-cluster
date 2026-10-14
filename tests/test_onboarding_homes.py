@@ -393,7 +393,7 @@ def test_worker_preflight_checks_selected_gateway_uid_without_reading_keys(tmp_p
     assert service.validate_config(config, credential_uid=owner) == config
 
 
-def test_provider_refuses_absent_or_different_admitted_being_before_guest_writes(monkeypatch):
+def test_provider_refuses_absent_or_different_admitted_being_before_guest_writes(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from clusterctl.onboarding import Observation, digest
     from clusterctl.onboarding_homes import IncusProvider
@@ -412,7 +412,9 @@ def test_provider_refuses_absent_or_different_admitted_being_before_guest_writes
     monkeypatch.setattr('clusterctl.onboarding_homes.validate_delivery', lambda value: value)
     backend = SimpleNamespace(authorize=lambda *args: True,
                               _environment=lambda p: Observation('complete'))
-    provider = IncusProvider(SimpleNamespace(_load=lambda name: {'plan': job}), backend)
+    store = JobStore(tmp_path / 'jobs')
+    store.submit(job, backend)
+    provider = IncusProvider(store, backend)
     placement = {'name': job['name'], 'plan_digest': digest(job), 'delivery': details}
     with pytest.raises(OnboardingError, match='home_admission_unconfirmed'):
         provider.reconcile(placement)

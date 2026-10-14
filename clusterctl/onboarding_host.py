@@ -12,6 +12,7 @@ import inspect
 import os
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -24,6 +25,42 @@ from .onboarding_progress import Progress
 
 def sha(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+RUNTIME_SELECTION_KEYS = frozenset({'runtime_code', 'runtime_digest', 'runtime_by_name'})
+
+
+class CurrentHostConfig:
+    """Refresh verified runtime selectors without moving a warm worker's roots.
+
+    Exact changed configuration is fully validated once. Runtime selection may
+    advance; jobs/grants/account/admission/Telegram directories, home placements
+    and other process configuration require their separate explicit lifecycle.
+    """
+    def __init__(self, path: Path):
+        self.path = path
+        self._value = being_seed._read(path)
+        self._config = HostConfig.load(path, expected_value=self._value)
+        if being_seed._read(path) != self._value:
+            raise OnboardingError('onboarding_worker_configuration_changed')
+        self._fixed = {key: value for key, value in self._value.items() if key not in RUNTIME_SELECTION_KEYS}
+        self._lock = threading.Lock()
+
+    def current(self) -> HostConfig:
+        with self._lock:
+            return self._current()
+
+    def _current(self) -> HostConfig:
+        value = being_seed._read(self.path)
+        if value == self._value:
+            return self._config
+        if {key: item for key, item in value.items() if key not in RUNTIME_SELECTION_KEYS} != self._fixed:
+            raise OnboardingError('onboarding_worker_configuration_restart_required')
+        candidate = HostConfig.load(self.path, expected_value=value)
+        if being_seed._read(self.path) != value:
+            raise OnboardingError('onboarding_worker_configuration_changed')
+        self._value, self._config = value, candidate
+        return candidate
 
 
 @dataclass(frozen=True)
@@ -60,8 +97,10 @@ class HostConfig:
     browser_artifact: dict[str, str] | None = None
 
     @classmethod
-    def load(cls, path: Path) -> HostConfig:
+    def load(cls, path: Path, *, expected_value: dict | None = None) -> HostConfig:
         value = being_seed._read(path)
+        if expected_value is not None and value != expected_value:
+            raise OnboardingError('onboarding_worker_configuration_changed')
         consent_keys = {"consent_state", "consent_uid"}
         custody_keys = {"custody", "custody_grants"}
         runtime_keys = {"runtime_code", "runtime_digest"}

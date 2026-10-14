@@ -13,7 +13,7 @@ import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Protocol, Any
+from typing import Callable, Literal, Protocol, Any
 
 from . import being_seed
 
@@ -174,15 +174,18 @@ class JobStore:
     def operation_id(plan_digest: str, stage: str) -> str:
         return hashlib.sha256((plan_digest + ":" + stage).encode()).hexdigest()
 
-    def submit(self, plan: dict, backend: Backend) -> dict:
+    def submit(self, plan: dict, backend: Backend | Callable[[], Backend]) -> dict:
         plan = validate_plan(plan)
         fingerprint = digest(plan)
-        if not backend.authorize(plan, fingerprint):
+        current = backend() if callable(backend) else backend
+        if not current.authorize(plan, fingerprint):
             raise OnboardingError("host_authorization_required")
         directory = self.directory(plan["name"])
         private_directory(self.root, create=True)
         # Parent lock makes first publication atomic with competing submissions.
         with being_seed._locked(self.root):
+            if callable(backend) and not backend().authorize(plan, fingerprint):
+                raise OnboardingError("host_authorization_required")
             if (directory / "job.json").exists():
                 record = self._load(plan["name"])
                 if record["plan_digest"] != fingerprint:
@@ -203,7 +206,7 @@ class JobStore:
         record["updated_ms"] = int(time.time() * 1000)
         being_seed._write(directory / "job.json", record)
 
-    def tick(self, name: str, backend: Backend) -> dict:
+    def tick(self, name: str, backend: Backend | Callable[[], Backend]) -> dict:
         directory = self.directory(name)
         private_directory(self.root)
         private_directory(directory)
@@ -211,6 +214,7 @@ class JobStore:
             record = self._load(name)
             if record["state"] == "complete":
                 return self.project(record)
+            backend = backend() if callable(backend) else backend
             if not backend.authorize(record["plan"], record["plan_digest"]):
                 record.update(state="waiting", reason="host_authorization_required")
                 self._save(directory, record)

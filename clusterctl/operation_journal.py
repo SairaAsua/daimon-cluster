@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import fcntl
 import hashlib
 import json
@@ -10,12 +11,14 @@ import os
 import sqlite3
 import stat
 import time
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
 
 JOURNAL_SCHEMA = "cluster-operation-journal/v1"
 INTENT_SCHEMA = "cluster-operation-intent/v1"
+_UNSET = object()
 TERMINAL_STATES = frozenset({"completed", "compensated"})
 UNSAFE_STATES = frozenset({"degraded"})
 OPEN_STATES = frozenset(
@@ -67,6 +70,7 @@ class OperationJournal:
 
     def __init__(self, state_dir: str | Path, *, initialize: bool = True):
         self.path = Path(state_dir) / "operation-journal.sqlite3"
+        self._owners = threading.local()
         if initialize:
             self._initialize()
         else:
@@ -372,7 +376,53 @@ class OperationJournal:
             if "connection" in locals():
                 connection.close()
 
-    def advance(
+    @contextlib.contextmanager
+    def mutation_lock(self, operation_id: str):
+        """Own an operation through its external effect and journal mutation.
+
+        Kernel ownership is shared by every advance, including abandonment.
+        Nested advances by this same controller/thread reuse its ownership;
+        competing instances/processes never break a live lock by age.
+        """
+        process_id = os.getpid()
+        owned: set[str] = (getattr(self._owners, 'operations', set())
+                           if getattr(self._owners, 'process_id', None) == process_id else set())
+        if operation_id in owned:
+            yield
+            return
+        name = hashlib.sha256(operation_id.encode()).hexdigest()
+        path = self.path.parent / ('.operation-' + name + '.lock')
+        descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            info = os.fstat(descriptor)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) & 0o077):
+                raise JournalError('operation mutation lock is not owner-controlled')
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise JournalConflict('operation mutation is in progress') from exc
+            self._owners.operations = owned | {operation_id}
+            self._owners.process_id = process_id
+            try:
+                yield
+            finally:
+                self._owners.operations = owned
+        finally:
+            os.close(descriptor)
+
+    def advance(self, operation_id: str, state: str, *,
+                runtime_observation: dict[str, Any] | None = None,
+                logical_observation: dict[str, Any] | None = None,
+                result: dict[str, Any] | None = None, last_error: str | None = None,
+                expected_runtime_observation: object = _UNSET) -> dict[str, Any]:
+        with self.mutation_lock(operation_id):
+            return self._advance(operation_id, state,
+                runtime_observation=runtime_observation,
+                logical_observation=logical_observation, result=result,
+                last_error=last_error, expected_runtime_observation=expected_runtime_observation)
+
+    def _advance(
         self,
         operation_id: str,
         state: str,
@@ -381,6 +431,7 @@ class OperationJournal:
         logical_observation: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
         last_error: str | None = None,
+        expected_runtime_observation: object = _UNSET,
     ) -> dict[str, Any]:
         if state not in _STAGE_ORDER:
             raise JournalError("invalid operation journal state")
@@ -394,6 +445,9 @@ class OperationJournal:
             if row is None:
                 raise JournalError("unknown operation journal id")
             current = str(row["state"])
+            if (expected_runtime_observation is not _UNSET
+                    and self._decode(row)['runtime_observation'] != expected_runtime_observation):
+                raise JournalConflict("runtime observation changed during reconciliation")
             if current in TERMINAL_STATES and current != state:
                 raise JournalConflict("terminal operation cannot advance")
             if current == "degraded" and state != "degraded":

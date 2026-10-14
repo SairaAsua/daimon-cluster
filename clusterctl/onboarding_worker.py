@@ -36,7 +36,7 @@ class Worker:
         if self.plans:
             for plan in self.plans():
                 try:
-                    self.store.submit(plan, self.backend())
+                    self.store.submit(plan, self.backend)
                 except (OnboardingError, being_seed.SeedError, OSError, ValueError):
                     continue
 
@@ -45,7 +45,7 @@ class Worker:
             reconcile = getattr(self.homes, 'reconcile_committed', None)
             if reconcile:
                 reconcile(name)
-            result = self.store.tick(name, self.backend())
+            result = self.store.tick(name, self.backend)
             if self.publish:
                 self.publish(result)
             if self.homes:
@@ -91,11 +91,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--home-placements',type=Path)
     args = parser.parse_args(argv)
     try:
-        from .onboarding_host import HostBackend, HostConfig
+        from .onboarding_host import HostBackend, CurrentHostConfig
 
-        config = HostConfig.load(args.config)
+        selections = CurrentHostConfig(args.config)
+        config = selections.current()
         from .onboarding_input import VerificationCache
         inputs = VerificationCache()
+        def backend():
+            return HostBackend(selections.current(), input_cache=inputs)
         from .onboarding_progress import Progress
 
         progress = Progress(config.progress, worker_uid=os.geteuid()) if config.progress else None
@@ -106,9 +109,10 @@ def main(argv: list[str] | None = None) -> int:
                 raise OnboardingError('trusted_home_progress_required')
             from .onboarding_homes import configure
             homes=configure(args.home_placements,progress=config.progress,store=store,
-                            backend=HostBackend(config,input_cache=inputs),worker_uid=os.geteuid())
-        worker = Worker(store, lambda: HostBackend(config, input_cache=inputs), concurrency=config.concurrency,
-                        publish=progress.publish if progress else None, plans=config.approved_plans,homes=homes)
+                            backend=backend,worker_uid=os.geteuid())
+        worker = Worker(store, backend, concurrency=config.concurrency,
+                        publish=progress.publish if progress else None,
+                        plans=lambda: selections.current().approved_plans(), homes=homes)
         if args.once:
             print(json.dumps(worker.once()))
             return 0

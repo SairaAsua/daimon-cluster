@@ -15,10 +15,12 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import uuid
+from contextlib import ExitStack
 from pathlib import Path
 
-from . import onboarding_release, onboarding_sdk
-from .onboarding import OnboardingError, digest
+from . import being_seed, onboarding_release, onboarding_sdk
+from .onboarding import JobStore, OnboardingError, digest, private_directory
 
 
 def _manifest(path: Path, expected: str, *, uid: int) -> dict:
@@ -154,3 +156,81 @@ def prepare_sdk(home: Path, code: Path, code_digest: str, manifest_path: Path,
     if receipt.get('sdk_digest') != checked['sdk_digest']:
         raise OnboardingError('installed_onboarding_sdk_changed')
     return {**checked, 'installation': receipt, 'interpreter': interpreter, 'prepared': True}
+
+
+def apply_host_selection(journal, operation_id: str, config_path: Path) -> dict:
+    """Apply/reconcile the retained host-runtime projection under real job locks.
+
+    This is one controller effect, not completed receiving adoption. Only runtime
+    selectors change; the frozen complete predecessor prevents an update from
+    replacing concurrently added receivers or moving the worker's private roots.
+    No service, identity, provider, native input or authority effect is performed.
+    """
+    from .onboarding_host import HostConfig, RUNTIME_SELECTION_KEYS
+    from .operation_journal import JournalConflict
+    row = journal.get(operation_id)
+    if row is None or row['operation'] != 'receiving-update' or row['state'] in {'degraded', 'compensated'}:
+        raise OnboardingError('receiving_update_selection_required')
+    before = row['expected_precondition']
+    after = row['intended_transition']
+    call = row['intent'].get('runtime_call', {})
+    if (call.get('precondition_digest') != digest(before)
+            or call.get('transition_digest') != digest(after)
+            or not isinstance(before.get('host_configuration'), dict)
+            or not isinstance(after.get('host_runtime'), dict)
+            or not set(after['host_runtime']) <= RUNTIME_SELECTION_KEYS
+            or before.get('host_config_sha256') != digest(before['host_configuration'])):
+        raise OnboardingError('receiving_update_selection_required')
+    original = before['host_configuration']
+    candidate = {**{key: value for key, value in original.items() if key not in RUNTIME_SELECTION_KEYS},
+                 **after['host_runtime']}
+    # Configuration path is part of the frozen operation, never a fresh target.
+    if before.get('host_config') != str(config_path):
+        raise OnboardingError('receiving_update_selection_required')
+    jobs = private_directory(Path(original['jobs']))
+    store = JobStore(jobs)
+    with ExitStack() as ownership:
+        ownership.enter_context(journal.mutation_lock(operation_id))
+        ownership.enter_context(being_seed._locked(jobs))
+        # Parent ownership excludes new submissions. Existing ticks hold exactly
+        # these kernel locks, and resolve their backend only after taking one.
+        for name in store.names():
+            ownership.enter_context(being_seed._locked(private_directory(store.directory(name))))
+        row = journal.get(operation_id)
+        if row is None or row['state'] in {'degraded', 'compensated'}:
+            raise JournalConflict('receiving operation requires explicit repair')
+        current = being_seed._read(config_path)
+        if current not in (original, candidate):
+            raise JournalConflict('receiving host selection has advanced beyond the frozen predecessor')
+        temporary = config_path.with_name('.receiving-selection-' + uuid.uuid4().hex + '.json')
+        try:
+            being_seed._write(temporary, candidate)
+            HostConfig.load(temporary)
+            if being_seed._read(config_path) != current:
+                raise JournalConflict('receiving host selection changed during validation')
+            if current != candidate and row['state'] not in {'planned', 'runtime-dispatching'}:
+                raise JournalConflict('later receiving stage cannot reapply an absent host selection')
+            if row['state'] == 'planned':
+                row = journal.advance(operation_id, 'runtime-dispatching')
+            if current != candidate:
+                os.replace(temporary, config_path)
+            # A prior replace-before-ACK is an observed effect. Complete its
+            # directory durability before recording success, without rewriting.
+            descriptor = os.open(config_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            result = dict(schema='cluster-receiving-host-selection/v1',
+                operation_id=operation_id, previous_sha256=digest(original),
+                selected_sha256=digest(candidate), selected=True, receiving_readiness='unobserved')
+            observed = dict(row['runtime_observation'] or {})
+            observed['host_selection'] = result
+            # Concurrent stage evidence must not be overwritten. A conflict is
+            # recoverable by rereading the retained operation and exact file;
+            # the atomic selector effect is not repeated on that retry.
+            journal.advance(operation_id, row['state'], runtime_observation=observed,
+                            expected_runtime_observation=row['runtime_observation'])
+            return result
+        finally:
+            temporary.unlink(missing_ok=True)

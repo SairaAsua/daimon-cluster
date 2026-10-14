@@ -95,6 +95,33 @@ authority adoption, account update or model turn is invoked by this helper.
 The owning journal/controller still coordinates cohort generations, real service
 drain/load/readiness and forward authority/application recovery before activation.
 
+`apply_host_selection` applies the retained operation's full runtime-selector
+projection to its exact host configuration. The complete frozen predecessor is
+compared under the existing jobs-parent and every extant job kernel lock. A newer
+selection or newly added receiver is never overwritten by a stale update. These
+locks fence first submissions and ongoing ticks; each worker backend is resolved
+inside its job lock, using the current fully validated runtime selection.
+Warm workers refresh selectors without moving private roots, account/admission,
+Telegram or other process settings. Non-runtime changes require their own explicit
+worker lifecycle rather than silently changing a running process's bindings.
+Home-provider calls use a fresh backend inside the same job ownership, including
+their callbacks independent of still-pending acceptance. Cache loads bind the
+loader's own protected read to the exact expected configuration, rejecting ABA
+changes rather than caching a different set of process roots.
+
+Selection enters runtime-dispatching before atomic publication. Replace-before-ACK
+recovery observes the exact file and persists directory durability without repeating
+replacement. Recording its observation uses a journal compare-and-swap, preserving
+concurrent stage evidence; a conflict is retried from retained state. This helper
+owns the operation's kernel mutation lock through validation and publication;
+all journal advances, including abandonment, take that lock. Reentrancy belongs
+only to the same journal/controller, thread and process, not a forked child.
+This prevents cancellation from crossing a still-running selector effect.
+The helper
+does not complete the operation or establish loaded/readiness/communication evidence.
+Later controller stages must preserve these frozen vectors and ownership fences;
+new admission must use the same jobs locks when altering receiver selectors.
+
 Retain the actual currently selected Telegram artifact. Where Telegram already
 has its own qualified successor, keep that independent selection. If building a
 combined V3 successor, pass its current qualified artifact explicitly: building
