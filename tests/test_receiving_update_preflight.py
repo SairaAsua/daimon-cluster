@@ -97,7 +97,7 @@ def test_prepare_retries_actual_offline_sdk_without_changing_native_state(tmp_pa
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(b'Existing private receiving state; preserve exactly.')
     before = {p: p.read_bytes() for p in home.rglob('*') if p.is_file()}
-    call(code, checksum, path, manifest, prepare=True, home=home)
+    first = call(code, checksum, path, manifest, prepare=True, home=home)
     second = call(code, checksum, path, manifest, prepare=True, home=home)
     assert first == second and first['prepared'] is True
     assert first['installation']['matrix_commit'] == REVISION
@@ -120,7 +120,7 @@ def test_new_revision_requires_exact_wheel_selection_not_a_commit_label(tmp_path
 
 def test_completed_generation_with_other_interpreter_is_not_reported_prepared(tmp_path, monkeypatch):
     code, checksum, home, path, manifest, _ = fixture(tmp_path)
-    first = call(code, checksum, path, manifest, prepare=True, home=home)
+    call(code, checksum, path, manifest, prepare=True, home=home)
     receipt = next(home.rglob('installation.json'))
     original_receipt = receipt.read_bytes()
     original_module = next(home.glob('.local/share/daimon-matrix/sdk/*/venv/lib/python*/site-packages/daimon_matrix/canonical.py'))
