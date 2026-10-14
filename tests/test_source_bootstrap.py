@@ -46,7 +46,7 @@ def fixture(tmp_path, monkeypatch):
     from clusterctl import onboarding_receiving_update as updates, owner_process
     root = tmp_path / 'runtime'
     root.mkdir(mode=0o700)
-    bundle = dict(local_origin={'embodiment_id': 'fixture-body'})
+    bundle = dict(manifest={'being_ref': 'fixture-being'}, local_origin={'embodiment_id': 'fixture-body'})
     being_seed._write(root / 'runtime.json', bundle)
     visibility = tmp_path / 'visibility.json'
     being_seed._write(visibility, {'document': {'fixture': True}, 'binding': {}})
@@ -71,8 +71,9 @@ def fixture(tmp_path, monkeypatch):
         def base_status(self):
             if not manager.live:
                 raise OSError('fixture socket closed')
-            return dict(process=copy.deepcopy(process), server={'fixture': 'origin'},
-                runtime_status={'local_origin': bundle['local_origin']}, receiving_readiness='unobserved')
+            return dict(process=copy.deepcopy(process), server=copy.deepcopy(bundle['local_origin']),
+                runtime_status={'being_ref': bundle['manifest']['being_ref'], 'local_origin': bundle['local_origin']},
+                receiving_readiness='unobserved')
         def wait_for_exit(self, _timeout):
             return not manager.live
     monkeypatch.setattr(updates, 'OwnerGroupClient', FakeOwner)
@@ -435,7 +436,8 @@ def test_expired_manager_budget_dispatches_no_command(tmp_path):
     assert calls == []
 
 
-def test_actual_prepared_command_is_rechecked_before_quiescence(tmp_path, fixture, monkeypatch):
+@pytest.mark.parametrize('changed', ['command', 'unit'])
+def test_actual_prepared_command_is_rechecked_before_quiescence(tmp_path, fixture, monkeypatch, changed):
     import json
     from clusterctl import onboarding_code_successor, onboarding_release
     from clusterctl.onboarding_receiving_update import prepare_source_bootstrap
@@ -472,11 +474,16 @@ def test_actual_prepared_command_is_rechecked_before_quiescence(tmp_path, fixtur
         code_uid=os.geteuid(), manifest_uid=os.geteuid())
     original = journal.get(identifier)
     before = copy.deepcopy(original['expected_precondition'])
-    before['source_bootstrap']['predecessor']['server'] = dict(being_ref=BEING, embodiment_id=BODY)
-    candidate['argv'].append('--unapproved-option')
+    before['source_bootstrap']['predecessor'].update(server=bundle['local_origin'],
+        runtime_status=dict(being_ref=BEING, local_origin=bundle['local_origin']))
+    if changed == 'command':
+        candidate['argv'].append('--unapproved-option')
+    else:
+        manager.unit.write_bytes(manager.unit.read_bytes() + b'ExecStart=/unexpected/second-command\n')
     row = plan_update(journal, manifest_digest=manifest_digest(manifest), target='source-bootstrap:real-candidate-fixture',
         expected_precondition=before, intended_transition=dict(source_bootstrap=candidate),
         audit_identity={'actor': 'fixture'})
-    with pytest.raises(OnboardingError, match='candidate_changed'):
+    expected = 'candidate_changed' if changed == 'command' else 'qualified_matrix_entrypoint_required'
+    with pytest.raises(OnboardingError, match=expected):
         SourceBootstrapController(journal, row['operation_id'], source, manager).quiesce()
     assert manager.stops == 0 and not marker.exists()

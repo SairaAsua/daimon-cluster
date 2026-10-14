@@ -235,6 +235,16 @@ def owner_control(root: Path, group: dict, observed: dict, action: str, path: Pa
                 else owner.apply_control(path))
 
 
+def _owner_identity(observed: dict) -> tuple[str, str]:
+    """Root identity is in authenticated status; server identifies its Body."""
+    server, status = observed.get('server', {}), observed.get('runtime_status', {})
+    being, body = status.get('being_ref'), server.get('embodiment_id')
+    if (not isinstance(being, str) or not being or not isinstance(body, str) or not body
+            or status.get('local_origin') != server):
+        raise OnboardingError('receiving_owner_identity_conflict')
+    return being, body
+
+
 def freeze_senders(owners: dict[str, OwnerGroupClient], *, tribe_ref: str) -> list[dict]:
     """Observe the required sender vector before planning the update intent."""
     senders = []
@@ -245,7 +255,7 @@ def freeze_senders(owners: dict[str, OwnerGroupClient], *, tribe_ref: str) -> li
         if (not isinstance(application, dict)
                 or application.get('tribe', {}).get('policy', {}).get('tribe_ref') != tribe_ref):
             raise OnboardingError('receiving_sender_group_required')
-        identity = (observed['server']['being_ref'], observed['server']['embodiment_id'])
+        identity = _owner_identity(observed)
         if identity in identities:
             raise OnboardingError('receiving_sender_vector_invalid')
         identities.add(identity)
@@ -263,7 +273,9 @@ def freeze_source_bootstrap(source, manager) -> dict:
         service = manager.inspect()
         scope = manager.bind_process(predecessor['process'], service)
         bundle = being_seed._read(source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
-        if bundle['local_origin'] != predecessor['runtime_status']['local_origin']:
+        if (bundle['local_origin'] != predecessor['runtime_status']['local_origin']
+                or _owner_identity(predecessor) != (
+                    bundle['manifest']['being_ref'], bundle['local_origin']['embodiment_id'])):
             raise OnboardingError('receiving_bootstrap_identity_conflict')
         visibility = onboarding_release.regular(source.visibility, uid=os.geteuid())
         return dict(settings_sha256=digest(source.settings), unit=str(manager.unit),
@@ -386,9 +398,8 @@ class SourceBootstrapController:
         if source_bootstrap_group(self.source, bundle) != qualification['group']:
             raise OnboardingError('receiving_bootstrap_group_changed')
         prepared = qualification['prepared']
-        predecessor = row['expected_precondition']['source_bootstrap']['predecessor']['server']
-        if (prepared.get('being_ref'), prepared.get('embodiment_id')) != (
-                predecessor['being_ref'], predecessor['embodiment_id']):
+        predecessor = row['expected_precondition']['source_bootstrap']['predecessor']
+        if (prepared.get('being_ref'), prepared.get('embodiment_id')) != _owner_identity(predecessor):
             raise OnboardingError('receiving_bootstrap_binding_conflict')
         checked = preflight(code, qualification['code_digest'], Path(qualification['manifest_path']),
             row['intent']['runtime_call']['manifest_digest'], being_ref=prepared['being_ref'],
@@ -408,6 +419,8 @@ class SourceBootstrapController:
              '--code-owner', str(qualification['code_uid'])])
         if argv != candidate['argv'] or prepared.get('prepared') is not True:
             raise OnboardingError('receiving_bootstrap_candidate_changed')
+        from .onboarding_service import entrypoint
+        entrypoint(onboarding_release.regular(self.manager.unit, uid=os.geteuid()), argv)
         return checked
 
     def _record(self, key: str, value: dict):

@@ -24,14 +24,16 @@ class FakeOwner:
         self.requests = {}
         self.effects = 0
         self.process = dict(uid=1, pid=2, start_ticks=3, boot_id='fixture')
-        self.server = dict(being_ref='being:' + name, embodiment_id='body:' + name)
+        self.being = 'being:' + name
+        self.server = dict(embodiment_id='body:' + name)
         self.gate = dict(process_instance_id=name, process_id=2, channel_id='tribe',
             controlled=True, context_sha256='a'*64, head='b'*64, phase='unselected',
             operation_id=None, release_digest=None, request_sha256=None, readers=[])
 
     def status(self):
         return copy.deepcopy(dict(process=self.process, server=self.server, gate=self.gate,
-            runtime_status={'loaded_application': {'tribe': {'policy': {'tribe_ref': 'tribe:fixture'}}}}))
+            runtime_status={'being_ref': self.being, 'local_origin': self.server,
+                'loaded_application': {'tribe': {'policy': {'tribe_ref': 'tribe:fixture'}}}}))
 
     def prepare_control(self, command, path):
         if path in self.requests:
@@ -67,6 +69,19 @@ def fixture(tmp_path):
             host_config_sha256=digest(original), senders=senders),
         intended_transition={'host_runtime': runtime}, audit_identity={'actor': 'fixture'})
     return path, original, runtime, owners, journal, row['operation_id']
+
+
+@pytest.mark.parametrize('part', ['being_ref', 'local_origin'])
+def test_frozen_sender_identity_requires_the_authenticated_status_binding(tmp_path, monkeypatch, part):
+    root = tmp_path / 'owner'
+    root.mkdir(mode=0o700)
+    owner = FakeOwner(root, 'source')
+    status = owner.status()
+    status['runtime_status'][part] = None if part == 'being_ref' else {'embodiment_id': 'another-body'}
+    monkeypatch.setattr(owner, 'status', lambda: status)
+    with pytest.raises(OnboardingError, match='owner_identity_conflict'):
+        freeze_senders({'source': owner}, tribe_ref='tribe:fixture')
+    assert owner.effects == 0 and owner.requests == {}
 
 
 def test_incomplete_barrier_and_direct_selector_bypass_have_no_file_effect(tmp_path):

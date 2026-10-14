@@ -145,10 +145,12 @@ raise SystemExit(importlib.import_module(module).main())
 def entrypoint(original: bytes, argv: list[str]) -> bytes:
     """Change the one exact ExecStart line, preserving every other unit byte."""
     if (not isinstance(argv, list) or not 1 <= len(argv) <= 100
-            or any(not isinstance(arg, str) or '\n' in arg or '\r' in arg or '\0' in arg for arg in argv)
+            or any(not isinstance(arg, str) or '\0' in arg for arg in argv)
             or not Path(argv[0]).is_absolute() or len(json.dumps(argv).encode()) > 65536
             or original.count(b'\nExecStart=') != 1 or original.startswith(b'ExecStart=')):
         raise OnboardingError('qualified_matrix_entrypoint_required')
+    # JSON string quoting escapes CR/LF inside one physical ExecStart line.
+    # The maintained -c launchers contain real newlines as argument data.
     encoded = ' '.join(json.dumps(arg.replace('%', '%%').replace('$', '$$')) for arg in argv)
     return b'\n'.join(('ExecStart=' + encoded).encode() if line.startswith(b'ExecStart=') else line
                       for line in original.split(b'\n'))
