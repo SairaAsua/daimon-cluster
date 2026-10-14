@@ -1,4 +1,4 @@
-"""Owner-local native peer ceremony and hosting with retained native visibility.
+"""Owner-local Source group hosting, observation and retained directed repair.
 
 The caller coordinates the existing daemon lifecycle. These operations acquire
 its real writer lock, use only existing Body custody, never read an inbox, and
@@ -228,17 +228,114 @@ class Source:
         with self.writer():
             serve_views(self.views(), stop, ready_descriptor=ready_descriptor)
 
+    def observe(self, *, require_loaded: bool = False) -> dict:
+        """Authenticate actual selected listeners without loading another runtime.
+
+        A receiving controller must request loaded evidence explicitly. Legacy
+        callers retain their old probe, clearly outside receiving qualification.
+        Neither branch claims admission, delivery or positive reader selection.
+        """
+        from contextlib import ExitStack
+        import hashlib
+        from types import SimpleNamespace
+        from daimon_matrix.canonical import canonical_bytes
+        from daimon_matrix.client import ClientConfig, LocalClient
+        from daimon_matrix.operator_capabilities import host_capability_profile
+        from .onboarding_target import document
+        from .owner_process import ConnectedProcessObserver
+
+        connected = 'connection_observer' in getattr(LocalClient, '__dataclass_fields__', {})
+        if require_loaded and not connected:
+            raise OnboardingError('qualified_onboarding_client_required')
+        with ExitStack() as ownership:
+            observer = ownership.enter_context(ConnectedProcessObserver()) if connected else None
+            options = {} if observer is None else {'connection_observer': observer}
+            sockets = {}
+
+            def client(path: Path, config_path: Path, key_path: Path):
+                sockets[path] = path.lstat()
+                key = bytearray(onboarding_release.regular(key_path, uid=os.geteuid()))
+                config = ClientConfig.load(config_path, key)
+                return LocalClient(path, config, timeout_seconds=40, **options)
+
+            native = client(self.root / 'matrix.sock', self.root / 'client.json', self.root / 'client.key')
+            base = native.runtime_status()[1]
+            if base.get('ok') is not True:
+                raise OnboardingError('onboarding_runtime_not_ready')
+            bundle = document(self.root / 'runtime.json')
+            group = onboarding_peer.observed_group(SimpleNamespace(root=self.outputs, package=self.outputs),
+                bundle, socket_root=self.outputs)
+            application_status = None
+            if group is not None:
+                if observer is not None:
+                    role = host_capability_profile('status')
+                    directory = self.root / role['client_directory']
+                    hosted = client(Path(group['socket']), directory / role['client_config_filename'],
+                                    directory / role['client_key_filename'])
+                    response = hosted.runtime_status()[1]
+                    if response.get('ok') is not True or response['server'] != base['server']:
+                        raise OnboardingError('onboarding_daemon_origin_conflict')
+                    application_status = response['result']
+                else:
+                    directory = Path(group['application'])
+                    hosted = client(Path(group['socket']), directory / 'client.json', directory / 'client.key')
+                    if hosted.invoke('messaging.send', {})[1].get('error', {}).get('code') != 'invalid_params':
+                        raise OnboardingError('onboarding_runtime_not_ready')
+            elif require_loaded:
+                raise OnboardingError('qualified_onboarding_group_required')
+            else:
+                # Explicit retained directed applications remain independently
+                # observable; they never stand in for a missing selected group.
+                for fingerprint in self.settings['applications']:
+                    directory = self.directory(fingerprint) / 'application'
+                    hosted = client(self.outputs / ('peer-' + fingerprint[:12] + '.sock'),
+                                    directory / 'client.json', directory / 'client.key')
+                    if hosted.invoke('messaging.send', {})[1].get('error', {}).get('code') != 'invalid_params':
+                        raise OnboardingError('onboarding_runtime_not_ready')
+            loaded_base = base['result'].get('loaded_runtime')
+            if observer is not None:
+                observer.verify()
+                process = observer.process
+                if process is None:
+                    raise OnboardingError('onboarding_daemon_responder_conflict')
+                for status in (base['result'], application_status):
+                    loaded = None if status is None else status.get('loaded_runtime')
+                    if loaded is not None and loaded.get('process_id') != process['pid']:
+                        raise OnboardingError('onboarding_daemon_responder_conflict')
+                if application_status is not None and (
+                        application_status.get('loaded_runtime') != loaded_base):
+                    raise OnboardingError('onboarding_loaded_base_conflict')
+            if require_loaded:
+                loaded_application = None if application_status is None else application_status.get('loaded_application')
+                if (not isinstance(loaded_base, dict) or not loaded_base.get('qualified_startup')
+                        or not isinstance(loaded_application, dict)
+                        or loaded_application.get('loaded_base_sha256') != hashlib.sha256(canonical_bytes(loaded_base)).hexdigest()):
+                    raise OnboardingError('qualified_onboarding_loaded_view_required')
+            for path, before in sockets.items():
+                after = path.lstat()
+                if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                    raise OnboardingError('onboarding_daemon_socket_changed')
+            return dict(running=True, applications=[] if group else self.settings['applications'], group=group,
+                base_runtime_status=base['result'], runtime_status=application_status,
+                process=None if observer is None else observer.process,
+                responder_association='same-connection' if observer is not None else 'legacy-probe',
+                receiving_readiness='unobserved')
+
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--ready-fd', type=int)
     parser.add_argument('--code-digest')
+    parser.add_argument('--observe', action='store_true')
+    parser.add_argument('--require-loaded', action='store_true')
     args = parser.parse_args(argv)
     try:
         from . import onboarding_code_successor, onboarding_sdk
         code = Path(__file__).resolve().parents[1]
         parameters = onboarding_code_successor.sdk_parameters(code)
+        if args.require_loaded and (not args.observe or not parameters):
+            raise OnboardingError('qualified_onboarding_source_observer_required')
         if parameters and args.code_digest is None:
             raise OnboardingError('qualified_onboarding_source_runtime_required')
         startup = (onboarding_sdk.qualified_startup(Path(sys.prefix), code,
@@ -246,6 +343,11 @@ def main(argv=None) -> int:
         settings = being_seed._read(args.config)
         source = Source(settings, code=code, code_digest=args.code_digest,
                         qualified_startup=startup)
+        if args.observe:
+            if args.ready_fd is not None:
+                raise OnboardingError('invalid_source_observation_request')
+            print(json.dumps(source.observe(require_loaded=args.require_loaded)))
+            return 0
         stop = threading.Event()
         for signum in (signal.SIGTERM, signal.SIGINT):
             signal.signal(signum, lambda *_: stop.set())
@@ -291,30 +393,10 @@ def child() -> int:
             source.register(config, Path(request['unit']), request['unit_sha256'], Path(request['python']), request['plan_digest'])
             value = {'registered': True}
         else:
-            from daimon_matrix.client import ClientConfig, LocalClient
-            native = ClientConfig.load(source.root / 'client.json', bytearray((source.root / 'client.key').read_bytes()))
-            result = LocalClient(source.root / 'matrix.sock', native).runtime_status()[1]
-            # Observe the currently selected group instead of probing archived
-            # bootstrap sockets that the group deployment deliberately retired.
-            if (source.outputs / 'tribe/selection.json').exists():
-                from types import SimpleNamespace
-                group = onboarding_peer.observed_group(SimpleNamespace(
-                    root=source.outputs, package=source.outputs),
-                    source.tool.read_public(source.root / 'runtime.json'), socket_root=source.outputs)
-                selected = source.outputs / 'tribe/application'
-                client = ClientConfig.load(selected / 'client.json', bytearray((selected / 'client.key').read_bytes()))
-                if LocalClient(source.outputs / 'tribe.sock', client).invoke('messaging.send', {})[1].get('error', {}).get('code') != 'invalid_params':
-                    raise OnboardingError('onboarding_runtime_not_ready')
-                value = {'running': result.get('ok') is True, 'applications': [], 'group': group}
-                print(json.dumps(value))
-                return 0
-            for fingerprint in source.settings['applications']:
-                application = source.directory(fingerprint) / 'application'
-                peer = ClientConfig.load(application / 'client.json', bytearray((application / 'client.key').read_bytes()))
-                socket = source.outputs / ('peer-' + fingerprint[:12] + '.sock')
-                if LocalClient(socket, peer).invoke('messaging.send', {})[1].get('error', {}).get('code') != 'invalid_params':
-                    raise OnboardingError('onboarding_runtime_not_ready')
-            value = {'running': result.get('ok') is True, 'applications': source.settings['applications']}
+            if (set(request) - {'require_loaded'}
+                    or 'require_loaded' in request and type(request['require_loaded']) is not bool):
+                raise OnboardingError('invalid_source_observation_request')
+            value = source.observe(require_loaded=request.get('require_loaded') is True)
         print(json.dumps(value))
         return 0
     except Exception:
