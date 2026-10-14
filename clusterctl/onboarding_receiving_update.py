@@ -52,6 +52,58 @@ def receiving_identity(response: dict, runtime_status: dict, server: dict,
             'origin': dict(server)}
 
 
+def verify_receiving_identity(bundle: dict, observed: dict, *, expires_at_ms: int) -> dict:
+    """Verify current public credential validity in the authenticated loaded bundle.
+
+    The selected horizon stays finite even for until-revoked credentials. This
+    derives evidence only; it never unlocks custody or loads another runtime.
+    """
+    from daimon_matrix.messaging_config import _public_identity
+    from daimon_matrix.operator_rebirth import authority_from_runtime_bundle
+    from daimon_matrix.canonical import canonical_bytes
+    now = time.time_ns() // 1_000_000
+    if type(expires_at_ms) is not int or not now < expires_at_ms < 2**53:
+        raise OnboardingError('receiving_identity_horizon_expired')
+    loaded = observed['runtime_status'].get('loaded_runtime')
+    identity = observed.get('identity')
+    if (not isinstance(loaded, dict) or not isinstance(identity, dict)
+            or hashlib.sha256(canonical_bytes(bundle)).hexdigest() != loaded.get('runtime_bundle_sha256')
+            or loaded.get('process_id') != observed['process']['pid']
+            or loaded.get('local_origin') != observed['server']
+            or observed['runtime_status'].get('local_origin') != observed['server']
+            or identity.get('origin') != observed['server']
+            or observed['runtime_status'].get('being_ref') != identity.get('being_ref')
+            or observed['runtime_status'].get('manifest_hash') != identity.get('manifest_hash')
+            or bundle.get('local_origin') != observed['server']
+            or bundle.get('runtime_id') != loaded.get('runtime_id')):
+        raise OnboardingError('receiving_identity_loaded_bundle_conflict')
+    try:
+        authority = authority_from_runtime_bundle(bundle)
+        public = _public_identity(authority, observed['server'], bundle['runtime_id'],
+                                  bundle['runtime_label'], now)
+        if (public['being_ref'] != identity['being_ref']
+                or public['manifest_hash'] != identity['manifest_hash']
+                or public['credential_id'] != identity['credential_ref']
+                or public['incarnation_authorization_id'] != identity['incarnation_authorization_ref']):
+            raise OnboardingError('receiving_identity_public_binding_conflict')
+        credential = authority.credentials[public['credential_id']]['body']
+        if 'validity' in credential:
+            validity = dict(credential['validity'])
+            if validity['mode'] == 'finite':
+                expires_at_ms = min(expires_at_ms, validity['not_after_ms'])
+        else:
+            validity = dict(valid_from_ms=credential['valid_from_ms'],
+                            valid_until_ms=credential['valid_until_ms'])
+            expires_at_ms = min(expires_at_ms, validity['valid_until_ms'])
+    except (ValueError, KeyError, TypeError):
+        raise OnboardingError('receiving_identity_public_verification_failed') from None
+    if expires_at_ms <= time.time_ns() // 1_000_000:
+        raise OnboardingError('receiving_identity_horizon_expired')
+    return dict(schema='cluster-receiving-verified-identity/v1', identity=identity,
+        runtime_bundle_sha256=loaded['runtime_bundle_sha256'], credential_validity=validity,
+        verified_at_ms=now, expires_at_ms=expires_at_ms)
+
+
 class OwnerGroupClient:
     """Finite owner-local control of the actual selected group daemon.
 
@@ -154,6 +206,17 @@ class OwnerGroupClient:
         identity = receiving_identity(response, observed['runtime_status'], observed['server'],
                                       require_admitted=require_admitted)
         return {**observed, 'identity': identity}
+
+    def qualified_identity(self, *, expires_at_ms: int, require_admitted: bool = False) -> dict:
+        observed = self.identity(require_admitted=require_admitted)
+        bundle = being_seed._read(self.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+        verified = verify_receiving_identity(bundle, observed, expires_at_ms=expires_at_ms)
+        if self._observer is None:
+            raise OnboardingError('receiving_owner_scope_required')
+        self._observer.verify()
+        if verified['expires_at_ms'] <= time.time_ns() // 1_000_000:
+            raise OnboardingError('receiving_identity_horizon_expired')
+        return {**observed, 'verified_identity': verified}
 
     def prepare_control(self, command: dict, path: Path) -> dict:
         """Persist one exact native request before attempting its effect."""

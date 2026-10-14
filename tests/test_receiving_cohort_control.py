@@ -4,7 +4,9 @@ These cases prove durable orchestration, not native RPC or receiving readiness.
 Native owner RPC/fence qualification is a separate actual integration boundary.
 """
 import copy
+import hashlib
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -12,7 +14,7 @@ import pytest
 from clusterctl import being_seed
 from clusterctl.onboarding import OnboardingError, digest
 from clusterctl.onboarding_code_successor import plan_update
-from clusterctl.onboarding_receiving_update import CohortController, OwnerGroupClient, apply_host_selection, freeze_senders, receiving_identity
+from clusterctl.onboarding_receiving_update import CohortController, OwnerGroupClient, apply_host_selection, freeze_senders, receiving_identity, verify_receiving_identity
 from clusterctl.operation_journal import OperationJournal
 from tests.test_receiving_host_selection import fixture as host_fixture
 
@@ -43,6 +45,92 @@ def test_source_identity_does_not_invent_a_cluster_admission_requirement():
     assert receiving_identity(response, status, origin, require_admitted=False)['origin'] == origin
     with pytest.raises(OnboardingError, match='receiving_identity_admission_conflict'):
         receiving_identity(response, status, origin)
+
+
+@pytest.fixture(params=[False, True], ids=['v1', 'v2-until-revoked'])
+def signed_receiving_identity(tmp_path, request):
+    from daimon_matrix.canonical import canonical_bytes
+    from daimon_matrix.weave import BeingManifest
+    from tests.test_onboarding_target import receiving
+    ceremony, plan, target = receiving(tmp_path)
+    target.activate(ceremony.authorize_target(plan, target.prepare()))
+    if request.param:
+        target.apply_credential(ceremony.authorize_credential(plan, target.credential_request()))
+    bundle = target.document_bundle()
+    # Receiving runtime bundle hashing uses Matrix's Unicode canonical codec,
+    # not the separate Cluster operation digest codec.
+    bundle['ledger'] = 'mémoire-synthétique.sqlite3'
+    origin = bundle['local_origin']
+    manifest = bundle['manifest']
+    member = next(row for row in manifest['embodiments'] if
+                  (row['embodiment_id'], row['incarnation_id']) ==
+                  (origin['embodiment_id'], origin['incarnation_id']))
+    identity = dict(being_ref=manifest['being_ref'], manifest_hash=BeingManifest.from_value(manifest).digest,
+        origin=origin, credential_ref=member['embodiment_credential_id'],
+        incarnation_authorization_ref=member['incarnation_authorization_id'])
+    observed = dict(server=origin, process={'pid': os.getpid()}, identity=identity,
+        runtime_status=dict(being_ref=identity['being_ref'], manifest_hash=identity['manifest_hash'],
+            local_origin=origin, loaded_runtime=dict(runtime_bundle_sha256=hashlib.sha256(canonical_bytes(bundle)).hexdigest(),
+                process_id=os.getpid(), runtime_id=bundle['runtime_id'], local_origin=origin)))
+    return bundle, observed
+
+
+def test_signed_public_bundle_current_validity_without_loading_custody(signed_receiving_identity, monkeypatch):
+    from daimon_matrix.canonical import canonical_bytes
+    bundle, observed = signed_receiving_identity
+    horizon = time.time_ns() // 1_000_000 + 300000
+    result = verify_receiving_identity(bundle, observed, expires_at_ms=horizon)
+    assert result['identity'] == observed['identity']
+    assert result['runtime_bundle_sha256'] == hashlib.sha256(canonical_bytes(bundle)).hexdigest()
+    assert 0 < result['expires_at_ms'] <= horizon
+    assert not {'signing_key', 'credentials', 'capabilities', 'keystore'} & set(result)
+    for fields in (('identity', 'origin'), ('runtime_status', 'local_origin'),
+                   ('runtime_status', 'loaded_runtime', 'local_origin')):
+        changed = copy.deepcopy(observed)
+        row = changed
+        for key in fields[:-1]:
+            row = row[key]
+        row[fields[-1]] = None
+        with pytest.raises(OnboardingError, match='loaded_bundle_conflict'):
+            verify_receiving_identity(bundle, changed, expires_at_ms=horizon)
+    # Verification can consume a short horizon. It must not return expired
+    # evidence merely because the initial clock sample was still valid.
+    from clusterctl import onboarding_receiving_update as updates
+    from types import SimpleNamespace
+    instants = iter((result['verified_at_ms'], horizon + 1))
+    monkeypatch.setattr(updates, 'time', SimpleNamespace(time_ns=lambda: next(instants) * 1_000_000))
+    with pytest.raises(OnboardingError, match='horizon_expired'):
+        verify_receiving_identity(bundle, observed, expires_at_ms=horizon)
+
+
+def test_reselected_public_bundle_is_not_the_loaded_identity(signed_receiving_identity):
+    bundle, observed = signed_receiving_identity
+    bundle['runtime_label'] = 'another-selected-label'
+    with pytest.raises(OnboardingError, match='loaded_bundle_conflict'):
+        verify_receiving_identity(bundle, observed, expires_at_ms=time.time_ns() // 1_000_000 + 300000)
+
+
+def test_current_validity_uses_the_actual_signed_lifetime(signed_receiving_identity, monkeypatch):
+    from clusterctl import onboarding_receiving_update as updates
+    from types import SimpleNamespace
+    bundle, observed = signed_receiving_identity
+    credential = next(row for row in bundle['credentials']
+                      if row['artifact_id'] == observed['identity']['credential_ref'])
+    if 'validity' in credential['body']:
+        assert credential['body']['validity']['mode'] == 'until-revoked'
+        later = time.time_ns() // 1_000_000 + 3600000
+        monkeypatch.setattr(updates, 'time', SimpleNamespace(time_ns=lambda: later * 1_000_000))
+        verified = verify_receiving_identity(bundle, observed, expires_at_ms=later + 1000)
+        assert verified['credential_validity']['mode'] == 'until-revoked'
+        assert verified['expires_at_ms'] == later + 1000
+    else:
+        expired = credential['body']['valid_until_ms'] + 1
+        monkeypatch.setattr(updates, 'time', SimpleNamespace(time_ns=lambda: expired * 1_000_000))
+        # The original first-body credential ends at the protocol's maximum
+        # instant; its successor request is then outside the finite time domain.
+        error = 'horizon_expired' if expired + 1000 >= 2**53 else 'public_verification_failed'
+        with pytest.raises(OnboardingError, match=error):
+            verify_receiving_identity(bundle, observed, expires_at_ms=expired + 1000)
 
 
 @pytest.mark.parametrize('part', ['server', 'origin', 'being_ref', 'manifest_hash', 'body',
