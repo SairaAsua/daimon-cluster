@@ -1,6 +1,8 @@
 """Typed substrate commands preserve foreign bodies and reconcile partial creation."""
 import copy
 import json
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -72,6 +74,31 @@ def configured(tmp_path):
                                                       plan=value, revoked=False))
     run = IncusFixture()
     return config, value, run, HostBackend(config, run=run)
+
+
+def test_receiving_base_keeps_original_release_without_requiring_participant_archive(tmp_path):
+    from tests.test_onboarding_code_successor import fixture as code_fixture
+    (tmp_path/'code-fixture').mkdir()
+    (tmp_path/'host-fixture').mkdir()
+    base,checksum,_,_=code_fixture(tmp_path/'code-fixture')
+    config,value,run,_=configured(tmp_path/'host-fixture')
+    value={**value,'release_digest':checksum}
+    config=replace(config,code=base,release_digest=checksum,
+        inputs=tmp_path/'missing-inputs',views=tmp_path/'missing-views')
+    backend=HostBackend(config,run=run)
+    original=copy.deepcopy(value)
+    assert backend._receiving_base(value)==Path('/opt/daimon-onboarding')/checksum
+    assert value==original and not run.calls
+    # Initial onboarding still requires and verifies the participant input.
+    with pytest.raises(FileNotFoundError):
+        backend._guest_paths(value)
+    assert not run.calls
+    with pytest.raises(OnboardingError,match='configuration_required'):
+        backend._receiving_base({**value,'release_digest':'0'*64})
+    (base/'inheritance.md').write_text('Unqualified replacement source context.\n')
+    with pytest.raises(OnboardingError,match='release_digest_mismatch'):
+        backend._receiving_base(value)
+    assert value==original and not run.calls
 
 
 @pytest.mark.parametrize('optional', [{}, {'group': {}}, {'receiving_controller': {}},

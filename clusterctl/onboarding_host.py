@@ -810,6 +810,19 @@ class HostBackend:
             mounts.update(runtime_mounts)
         return source, guest_code, mounts
 
+    def _receiving_base(self, plan: dict) -> Path:
+        """Resolve an approved existing receiver without reopening its upload.
+
+        Candidate maintenance consumes the guest's retained plan/genesis, not
+        participant input or onboarding mounts. Host/identity grants, successor
+        bytes, current admission and receiving identity remain independent
+        requirements on the existing closed control routes.
+        """
+        if self.config.code is None or plan['release_digest'] != self.config.release_digest:
+            raise OnboardingError('receiving_code_configuration_required')
+        onboarding_release.verify(self.config.code, plan['release_digest'], uid=os.geteuid())
+        return Path('/opt/daimon-onboarding') / plan['release_digest']
+
     def _runtime_selection(self, plan: dict) -> tuple[Path | None, str | None]:
         selected = (self.config.runtime_by_name or {}).get(plan['name'])
         return selected if selected is not None else (self.config.runtime_code, self.config.runtime_digest)
@@ -990,7 +1003,10 @@ class HostBackend:
             raise OnboardingError("identity_authorization_required")
         if not self._ceremony(plan).authorize(plan):
             raise OnboardingError("identity_authorization_required")
-        _, guest_code, _ = self._guest_paths(plan)
+        if candidate is None:
+            _, guest_code, _ = self._guest_paths(plan)
+        else:
+            guest_code = self._receiving_base(plan)
         runtime_code, runtime_args, mounts = (self._runtime_paths(plan, guest_code) if candidate is None
             else self._runtime_paths(plan, guest_code, candidate=candidate))
         if candidate is not None:
@@ -1081,7 +1097,7 @@ class HostBackend:
         deadline_ns = time.monotonic_ns() + int(timeout_seconds * 1_000_000_000)
         if not self._ceremony(plan).authorize(plan):
             raise OnboardingError('identity_authorization_required')
-        _, base, _ = self._guest_paths(plan)
+        base = self._receiving_base(plan)
         code, runtime_args, mounts = self._runtime_paths(plan, base, candidate=candidate)
         if (not onboarding_code_successor.sdk_parameters(candidate[0], uid=os.geteuid())
                 or not self._mounted(plan, mounts, deadline_ns=deadline_ns)):

@@ -395,6 +395,7 @@ def host_observation_only(root: Path, base: str) -> bool:
         and hashlib.sha256(current).hexdigest() in {
         '0ec24cc2096f5b88b498d1e49578810404c2248b0a8309d027c30d28d5f2daee',
         'b33a3bdb9929088a7eb6e9226e871131195830ba1b4b5a4419adcbe6afcb8397',
+        'c065e236c07f0af2a2b580be88730ad06b204e2e23b827449759184ec52e4aa6',
         '45bb1547863ee1dfcbcdeac970a7a217a792e8755a52df9b63ffed152819c32c'})
 
 

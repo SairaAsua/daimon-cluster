@@ -225,8 +225,7 @@ def test_preparation_reuses_maintained_command_and_refuses_sdk_mismatch_before_r
             return copy.deepcopy(frozen['owner'])
         return actual(_plan, action, **kwargs)
     backend._target_call = prepare
-    backend._guest_paths = lambda _plan: (None,
-        Path('/opt/daimon-onboarding') / frozen['plan']['release_digest'], {})
+    backend._receiving_base = lambda _plan: Path('/opt/daimon-onboarding') / frozen['plan']['release_digest']
     backend._runtime_paths = lambda _plan, _base, **_kwargs: (
         Path('/opt/daimon-onboarding-runtime') / candidate['runtime_digest'], [], {})
     root = backend._guest_service_call

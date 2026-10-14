@@ -1282,7 +1282,7 @@ def prepare_guest_bootstrap(backend, plan: dict, *, candidate: tuple[Path, str],
     if (root.get('scope') is None or root['scope']['process'] != owner['predecessor']['process']
             or root['scope']['admission_parent'] != owner['predecessor']['admission_parent']):
         raise OnboardingError('receiving_guest_bootstrap_identity_required')
-    _, base, _ = backend._guest_paths(plan)
+    base = backend._receiving_base(plan)
     selected, _, _ = backend._runtime_paths(plan, base, candidate=candidate)
     argv = command(base, receive_only=False, visibility=Path(owner['group']['selected']['visibility']),
         runtime_code=selected, runtime_digest=candidate[1])
