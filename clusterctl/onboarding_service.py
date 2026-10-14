@@ -60,13 +60,17 @@ class MatrixUserService:
         self.unit = being_seed._path(unit)
         self.run = run or self._run
         self._injected_run = run is not None
+        self._manager_prefix = ['systemctl', '--user']
+        self._unit_uid = os.geteuid()
 
     def _run(self, argv: list[str], *, timeout_seconds: float = 45) -> str:
         try:
+            environment = {'PATH': os.defpath, 'LANG': 'C.UTF-8'}
+            if '--user' in self._manager_prefix:
+                environment.update(XDG_RUNTIME_DIR='/run/user/' + str(os.geteuid()),
+                    DBUS_SESSION_BUS_ADDRESS='unix:path=/run/user/' + str(os.geteuid()) + '/bus')
             result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout_seconds, check=False,
-                env={'PATH': os.defpath, 'LANG': 'C.UTF-8',
-                     'XDG_RUNTIME_DIR': '/run/user/' + str(os.geteuid()),
-                     'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/' + str(os.geteuid()) + '/bus'})
+                env=environment)
             if result.returncode or len(result.stdout.encode()) > 65536:
                 raise OnboardingError('receiving_matrix_manager_unavailable')
             return result.stdout
@@ -86,7 +90,7 @@ class MatrixUserService:
     def inspect(self, *, deadline_ns: int | None = None) -> dict:
         fields = {'Id', 'ActiveState', 'SubState', 'MainPID', 'ControlGroup', 'InvocationID',
                   'FragmentPath', 'DropInPaths', 'KillMode', 'Result'}
-        raw = self._execute(['systemctl', '--user', 'show', self.unit.name,
+        raw = self._execute([*self._manager_prefix, 'show', self.unit.name,
                         '--property=' + ','.join(sorted(fields)), '--no-pager'], deadline_ns)
         lines = [line.split('=', 1) for line in raw.splitlines()]
         if (any(len(row) != 2 for row in lines) or len(lines) != len(fields)
@@ -98,14 +102,14 @@ class MatrixUserService:
                 or not values['MainPID'].isdigit()
                 or values['ControlGroup'] and not values['ControlGroup'].endswith('/' + self.unit.name)):
             raise OnboardingError('receiving_matrix_service_scope_required')
-        content = onboarding_release.regular(self.unit, uid=os.geteuid())
+        content = onboarding_release.regular(self.unit, uid=self._unit_uid)
         return dict(unit_sha256=hashlib.sha256(content).hexdigest(), manager=values)
 
     def stop(self) -> None:
         # Do not wait for the CLI to imply drain. The controller observes the
         # pinned process and manager completion independently. StopUnit targets
         # the named Matrix-only unit; it is not an atomic process/invocation CAS.
-        self.run(['systemctl', '--user', '--no-block', 'stop', self.unit.name])
+        self.run([*self._manager_prefix, '--no-block', 'stop', self.unit.name])
 
     def bind_process(self, process: dict, inspected: dict) -> dict:
         values = inspected['manager']
@@ -119,8 +123,48 @@ class MatrixUserService:
                     invocation_id=values['InvocationID'])
 
     def start(self, *, deadline_ns: int | None = None) -> None:
-        self._execute(['systemctl', '--user', 'daemon-reload'], deadline_ns)
-        self._execute(['systemctl', '--user', '--no-block', 'start', self.unit.name], deadline_ns)
+        self._execute([*self._manager_prefix, 'daemon-reload'], deadline_ns)
+        self._execute([*self._manager_prefix, '--no-block', 'start', self.unit.name], deadline_ns)
+
+
+class MatrixGuestService(MatrixUserService):
+    """The installed guest's Matrix-only system unit, never the guest or harness.
+
+    No sudo or alternative transport is introduced. Mutations use the caller's
+    existing system-manager authority. The unit remains root-owned while its
+    admitted parent and native child run as the configured receiving owner.
+    """
+
+    def __init__(self, unit: Path, *, run=None):
+        if unit.name != UNIT:
+            raise OnboardingError('qualified_matrix_service_required')
+        self.unit = being_seed._path(unit)
+        self.run = run or self._run
+        self._injected_run = run is not None
+        self._manager_prefix = ['systemctl']
+        self._unit_uid = 0
+
+    def bind_admitted_process(self, observed: dict, inspected: dict) -> dict:
+        """Associate the manager's parent with the authenticated native child.
+
+        Parent ancestry alone does not qualify code, SDK, loaded application or
+        admission. Those remain the receiving observation's separate evidence.
+        Re-pin both retained tuples and require their actual same-unit cgroup.
+        """
+        from .owner_process import ParentProcessPresence, PresenceError
+        try:
+            with ParentProcessPresence(observed['process']) as family:
+                if family.process != observed['admission_parent']:
+                    raise OnboardingError('receiving_matrix_process_scope_required')
+                binding = self.bind_process(family.process, inspected)
+                lines = (Path('/proc') / str(observed['process']['pid']) / 'cgroup').read_text().splitlines()
+                if '0::' + binding['control_group'] not in lines:
+                    raise OnboardingError('receiving_matrix_process_scope_required')
+                family.verify()
+                return dict(process=dict(observed['process']), admission_parent=family.process,
+                    control_group=binding['control_group'], invocation_id=binding['invocation_id'])
+        except (OSError, ValueError, KeyError, TypeError, PresenceError):
+            raise OnboardingError('receiving_matrix_process_scope_required') from None
 
 
 def code_command(python: Path, code: Path, module: str, arguments: list[str]) -> list[str]:

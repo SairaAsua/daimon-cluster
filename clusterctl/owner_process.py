@@ -203,3 +203,56 @@ class ConnectedProcessObserver:
         self._active = False
         self._stack.close()
 
+
+class ParentProcessPresence:
+    """Pin a child's current same-owner parent without claiming its SDK or manager.
+
+    An admitted Matrix RPC identifies the child, whereas a service manager owns
+    the admission parent. Keep both kernel tuples distinct. The caller still
+    has to bind the parent to the selected manager scope and candidate.
+    """
+
+    def __init__(self, child: dict[str, Any]):
+        self._stack = ExitStack()
+        try:
+            self.child = self._stack.enter_context(ProcessPresence(child))
+            parent_id = self._parent_id()
+            fields = (Path('/proc') / str(parent_id) / 'stat').read_text().rpartition(')')[2].split()
+            self.parent = self._stack.enter_context(ProcessPresence(dict(
+                uid=self.child.process['uid'], pid=parent_id, start_ticks=int(fields[19]),
+                boot_id=self.child.process['boot_id'])))
+            self.verify()
+        except Exception as error:
+            self._stack.close()
+            raise PresenceError('owner_parent_process_unavailable') from error
+
+    def _parent_id(self) -> int:
+        fields = (Path('/proc') / str(self.child.process['pid']) / 'stat').read_text().rpartition(')')[2].split()
+        return int(fields[1])
+
+    @property
+    def process(self) -> dict[str, Any]:
+        return dict(self.parent.process)
+
+    def verify(self) -> None:
+        try:
+            self.child.verify()
+            self.parent.verify()
+            if self._parent_id() != self.parent.process['pid']:
+                raise ValueError('child was reparented')
+            self.child.verify()
+            self.parent.verify()
+        except Exception as error:
+            raise PresenceError('owner_parent_process_unavailable') from error
+
+    def __enter__(self) -> ParentProcessPresence:
+        try:
+            self.verify()
+        except Exception:
+            self._stack.close()
+            raise
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        self._stack.close()
+

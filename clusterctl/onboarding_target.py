@@ -424,7 +424,7 @@ class Target:
         socket_identity = (root / "matrix.sock").lstat()
         key = bytearray(onboarding_release.regular(root / "client.key", uid=os.geteuid()))
         config = ClientConfig.load(root / "client.json", key)
-        from .owner_process import ConnectedProcessObserver, ProcessPresence
+        from .owner_process import ConnectedProcessObserver, ParentProcessPresence, ProcessPresence
         connected = 'connection_observer' in getattr(LocalClient, '__dataclass_fields__', {})
         if require_loaded and not connected:
             raise OnboardingError('qualified_onboarding_client_required')
@@ -499,12 +499,21 @@ class Target:
                         or any(body.get(field) != expected[field] for field in
                                ('body_ref', 'embodiment_id', 'incarnation_id'))):
                     raise OnboardingError('onboarding_admission_not_current')
+            parent = None
+            if admitted and connected:
+                child_process = presence.process
+                if not isinstance(child_process, dict):
+                    raise OnboardingError('onboarding_daemon_responder_conflict')
+                parent = stack.enter_context(ParentProcessPresence(child_process))
             current_socket = (root / "matrix.sock").lstat()
             if (socket_identity.st_dev, socket_identity.st_ino) != (current_socket.st_dev, current_socket.st_ino):
                 raise OnboardingError("onboarding_daemon_socket_changed")
             presence.verify()
+            if parent is not None:
+                parent.verify()
             return dict(schema="cluster-onboarding-runtime-presence/v1", plan_digest=digest(self.plan),
                 origin=expected, process=presence.process, runtime_id=config.runtime_id,
+                admission_parent=None if parent is None else parent.process,
                 runtime_sha256=prepared["receipt"]["runtime_sha256"],
                 runtime_status=status['result'], group=group, group_runtime_status=group_status,
                 receiving_readiness='unobserved',

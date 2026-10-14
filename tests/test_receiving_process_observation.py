@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from clusterctl.owner_process import ConnectedProcessObserver, PresenceError, observe_process_exit
+from clusterctl.owner_process import ConnectedProcessObserver, ParentProcessPresence, PresenceError, observe_process_exit
 
 
 def test_both_actual_admitted_child_launchers_compile_before_spawn():
@@ -57,6 +57,46 @@ def test_connected_process_retains_pin_and_snapshot_without_extra_probe():
     finally:
         left.close()
         right.close()
+
+
+def test_actual_parent_and_child_are_pinned_as_distinct_processes():
+    child = subprocess.Popen([sys.executable, '-I', '-c',
+        'import sys; print("READY", flush=True); sys.stdin.readline()'],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        assert child.stdout.readline() == b'READY\n'
+        process = dict(uid=os.geteuid(), pid=child.pid,
+            start_ticks=int((Path('/proc') / str(child.pid) / 'stat').read_text().rpartition(')')[2].split()[19]),
+            boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
+        with pytest.raises(PresenceError, match='parent_process_unavailable'):
+            ParentProcessPresence({**process, 'start_ticks': process['start_ticks'] + 1})
+        with ParentProcessPresence(process) as family:
+            assert family.child.process == process
+            assert family.process['pid'] == os.getpid()
+            snapshot = family.process
+            snapshot['pid'] = 1
+            assert family.process['pid'] == os.getpid()
+            descriptors = (family.child.descriptor, family.parent.descriptor)
+            assert all(os.fstat(descriptor) for descriptor in descriptors)
+            family.verify()
+            child.stdin.write(b'exit\n')
+            child.stdin.flush()
+            child.wait(timeout=5)
+            with pytest.raises(PresenceError, match='parent_process_unavailable'):
+                family.verify()
+        for descriptor in descriptors:
+            with pytest.raises(OSError):
+                os.fstat(descriptor)
+        with pytest.raises(PresenceError, match='parent_process_unavailable'):
+            family.verify()
+        with pytest.raises(PresenceError, match='parent_process_unavailable'):
+            ParentProcessPresence(process)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait(timeout=5)
+        child.stdin.close()
+        child.stdout.close()
 
 
 def test_later_connection_to_another_actual_process_is_refused(tmp_path):
