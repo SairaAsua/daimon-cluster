@@ -85,3 +85,33 @@ def test_later_connection_to_another_actual_process_is_refused(tmp_path):
         if child.is_alive():
             child.terminate()
         child.join(5)
+
+
+@pytest.mark.parametrize('arguments', [
+    ['--prepare-control', 'revoke.json'],
+    ['--apply-control', 'revoke.json', '--control-command', 'command.json'],
+    ['--prepare-control', 'revoke.json', '--control-command', 'command.json', '--observe'],
+    ['--prepare-control', 'revoke.json', '--control-command', 'command.json', '--ready-fd', '1'],
+])
+def test_source_control_cli_refuses_invalid_modes_before_owner_state(tmp_path, monkeypatch, capsys, arguments):
+    from clusterctl import onboarding_source
+    monkeypatch.setattr(onboarding_source.being_seed, '_read', lambda *_:
+        pytest.fail('invalid control opened owner state'))
+    assert onboarding_source.main(['--config', str(tmp_path / 'unused.json'), *arguments]) == 1
+    assert capsys.readouterr().out == '{"error": "native_onboarding_source_refused"}\n'
+
+
+@pytest.mark.parametrize('action,arguments', [
+    ('observe', ['--require-loaded']),
+    ('receiving-control-prepare', ['--control-file', 'revoke.json']),
+    ('receiving-control-apply', ['--control-file', 'revoke.json', '--control-command', 'command.json']),
+    ('running', ['--control-file', 'revoke.json']),
+])
+def test_guest_control_cli_refuses_invalid_modes_before_owner_state(tmp_path, monkeypatch, capsys, action, arguments):
+    from clusterctl import onboarding_target
+    monkeypatch.setattr(onboarding_target.being_seed, '_read', lambda *_:
+        pytest.fail('invalid control opened owner state'))
+    required = [action, '--home', str(tmp_path), '--code', str(tmp_path),
+                '--plan', str(tmp_path / 'plan.json'), '--genesis', str(tmp_path / 'genesis.json')]
+    assert onboarding_target.main([*required, *arguments]) == 1
+    assert capsys.readouterr().out == '{"error": "native_onboarding_target_refused"}\n'

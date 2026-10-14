@@ -59,6 +59,7 @@ def test_actual_receiving_scope_reports_running_only_under_current_shared_lease(
                     me = observer.scope_me()[1]
                     assert me['ok'] is True and me['result']['body']['state'] == 'running'
                     assert me['result']['origin'] == origin
+                    assert target.running(admitted=True)['process']['pid'] == presence['process']['pid']
                     assert admitted.supervisor.verify_current(minimum_remaining_s=1) is not None
                     request = {key:origin[key] for key in ('body_ref','embodiment_id','incarnation_id')}
                     request['evaluated_at_ms'] = time.time_ns()//1_000_000

@@ -409,11 +409,12 @@ class Target:
             except OSError:
                 pass
 
-    def running(self, *, admitted: bool = False) -> dict:
+    def running(self, *, admitted: bool = False, require_loaded: bool = False) -> dict:
         """Observe a kernel-pinned daemon and authenticate its native status.
 
-        This proves owner-local runtime presence, not a Cluster admission lease,
-        a resource fence, peer delivery or a model/Telegram acceptance.
+        Admitted observations also check the current native body scope. Loaded
+        observations associate the selected group with that same process/base;
+        candidate equality, resource fences and communication remain separate.
         """
         from daimon_matrix.client import ClientConfig, LocalClient
         prepared = self.observe()
@@ -425,6 +426,8 @@ class Target:
         config = ClientConfig.load(root / "client.json", key)
         from .owner_process import ConnectedProcessObserver, ProcessPresence
         connected = 'connection_observer' in getattr(LocalClient, '__dataclass_fields__', {})
+        if require_loaded and not connected:
+            raise OnboardingError('qualified_onboarding_client_required')
         with ExitStack() as stack:
             presence: ConnectedProcessObserver | ProcessPresence
             if connected:
@@ -460,10 +463,39 @@ class Target:
             if connected and loaded is not None and (presence.process is None
                     or loaded.get('process_id') != presence.process['pid']):
                 raise OnboardingError('onboarding_daemon_responder_conflict')
+            group = prepared.get('group')
+            group_status = None
+            if connected and group is not None:
+                from daimon_matrix.operator_capabilities import host_capability_profile
+                role = host_capability_profile('status')
+                directory = root / role['client_directory']
+                group_socket = Path(group['socket'])
+                before_group = group_socket.lstat()
+                group_key = bytearray(onboarding_release.regular(
+                    directory / role['client_key_filename'], uid=os.geteuid()))
+                group_config = ClientConfig.load(directory / role['client_config_filename'], group_key)
+                hosted = LocalClient(group_socket, group_config, timeout_seconds=40, **options)
+                response = hosted.runtime_status()[1]
+                if response.get('ok') is not True or response['server'] != status['server']:
+                    raise OnboardingError('onboarding_daemon_origin_conflict')
+                group_status = response['result']
+                if group_status.get('loaded_runtime') != loaded:
+                    raise OnboardingError('onboarding_loaded_base_conflict')
+                after_group = group_socket.lstat()
+                if (before_group.st_dev, before_group.st_ino) != (after_group.st_dev, after_group.st_ino):
+                    raise OnboardingError('onboarding_daemon_socket_changed')
+            if require_loaded:
+                from daimon_matrix.canonical import canonical_bytes
+                application = None if group_status is None else group_status.get('loaded_application')
+                if (not isinstance(loaded, dict) or not loaded.get('qualified_startup')
+                        or not isinstance(application, dict)
+                        or application.get('loaded_base_sha256') != hashlib.sha256(canonical_bytes(loaded)).hexdigest()):
+                    raise OnboardingError('qualified_onboarding_loaded_view_required')
             if admitted:
                 _, observed = client.scope_me()
-                body = observed.get('result', {}).get('body', {})
-                if (observed.get('ok') is not True or body.get('state') != 'running'
+                scope_result = observed.get('result')
+                body = scope_result.get('body') if isinstance(scope_result, dict) else None
+                if (observed.get('ok') is not True or not isinstance(body, dict) or body.get('state') != 'running'
                         or any(body.get(field) != expected[field] for field in
                                ('body_ref', 'embodiment_id', 'incarnation_id'))):
                     raise OnboardingError('onboarding_admission_not_current')
@@ -474,14 +506,22 @@ class Target:
             return dict(schema="cluster-onboarding-runtime-presence/v1", plan_digest=digest(self.plan),
                 origin=expected, process=presence.process, runtime_id=config.runtime_id,
                 runtime_sha256=prepared["receipt"]["runtime_sha256"],
-                runtime_status=status['result'], receiving_readiness='unobserved',
+                runtime_status=status['result'], group=group, group_runtime_status=group_status,
+                receiving_readiness='unobserved',
                 responder_association='same-connection' if connected else 'legacy-probe')
+
+    def receiving_control(self, action: str, path: Path, *, command: dict | None = None) -> dict:
+        """Use the selected admitted group; preserve exact retained controls."""
+        from .onboarding_receiving_update import owner_control
+        observed = self.running(admitted=True, require_loaded=True)
+        return owner_control(self.package / 'runtime', observed['group'], observed,
+            action, path, command=command, status_key='group_runtime_status')
 
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept"))
+    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "receiving-control-prepare", "receiving-control-apply"))
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--genesis", type=Path, required=True)
@@ -500,12 +540,24 @@ def main(argv: list[str] | None = None) -> int:
     visibility.add_argument("--receive-only", action="store_true")
     visibility.add_argument("--visibility-installation", type=Path)
     parser.add_argument("--ready-fd", type=int)
+    parser.add_argument('--require-loaded', action='store_true')
+    parser.add_argument('--control-file', type=Path)
+    parser.add_argument('--control-command', type=Path)
     args = parser.parse_args(argv)
     try:
+        controlling = args.action in {'receiving-control-prepare', 'receiving-control-apply'}
+        if (args.require_loaded and args.action not in {'running', 'admitted-running'}
+                or controlling and (args.control_file is None
+                    or (args.action == 'receiving-control-prepare') != (args.control_command is not None))
+                or not controlling and (args.control_file is not None or args.control_command is not None)
+                or controlling and args.ready_fd is not None):
+            raise OnboardingError('invalid_receiving_control_request')
         plan = validate_plan(being_seed._read(args.plan))
         runtime = onboarding_code_successor.selection(args.runtime_code, args.runtime_digest,
             args.code, plan['release_digest'], uid=0)
         sdk_parameters = onboarding_code_successor.sdk_parameters(runtime)
+        if (controlling or args.require_loaded) and not sdk_parameters:
+            raise OnboardingError('qualified_onboarding_target_observer_required')
         matrix_commit = sdk_parameters.get('matrix_commit', onboarding_sdk.MATRIX_COMMIT)
         if args.action == 'sdk-prepare':
             onboarding_sdk.install(args.home, runtime, args.runtime_digest or plan['release_digest'], **sdk_parameters)
@@ -540,6 +592,11 @@ def main(argv: list[str] | None = None) -> int:
             if sdk_parameters else None)
         target = Target(args.home, plan, document(args.genesis), code=runtime,
             code_digest=args.runtime_digest or plan['release_digest'], qualified_startup=startup)
+        if controlling:
+            control_command = (None if args.control_command is None
+                               else being_seed._read(args.control_command, limit=being_seed.MAX_SELECTION))
+            print(json.dumps(target.receiving_control(args.action, args.control_file, command=control_command)))
+            return 0
         if args.action == 'peer-identity':
             from .onboarding_peer import identity
             print(json.dumps(identity(target)))
@@ -564,7 +621,8 @@ def main(argv: list[str] | None = None) -> int:
             return target.serve(receive_only=args.receive_only, visibility_installation=args.visibility_installation,
                                 ready_descriptor=args.ready_fd)
         if args.action in {"running", "admitted-running"}:
-            print(json.dumps(target.running(admitted=args.action == 'admitted-running')))
+            print(json.dumps(target.running(admitted=args.action == 'admitted-running',
+                                            require_loaded=args.require_loaded)))
             return 0
         if args.action in {'admission-check', 'admission-enroll'}:
             from .onboarding_admission import ReceivingHolder

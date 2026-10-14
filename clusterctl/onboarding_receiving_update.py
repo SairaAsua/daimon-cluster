@@ -114,7 +114,7 @@ class OwnerGroupClient:
             info = os.fstat(descriptor)
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
                     or info.st_nlink != 1 or info.st_mode & 0o077
-                    or info.st_size > being_seed.MAX_RECORD):
+                    or info.st_size > being_seed.MAX_SELECTION):
                 raise OnboardingError('receiving_control_private_file_required')
             os.fsync(descriptor)
         finally:
@@ -130,7 +130,7 @@ class OwnerGroupClient:
     def _prepare_control(self, command: dict, path: Path) -> dict:
         from daimon_matrix.local_api import request_hash
         if path.exists():
-            retained = being_seed._read(path)
+            retained = being_seed._read(path, limit=being_seed.MAX_SELECTION)
             if retained.get('command') != command:
                 raise OnboardingError('receiving_control_binding_conflict')
             self._durable_control(path)
@@ -145,7 +145,8 @@ class OwnerGroupClient:
         client = self._client('receiving-controller')
         request = client.prepare('runtime.reader-selection', command)
         being_seed._write(path, dict(schema='cluster-receiving-owner-control/v1',
-            command=command, request=request, process=observed['process'], server=observed['server']))
+            command=command, request=request, process=observed['process'], server=observed['server']),
+            limit=being_seed.MAX_SELECTION)
         self._durable_control(path)
         return dict(request_id=request['request_id'], request_sha256=request_hash(request),
                     command_sha256=digest(command))
@@ -157,7 +158,7 @@ class OwnerGroupClient:
 
     def _apply_control(self, path: Path) -> dict:
         from daimon_matrix.local_api import request_hash
-        retained = being_seed._read(path)
+        retained = being_seed._read(path, limit=being_seed.MAX_SELECTION)
         if set(retained) != {'schema', 'command', 'request', 'process', 'server'} or retained['schema'] != 'cluster-receiving-owner-control/v1':
             raise OnboardingError('receiving_control_binding_conflict')
         command, request = retained['command'], retained['request']
@@ -187,6 +188,30 @@ class OwnerGroupClient:
         return {**observed, 'schema': 'cluster-receiving-owner-control-observation/v1',
             'request_id': request['request_id'], 'request_sha256': expected_hash,
             'command_sha256': digest(command)}
+
+
+def owner_control(root: Path, group: dict, observed: dict, action: str, path: Path,
+                  *, command: dict | None = None, status_key: str = 'runtime_status') -> dict:
+    """Reuse qualified Source/guest observation for the same finite owner RPC.
+
+    The prepared request stays on its receiving owner. Only observation and
+    request hashes cross the controller boundary; no capability key is returned.
+    """
+    if (action not in {'receiving-control-prepare', 'receiving-control-apply'}
+            or (action == 'receiving-control-prepare') != (command is not None)
+            or not isinstance(group, dict) or group.get('channel_id') != 'tribe'
+            or observed.get('responder_association') != 'same-connection'):
+        raise OnboardingError('invalid_receiving_control_request')
+    with OwnerGroupClient(root, Path(group['socket'])) as owner:
+        current = owner.status()
+        previous = observed[status_key]
+        if (current['process'] != observed['process']
+                or any(current['runtime_status'].get(key) != previous.get(key)
+                       for key in ('loaded_runtime', 'loaded_application'))
+                or current['gate'] != previous.get('receiving', {}).get('channels', {}).get('tribe')):
+            raise OnboardingError('receiving_control_process_changed')
+        return (owner.prepare_control(command, path) if command is not None
+                else owner.apply_control(path))
 
 
 def freeze_senders(owners: dict[str, OwnerGroupClient], *, tribe_ref: str) -> list[dict]:

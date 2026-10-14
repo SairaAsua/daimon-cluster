@@ -201,3 +201,44 @@ def test_failed_request_publication_is_completed_before_native_control(tmp_path,
     assert syncs[start:] == [str(path), str(path.parent), str(root)]
     owner.apply_control(path)
     assert len(calls) == 1 and len(prepared) == 1 and path.read_bytes() == raw
+
+
+@pytest.mark.parametrize('changed', ['none', 'counts', 'process', 'loaded', 'gate'])
+def test_owner_adapter_rechecks_actual_loaded_connection_before_control(tmp_path, monkeypatch, changed):
+    from clusterctl import onboarding_receiving_update as receiving
+    current = dict(process={'pid': 123}, gate={'head': 'original'}, runtime_status={
+        'loaded_runtime': {'base': 'actual'}, 'loaded_application': {'view': 'actual'},
+        'counts': {'rows': 1}, 'receiving': {'channels': {'tribe': {'head': 'original'}}}})
+    observed = dict(process=copy.deepcopy(current['process']),
+        runtime_status=copy.deepcopy(current['runtime_status']), responder_association='same-connection')
+    calls = []
+    class FakeClient:
+        def __init__(self, *_):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            pass
+        def status(self):
+            return current
+        def apply_control(self, path):
+            calls.append(path)
+            return {'applied': True}
+    monkeypatch.setattr(receiving, 'OwnerGroupClient', FakeClient)
+    if changed == 'process':
+        current['process']['pid'] += 1
+    elif changed == 'loaded':
+        current['runtime_status']['loaded_application']['view'] = 'other'
+    elif changed == 'gate':
+        current['gate']['head'] = 'other'
+    elif changed == 'counts':
+        current['runtime_status']['counts']['rows'] += 1
+    group = dict(channel_id='tribe', socket=str(tmp_path / 'tribe.sock'))
+    path = tmp_path / 'revoke.json'
+    if changed in {'none', 'counts'}:
+        assert receiving.owner_control(tmp_path, group, observed, 'receiving-control-apply', path) == {'applied': True}
+        assert calls == [path]
+    else:
+        with pytest.raises(OnboardingError, match='process_changed'):
+            receiving.owner_control(tmp_path, group, observed, 'receiving-control-apply', path)
+        assert calls == []

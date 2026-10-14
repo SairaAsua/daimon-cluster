@@ -321,6 +321,11 @@ class Source:
                 responder_association='same-connection' if observer is not None else 'legacy-probe',
                 receiving_readiness='unobserved')
 
+    def receiving_control(self, action: str, path: Path, *, command: dict | None = None) -> dict:
+        from .onboarding_receiving_update import owner_control
+        observed = self.observe(require_loaded=True)
+        return owner_control(self.root, observed['group'], observed, action, path, command=command)
+
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -329,11 +334,21 @@ def main(argv=None) -> int:
     parser.add_argument('--code-digest')
     parser.add_argument('--observe', action='store_true')
     parser.add_argument('--require-loaded', action='store_true')
+    control = parser.add_mutually_exclusive_group()
+    control.add_argument('--prepare-control', type=Path)
+    control.add_argument('--apply-control', type=Path)
+    parser.add_argument('--control-command', type=Path)
     args = parser.parse_args(argv)
     try:
         from . import onboarding_code_successor, onboarding_sdk
         code = Path(__file__).resolve().parents[1]
         parameters = onboarding_code_successor.sdk_parameters(code)
+        controlling = args.prepare_control is not None or args.apply_control is not None
+        if (controlling and (args.observe or args.require_loaded or args.ready_fd is not None)
+                or (args.prepare_control is not None) != (args.control_command is not None)):
+            raise OnboardingError('invalid_receiving_control_request')
+        if controlling and not parameters:
+            raise OnboardingError('qualified_onboarding_source_observer_required')
         if args.require_loaded and (not args.observe or not parameters):
             raise OnboardingError('qualified_onboarding_source_observer_required')
         if parameters and args.code_digest is None:
@@ -343,6 +358,13 @@ def main(argv=None) -> int:
         settings = being_seed._read(args.config)
         source = Source(settings, code=code, code_digest=args.code_digest,
                         qualified_startup=startup)
+        if controlling:
+            action = 'receiving-control-prepare' if args.prepare_control is not None else 'receiving-control-apply'
+            path = args.prepare_control if args.prepare_control is not None else args.apply_control
+            command = (None if args.control_command is None
+                       else being_seed._read(args.control_command, limit=being_seed.MAX_SELECTION))
+            print(json.dumps(source.receiving_control(action, path, command=command)))
+            return 0
         if args.observe:
             if args.ready_fd is not None:
                 raise OnboardingError('invalid_source_observation_request')
