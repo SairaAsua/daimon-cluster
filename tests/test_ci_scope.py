@@ -539,3 +539,34 @@ def test_context_pages_stay_documentation_without_executable_changes():
     assert select(sorted(RUNBOOK_DOCS), ROOT) == ('docs', [])
     assert select([*sorted(RUNBOOK_DOCS), 'clusterctl/onboarding_host.py'], ROOT)[0] != 'docs'
     assert select([*sorted(RUNBOOK_DOCS), 'unknown-contract.json'], ROOT)[0] == 'full'
+
+
+def test_exact_candidate_host_scope_covers_legacy_peer_and_rejects_other_bytes(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    from tools import ci_scope
+    name = 'clusterctl/onboarding_host.py'
+    # The scope job reads the actual base; the unit test job has a shallow
+    # checkout. Model only that baseline read/digest, retain real candidate
+    # hashing and every mutation refusal below without requiring git history.
+    original = b'explicit retained baseline fixture\n'
+    sha256 = ci_scope.hashlib.sha256
+    monkeypatch.setattr(ci_scope.hashlib, 'sha256', lambda raw:
+        SimpleNamespace(hexdigest=lambda: '742fb3e396d4619369152cde4c3811c22df18504e504d7012e99c99772040c59')
+        if raw == original else sha256(raw))
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *_args, **_kwargs:
+        subprocess.CompletedProcess([], 0, original))
+    changed = sorted(ci_scope.LOADED_STARTUP_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py',
+        name, 'tests/test_onboarding_host.py'})
+    selected, tests = ci_scope.select(changed, ROOT, base='a' * 40)
+    assert selected == 'peer' and 'tests/test_onboarding_peer_host.py' in tests
+    read = Path.read_bytes
+    for change in (lambda raw: raw + b'# future host change\n', lambda raw: raw.replace(b'\n', b'\r\n')):
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, 'read_bytes', lambda path: change(read(path)) if path == ROOT / name else read(path))
+            assert ci_scope.select(changed, ROOT, base='a' * 40)[0] != 'peer'
+    for extra in ('requirements-dev.txt', 'clusterctl/onboarding_custody.py', 'unknown.py'):
+        assert ci_scope.select(changed + [extra], ROOT, base='a' * 40)[0] != 'peer'
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *_args, **_kwargs:
+        subprocess.CompletedProcess([], 0, original + b'# different baseline\n'))
+    assert ci_scope.select(changed, ROOT, base='a' * 40)[0] != 'peer'

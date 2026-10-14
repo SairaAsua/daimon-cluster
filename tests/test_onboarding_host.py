@@ -242,3 +242,179 @@ def test_private_connections_are_owner_scoped_and_never_return_bot_token(tmp_pat
     being_seed._write(directory / 'record.json', {**record, 'created_by': 'other'})
     with pytest.raises(OnboardingError, match='account_authorization_required'):
         backend._ssh_key(value)
+
+
+def candidate_call_fixture(tmp_path, monkeypatch):
+    """Real sealed public code; fake Incus transport/authorization only."""
+    import hashlib
+    import os
+    from dataclasses import replace
+    from pathlib import Path
+    from clusterctl import onboarding_code_successor, onboarding_sdk
+    from tests.test_onboarding_code_successor import sdk_generations
+    base, original, source, _, sdk, _ = sdk_generations(tmp_path)
+    output = tmp_path / 'candidate'
+    wheel = next((sdk / 'wheels').glob('*.whl'))
+    result = onboarding_code_successor.build(base, original, source, ('onboarding_target.py',), output,
+        sdk=sdk, matrix_commit=onboarding_sdk.MATRIX_COMMIT,
+        matrix_wheel_sha256=hashlib.sha256(wheel.read_bytes()).hexdigest())
+    config, value, run, _ = configured(tmp_path)
+    config = replace(config, code=base, release_digest=original,
+        custody=tmp_path / 'custody', custody_grants=tmp_path / 'custody-grants')
+    value = {**value, 'release_digest': original}
+    being_seed._write(config.grants / 'eko.json', dict(schema='cluster-onboarding-host-grant/v1',
+        plan=value, revoked=False))
+    calls = []
+    def execute(argv, **kwargs):
+        if argv[0] == 'exec':
+            calls.append((argv, kwargs))
+            return '{"observed": true}'
+        return run(argv)
+    backend = HostBackend(config, run=execute)
+    monkeypatch.setattr(backend, '_ceremony', lambda _plan: SimpleNamespace(authorize=lambda _plan: True))
+    guest_base = Path('/opt/daimon-onboarding') / original
+    monkeypatch.setattr(backend, '_guest_paths', lambda _plan: (tmp_path, guest_base, {}))
+    candidate = (output, result['runtime_digest'])
+    guest = Path('/opt/daimon-onboarding-runtime') / candidate[1]
+    run.instances.append(dict(name='dm-eko', expanded_devices={'retained-candidate': dict(
+        type='disk', source=str(output), path=str(guest), readonly='true', shift='true')}))
+    assert output.stat().st_uid == os.geteuid()
+    return backend, value, run, candidate, calls
+
+
+def test_host_probes_exact_mounted_candidate_without_selecting_it(tmp_path, monkeypatch):
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    config = backend.config
+    original = {path: path.read_bytes() for path in candidate[0].rglob('*') if path.is_file()}
+    monkeypatch.setattr(backend, '_runtime_selection', lambda _: pytest.fail('active selection used for candidate'))
+    result = backend._target_call(value, 'admitted-running', candidate=candidate,
+        observation_timeout_seconds=5, require_loaded=True)
+    assert result == {'observed': True} and backend.config is config
+    assert len(calls) == 1
+    argv, options = calls[0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    assert argv[argv.index('--runtime-digest') + 1] == candidate[1]
+    assert argv[argv.index('--runtime-code') + 1].endswith(candidate[1])
+    assert '--require-loaded' in argv
+    assert 0 < float(argv[argv.index('--observation-timeout-seconds') + 1]) <= 5
+    assert 0 < options['timeout_seconds'] <= 5
+    assert original == {path: path.read_bytes() for path in original}
+    assert not list(tmp_path.rglob('custody.json'))
+
+
+@pytest.mark.parametrize('change', ['missing-mount', 'writable-mount', 'other-source', 'changed-code',
+                                  'wrong-digest', 'authority-action', 'public-profile'])
+def test_host_candidate_refusal_precedes_owner_command(tmp_path, monkeypatch, change):
+    backend, value, run, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    action, options = 'observe', {}
+    mount = run.instances[0]['expanded_devices']['retained-candidate']
+    if change == 'missing-mount':
+        run.instances[0]['expanded_devices'].clear()
+    elif change == 'writable-mount':
+        mount['readonly'] = 'false'
+    elif change == 'other-source':
+        mount['source'] = '/different-source'
+    elif change == 'changed-code':
+        (candidate[0] / 'clusterctl/onboarding_target.py').write_bytes(b'changed')
+    elif change == 'wrong-digest':
+        candidate = (candidate[0], 'f' * 64)
+    elif change == 'authority-action':
+        action = 'activate'
+    else:
+        options['profile'] = {'unexpected': True}
+    with pytest.raises(OnboardingError):
+        backend._target_call(value, action, candidate=candidate, **options)
+    assert not calls and not run.calls
+
+
+@pytest.mark.parametrize('timeout', [0, -1, float('nan'), float('inf'), 61])
+def test_host_observation_budget_rejects_invalid_values_before_transport(tmp_path, timeout):
+    _, value, run, backend = configured(tmp_path)
+    with pytest.raises(OnboardingError, match='deadline_required'):
+        backend._target_call(value, 'admitted-running', observation_timeout_seconds=timeout)
+    assert not run.calls
+
+
+def test_host_rejects_late_observation_without_retry(tmp_path, monkeypatch):
+    from clusterctl import onboarding_host
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    clock = [1_000_000_000]
+    monkeypatch.setattr(onboarding_host.time, 'monotonic_ns', lambda: clock[0])
+    execute = backend.run
+    def late(argv, **kwargs):
+        result = execute(argv, **kwargs)
+        if argv[0] == 'exec':
+            clock[0] += 6_000_000_000
+        return result
+    backend.run = late
+    with pytest.raises(OnboardingError, match='deadline_expired'):
+        backend._target_call(value, 'admitted-running', candidate=candidate, observation_timeout_seconds=5)
+    assert len(calls) == 1
+
+
+def test_host_deadline_exhausted_by_authorization_dispatches_nothing(tmp_path, monkeypatch):
+    from clusterctl import onboarding_host
+    _, value, run, backend = configured(tmp_path)
+    clock = [1_000_000_000]
+    monkeypatch.setattr(onboarding_host.time, 'monotonic_ns', lambda: clock[0])
+    authorize = backend.authorize
+    def late(*args):
+        allowed = authorize(*args)
+        clock[0] += 6_000_000_000
+        return allowed
+    monkeypatch.setattr(backend, 'authorize', late)
+    with pytest.raises(OnboardingError, match='deadline_expired'):
+        backend._dispatch(value, ['exec', 'dm-eko'], timeout_seconds=5, deadline_ns=6_000_000_000)
+    assert not run.calls
+
+
+def test_incus_observation_timeout_is_not_a_guest_exit_receipt(monkeypatch):
+    import subprocess
+    from clusterctl import onboarding_host
+    def timeout(argv, **kwargs):
+        assert kwargs['timeout'] == 3
+        raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+    monkeypatch.setattr(onboarding_host.subprocess, 'run', timeout)
+    with pytest.raises(OnboardingError, match='host_operation_failed'):
+        HostBackend._run(['exec', 'dm-fixture'], timeout_seconds=3)
+
+
+def test_candidate_mount_and_owner_observation_share_one_budget(tmp_path, monkeypatch):
+    from clusterctl import onboarding_host
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    clock = [1_000_000_000]
+    monkeypatch.setattr(onboarding_host.time, 'monotonic_ns', lambda: clock[0])
+    execute, inspections = backend.run, []
+    def mounted(argv, **kwargs):
+        result = execute(argv, **kwargs)
+        if argv[0] == 'list':
+            inspections.append((argv, kwargs))
+            clock[0] += 3_000_000_000
+        elif argv[0] == 'storage':
+            pytest.fail('volume inventory is unrelated to candidate mount inspection')
+        return result
+    backend.run = mounted
+    backend._target_call(value, 'admitted-running', candidate=candidate, observation_timeout_seconds=5)
+    assert len(inspections) == len(calls) == 1
+    assert inspections[0][1]['timeout_seconds'] == 5
+    assert calls[0][1]['timeout_seconds'] == 2
+    argv = calls[0][0]
+    assert float(argv[argv.index('--observation-timeout-seconds') + 1]) == 2
+
+
+def test_slow_candidate_mount_inspection_never_starts_owner_command(tmp_path, monkeypatch):
+    from clusterctl import onboarding_host
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    clock = [1_000_000_000]
+    monkeypatch.setattr(onboarding_host.time, 'monotonic_ns', lambda: clock[0])
+    execute, inspections = backend.run, []
+    def late(argv, **kwargs):
+        assert argv[0] == 'list'
+        inspections.append(kwargs['timeout_seconds'])
+        result = execute(argv, **kwargs)
+        clock[0] += 6_000_000_000
+        return result
+    backend.run = late
+    with pytest.raises(OnboardingError, match='deadline_expired'):
+        backend._target_call(value, 'admitted-running', candidate=candidate, observation_timeout_seconds=5)
+    assert inspections == [5] and not calls

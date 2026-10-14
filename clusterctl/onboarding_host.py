@@ -9,10 +9,12 @@ from __future__ import annotations
 import json
 import hashlib
 import inspect
+import math
 import os
 import re
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -285,7 +287,7 @@ class HostBackend:
         self.input_cache = input_cache if input_cache is not None else onboarding_input.VerificationCache()
 
     @staticmethod
-    def _run(argv: list[str]) -> str:
+    def _run(argv: list[str], *, timeout_seconds: float | None = None) -> str:
         # No shell, no source-supplied program, and never leak captured stderr.
         # Preserving tens of thousands of source files includes durable fsyncs.
         # Give only the typed context installation a larger finite window;
@@ -293,9 +295,12 @@ class HostBackend:
         context_install = argv[0] == 'exec' and any(
             argv[i:i + 4] == ['execute', 'context', '--home', '/home/agent']
             for i in range(len(argv) - 3))
+        if timeout_seconds is not None and (not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 65):
+            raise OnboardingError('receiving_host_deadline_required')
+        timeout = timeout_seconds if timeout_seconds is not None else (7200 if context_install else 1800)
         try:
             result = subprocess.run(["incus", *argv], capture_output=True, text=True,
-                                    timeout=7200 if context_install else 1800, check=False)
+                                    timeout=timeout, check=False)
         except (OSError, subprocess.TimeoutExpired):
             raise OnboardingError("onboarding_host_operation_failed") from None
         if result.returncode:
@@ -804,9 +809,10 @@ class HostBackend:
         selected = (self.config.runtime_by_name or {}).get(plan['name'])
         return selected if selected is not None else (self.config.runtime_code, self.config.runtime_digest)
 
-    def _runtime_paths(self, plan: dict, base: Path) -> tuple[Path, list[str], dict]:
+    def _runtime_paths(self, plan: dict, base: Path, *,
+                       candidate: tuple[Path, str] | None = None) -> tuple[Path, list[str], dict]:
         """Context stays frozen; each body may retain its qualified generation."""
-        runtime_code, runtime_digest = self._runtime_selection(plan)
+        runtime_code, runtime_digest = self._runtime_selection(plan) if candidate is None else candidate
         if runtime_code is None and runtime_digest is None:
             return base, [], {}
         if self.config.code is None or runtime_code is None or runtime_digest is None:
@@ -818,8 +824,16 @@ class HostBackend:
         return code, ['--runtime-code', str(code), '--runtime-digest', runtime_digest], {
             'runtime-' + runtime_digest[:55]: mount}
 
-    def _mounted(self, plan: dict, mounts: dict) -> bool:
-        instances, _ = self._inventory()
+    def _mounted(self, plan: dict, mounts: dict, *, deadline_ns: int | None = None) -> bool:
+        if deadline_ns is None:
+            instances, _ = self._inventory()
+        else:
+            # A candidate observation needs instance devices, not home volumes.
+            # Include this transport call in the same budget as owner status.
+            instances = json.loads(self._dispatch(plan, ['list', '--format=json'], deadline_ns=deadline_ns))
+            if (not isinstance(instances, list) or any(not isinstance(row, dict) for row in instances)
+                    or sum(row.get('name') == self.instance(plan) for row in instances) != 1):
+                raise OnboardingError('invalid_onboarding_environment_observation')
         row = next(row for row in instances if row.get("name") == self.instance(plan))
         devices = row.get("expanded_devices", {})
         for name, expected in mounts.items():
@@ -916,13 +930,39 @@ class HostBackend:
                     path="/home/agent/.onboarding-matrix", readonly="true", shift="true")
 
     def _target_call(self, plan: dict, action: str, *, profile: dict | None = None,
-                     peer_packet: dict | None = None, peer_being_ref: str | None = None) -> dict:
+                     peer_packet: dict | None = None, peer_being_ref: str | None = None,
+                     candidate: tuple[Path, str] | None = None,
+                     observation_timeout_seconds: float | None = None,
+                     require_loaded: bool = False) -> dict:
+        """Probe prepared receiving code without changing active selectors.
+
+        Candidate calls require the already verified public read-only mount.
+        The receiving owner still verifies its exact code/SDK independently.
+        A host timeout is uncertain observation, never proof of guest exit.
+        """
+        deadline_ns = None
+        if observation_timeout_seconds is not None:
+            if (action not in {'running', 'admitted-running'}
+                    or not math.isfinite(observation_timeout_seconds)
+                    or not 0 < observation_timeout_seconds <= 60):
+                raise OnboardingError('receiving_host_deadline_required')
+            deadline_ns = time.monotonic_ns() + int(observation_timeout_seconds * 1_000_000_000)
+        if require_loaded and action not in {'running', 'admitted-running'}:
+            raise OnboardingError('qualified_onboarding_target_observer_required')
         if self.config.custody is None or self.config.custody_grants is None:
             raise OnboardingError("identity_authorization_required")
         if not self._ceremony(plan).authorize(plan):
             raise OnboardingError("identity_authorization_required")
         _, guest_code, _ = self._guest_paths(plan)
-        runtime_code, runtime_args, _ = self._runtime_paths(plan, guest_code)
+        runtime_code, runtime_args, mounts = (self._runtime_paths(plan, guest_code) if candidate is None
+            else self._runtime_paths(plan, guest_code, candidate=candidate))
+        if candidate is not None:
+            if (action not in {'sdk-observe', 'sdk-prepare', 'observe', 'running', 'admitted-running',
+                    'receiving-control-prepare', 'receiving-control-apply'}
+                    or profile is not None or peer_packet is not None or peer_being_ref is not None
+                    or not onboarding_code_successor.sdk_parameters(candidate[0], uid=os.geteuid())
+                    or not self._mounted(plan, mounts, deadline_ns=deadline_ns)):
+                raise OnboardingError('qualified_onboarding_candidate_mount_required')
         from .onboarding_service import code_command
         public = "/home/agent/.onboarding-matrix"
         peer_args = []
@@ -945,12 +985,24 @@ class HostBackend:
             "--plan", "/home/agent/.onboarding-input/plan.json", "--genesis", public + "/genesis.json",
             "--activation", public + "/activation.json", "--credential-response", public + "/credential-response.json",
             *peer_args, *(['--public-profile-json', json.dumps(profile, separators=(',', ':'))] if profile is not None else [])]
-        result = self._dispatch(plan, ["exec", self.instance(plan), "--user", "1000", "--group", "1000",
+        if require_loaded:
+            arguments += ['--require-loaded']
+        remaining = None
+        if deadline_ns is not None:
+            remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+            if remaining <= 0:
+                raise OnboardingError('receiving_host_deadline_expired')
+            arguments += ['--observation-timeout-seconds', str(remaining)]
+        command = ["exec", self.instance(plan), "--user", "1000", "--group", "1000",
             "--env", "HOME=/home/agent", "--", *code_command(Path('/usr/bin/python3'), runtime_code,
-                'clusterctl.onboarding_target', arguments)])
+                'clusterctl.onboarding_target', arguments)]
+        result = (self._dispatch(plan, command) if deadline_ns is None
+            else self._dispatch(plan, command, timeout_seconds=remaining, deadline_ns=deadline_ns))
         value = json.loads(result)
         if not isinstance(value, dict):
             raise OnboardingError('invalid_onboarding_observation')
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('receiving_host_deadline_expired')
         return value
 
     def _matrix_command(self, plan: dict, action: str) -> dict:
@@ -1014,9 +1066,15 @@ class HostBackend:
                                    onboarding_code_successor.QUALIFIED_SDK_SCHEMA} or (
             marker['schema'] == onboarding_code_successor.TELEGRAM_SCHEMA and 'sdk_digest' in marker)
 
-    def _dispatch(self, plan: dict, argv: list[str]) -> str:
+    def _dispatch(self, plan: dict, argv: list[str], *, timeout_seconds: float | None = None,
+                  deadline_ns: int | None = None) -> str:
         # A revoked plan stops before the next concrete effect, including
         # revocation while an earlier long Incus operation was in flight.
         if not self.authorize(plan, digest(plan)):
             raise OnboardingError("host_authorization_required")
-        return self.run(argv)
+        if deadline_ns is not None:
+            remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+            if remaining <= 0:
+                raise OnboardingError('receiving_host_deadline_expired')
+            timeout_seconds = remaining if timeout_seconds is None else min(remaining, timeout_seconds)
+        return self.run(argv) if timeout_seconds is None else self.run(argv, timeout_seconds=timeout_seconds)

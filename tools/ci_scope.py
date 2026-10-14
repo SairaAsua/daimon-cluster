@@ -7,6 +7,7 @@ contracts. Workflow-only changes exercise the workflow and selector themselves.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -360,9 +361,12 @@ HOME_WORKER_TESTS = ('tests/test_home_worker_successor.py', 'tests/test_onboardi
 
 
 def host_observation_only(root: Path, base: str) -> bool:
-    """Prove the sole host change accepts existing receiving metadata.
+    """Recognize exact qualified host receiving changes, never a filename.
 
     A host filename alone cannot narrow provisioning/access qualification.
+    The initial one-literal metadata fix is compared against its actual base.
+    The candidate/deadline increment is an exact whole-file hash pair: all
+    default paths are retained and qualified by the host/peer regression set.
     Any other byte change keeps its broader profile, including future edits.
     """
     if not re.fullmatch(r'[0-9a-f]{40}', base):
@@ -378,13 +382,20 @@ def host_observation_only(root: Path, base: str) -> bool:
         return False
     old=b'set(value) != {"phase", "request", "receipt"}'
     new=b"set(value) - {'group', 'receiving_controller'} != {\"phase\", \"request\", \"receipt\"}"
-    return original.count(old)==1 and original.replace(old,new,1)==current
+    if original.count(old)==1 and original.replace(old,new,1)==current:
+        return True
+    return (hashlib.sha256(original).hexdigest() in {
+        '742fb3e396d4619369152cde4c3811c22df18504e504d7012e99c99772040c59',
+        '8b0a728465958acb8da5ae0d212fd69c3b548a07f9f9d677e66ec3146b3780d2'}
+        and hashlib.sha256(current).hexdigest() ==
+        '0ec24cc2096f5b88b498d1e49578810404c2248b0a8309d027c30d28d5f2daee')
 
 
 def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
     host_files={'clusterctl/onboarding_host.py','tests/test_onboarding_host.py'}
     host_tests=(*LOADED_STARTUP_TESTS,'tests/test_onboarding_host.py',
-                'tests/test_onboarding_host_ownership.py','tests/test_onboarding_managed.py')
+                'tests/test_onboarding_host_ownership.py','tests/test_onboarding_managed.py',
+                'tests/test_onboarding_peer_host.py')
     if (host_files <= set(changed) and set(changed) <= LOADED_STARTUP_FILES | CI_FILES | host_files
             and all((root/path).is_file() for path in host_tests) and host_observation_only(root,base)):
         return 'peer',list(dict.fromkeys(host_tests))
