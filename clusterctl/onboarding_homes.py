@@ -168,6 +168,17 @@ class IncusProvider:
         self.store, self.backend = store, backend
 
     def reconcile(self, placement):
+        from . import being_seed
+        from .onboarding import private_directory
+        # Home callbacks run independently of acceptance. Their receiving calls
+        # must nevertheless own the same job lock and resolve the current
+        # runtime after acquiring it, just like the ordinary worker tick.
+        directory = private_directory(self.store.directory(placement['name']))
+        with being_seed._locked(directory):
+            backend = self.backend() if callable(self.backend) else self.backend
+            return IncusProvider(self.store, backend)._reconcile(placement)
+
+    def _reconcile(self, placement):
         from .homes.provision import regular, sha
         from .onboarding import digest, validate_plan
         import tempfile

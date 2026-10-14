@@ -2,8 +2,9 @@
 
 Unit tests run against FakeAdapter fixtures with a tmp state_dir.
 Integration tests exercise IncusAdapter against the live incus daemon
-(iso-a / iso-b, their preserved historical tribe-agent profile) and are skipped when incus is
-unavailable.
+(iso-a / iso-b, their preserved historical tribe-agent profile). They require
+CLUSTER_LIVE_INCUS_TESTS=1 and an explicitly prepared disposable host; ordinary
+unit qualification never probes a development host's live Incus daemon.
 """
 
 from __future__ import annotations
@@ -247,6 +248,8 @@ def test_repo_config_loads():
 # --------------------------------------------------------------------------
 
 def _incus_available() -> bool:
+    if os.environ.get('CLUSTER_LIVE_INCUS_TESTS') != '1':
+        return False
     env = dict(os.environ)
     env["PATH"] = env.get("PATH", "") + ":/usr/sbin"
     try:
@@ -259,7 +262,7 @@ def _incus_available() -> bool:
 
 INCUS_AVAILABLE = _incus_available()
 requires_incus = pytest.mark.skipif(not INCUS_AVAILABLE,
-                                    reason="live incus unavailable (sudo incus list failed)")
+                                    reason="disposable live Incus fixture not explicitly selected/available")
 
 
 @requires_incus

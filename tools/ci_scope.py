@@ -248,6 +248,25 @@ UPDATE_SELECTION_TESTS = ('tests/test_receiving_update_selection.py', 'tests/tes
     'tests/test_onboarding_target.py::test_receiving_credential_upgrade_keeps_origin_memory_and_runtime_reload',
     'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
 
+HOST_SELECTION_FILES = {'clusterctl/onboarding.py', 'clusterctl/onboarding_host.py',
+    'clusterctl/onboarding_worker.py', 'clusterctl/onboarding_receiving_update.py',
+    'clusterctl/onboarding_homes.py',
+    'clusterctl/operation_journal.py', 'tests/test_receiving_host_selection.py',
+    'tests/test_onboarding_homes.py',
+    'tests/test_clusterctl.py',
+    'docs/runbooks/tribu-sdk-successor.md'}
+HOST_SELECTION_TESTS = ('tests/test_receiving_host_selection.py',
+    'tests/test_receiving_update_journal.py', 'tests/test_operation_journal.py',
+    'tests/test_onboarding.py', 'tests/test_onboarding_host.py',
+    'tests/test_onboarding_host_ownership.py', 'tests/test_onboarding_progress.py',
+    'tests/test_onboarding_homes.py', 'tests/test_onboarding_worker_install.py',
+    'tests/test_home_worker_successor.py', 'tests/test_onboarding_new.py',
+    'tests/test_onboarding_consent.py', 'tests/test_onboarding_intake.py',
+    'tests/test_onboarding_code_successor.py', 'tests/test_receiving_update_preflight.py',
+    'tests/test_onboarding_managed.py', 'tests/test_clusterctl.py', 'tests/test_transfer.py',
+    'tests/test_rebirth.py', 'tests/test_recovery_rebirth.py', 'tests/test_volume_relocation.py',
+    'tests/test_clusterd.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
+
 
 GROUP_FILES = {'tests/test_onboarding_group.py',
     'clusterctl/onboarding_acceptance.py', 'clusterctl/onboarding_target.py',
@@ -326,6 +345,13 @@ def select(changed: list[str], root: Path) -> tuple[str, list[str]]:
         return 'docs', []
     if set(changed) <= CI_FILES | RUNBOOK_DOCS:
         return 'ci', ['tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    if ({'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_host_selection.py'} <= set(changed)
+            and set(changed) <= HOST_SELECTION_FILES | CI_FILES
+            and all((root / path).is_file() for path in HOST_SELECTION_TESTS)):
+        # Runtime selector refresh, job fences and opt-in journal observation
+        # CAS. Include existing journal consumers; no SDK/bootstrap, new native
+        # authority, account, admission or service code is changed here.
+        return 'host-selection', list(HOST_SELECTION_TESTS)
     if ({'clusterctl/onboarding_service.py', 'tests/test_receiving_update_selection.py'} <= set(changed)
             and set(changed) <= UPDATE_SELECTION_FILES | CI_FILES
             and all((root / path.split('::', 1)[0]).is_file() for path in UPDATE_SELECTION_TESTS)):

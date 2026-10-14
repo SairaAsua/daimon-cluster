@@ -6,6 +6,18 @@ from tools.ci_scope import ONBOARDING_CONTRACTS, select
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_host_selection_covers_job_fences_and_shared_journal_consumers(tmp_path):
+    from tools.ci_scope import HOST_SELECTION_FILES, HOST_SELECTION_TESTS
+    changed = sorted(HOST_SELECTION_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py'})
+    assert select(changed, ROOT) == ('host-selection', list(HOST_SELECTION_TESTS))
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    for other in ('clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_source.py',
+                  'clusterctl/onboarding_admission.py', 'clusterctl/onboarding_runtime.py',
+                  'clusterctl/onboarding_custody.py', 'clusterctl/rebirth.py',
+                  'requirements-weave.txt', 'unknown.py'):
+        assert select([*changed, other], ROOT)[0] != 'host-selection'
+
+
 def test_receiving_preflight_keeps_sdk_startup_and_retained_successor_qualification(tmp_path):
     from tools.ci_scope import UPDATE_PREFLIGHT_FILES, UPDATE_PREFLIGHT_TESTS
     changed = sorted(UPDATE_PREFLIGHT_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py'})
