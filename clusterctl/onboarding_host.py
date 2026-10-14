@@ -884,8 +884,7 @@ class HostBackend:
             raise OnboardingError("identity_authorization_required")
         _, guest_code, _ = self._guest_paths(plan)
         runtime_code, runtime_args, _ = self._runtime_paths(plan, guest_code)
-        launcher = ("import sys; sys.path.insert(0,sys.argv.pop(1)); "
-                    "from clusterctl.onboarding_target import main; raise SystemExit(main())")
+        from .onboarding_service import code_command
         public = "/home/agent/.onboarding-matrix"
         peer_args = []
         if peer_packet is not None or peer_being_ref is not None:
@@ -903,12 +902,13 @@ class HostBackend:
                 hashlib.sha256(canonical_bytes(peer_packet)).hexdigest(), '--peer-being-ref', approved]
         elif action == 'peer-accept':
             raise OnboardingError('approved_onboarding_peer_required')
-        result = self._dispatch(plan, ["exec", self.instance(plan), "--user", "1000", "--group", "1000",
-            "--env", "HOME=/home/agent", "--", "python3", "-B", "-I", "-c", launcher, str(runtime_code),
-            action, "--home", "/home/agent", "--code", str(guest_code), *runtime_args,
+        arguments = [action, "--home", "/home/agent", "--code", str(guest_code), *runtime_args,
             "--plan", "/home/agent/.onboarding-input/plan.json", "--genesis", public + "/genesis.json",
             "--activation", public + "/activation.json", "--credential-response", public + "/credential-response.json",
-            *peer_args, *(['--public-profile-json', json.dumps(profile, separators=(',', ':'))] if profile is not None else [])])
+            *peer_args, *(['--public-profile-json', json.dumps(profile, separators=(',', ':'))] if profile is not None else [])]
+        result = self._dispatch(plan, ["exec", self.instance(plan), "--user", "1000", "--group", "1000",
+            "--env", "HOME=/home/agent", "--", *code_command(Path('/usr/bin/python3'), runtime_code,
+                'clusterctl.onboarding_target', arguments)])
         value = json.loads(result)
         if not isinstance(value, dict):
             raise OnboardingError('invalid_onboarding_observation')
@@ -971,7 +971,8 @@ class HostBackend:
             return False
         marker = json.loads(onboarding_release.regular(
             runtime_code / onboarding_code_successor.MARKER, uid=os.geteuid()))
-        return marker['schema'] == onboarding_code_successor.SDK_SCHEMA or (
+        return marker['schema'] in {onboarding_code_successor.SDK_SCHEMA,
+                                   onboarding_code_successor.QUALIFIED_SDK_SCHEMA} or (
             marker['schema'] == onboarding_code_successor.TELEGRAM_SCHEMA and 'sdk_digest' in marker)
 
     def _dispatch(self, plan: dict, argv: list[str]) -> str:

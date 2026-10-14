@@ -234,6 +234,20 @@ UPDATE_PREFLIGHT_TESTS = ('tests/test_receiving_update_preflight.py', 'tests/tes
     'tests/test_onboarding_code_successor.py', 'tests/test_onboarding_release.py',
     'tests/test_receiving_update_journal.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
 
+UPDATE_SELECTION_FILES = {'clusterctl/onboarding_code_successor.py', 'clusterctl/onboarding_host.py',
+    'clusterctl/onboarding_runtime.py', 'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_service.py',
+    'clusterctl/onboarding_source.py', 'clusterctl/onboarding_target.py',
+    'tests/test_onboarding_code_successor.py', 'tests/test_receiving_update_selection.py',
+    'tests/test_onboarding_managed.py', 'docs/runbooks/tribu-sdk-successor.md'}
+UPDATE_SELECTION_TESTS = ('tests/test_receiving_update_selection.py', 'tests/test_receiving_update_preflight.py',
+    'tests/test_onboarding_sdk.py', 'tests/test_onboarding_code_successor.py',
+    'tests/test_onboarding_runtime.py', 'tests/test_onboarding_service.py', 'tests/test_onboarding_source.py',
+    'tests/test_onboarding_host.py', 'tests/test_onboarding_peer_host.py', 'tests/test_onboarding_managed.py',
+    'tests/test_onboarding_group.py', 'tests/test_onboarding_release.py', 'tests/test_receiving_update_journal.py',
+    'tests/test_onboarding_target.py::test_receiving_target_runtime_retries_keep_keys_origin_and_receiving_writes',
+    'tests/test_onboarding_target.py::test_receiving_credential_upgrade_keeps_origin_memory_and_runtime_reload',
+    'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
+
 
 GROUP_FILES = {'tests/test_onboarding_group.py',
     'clusterctl/onboarding_acceptance.py', 'clusterctl/onboarding_target.py',
@@ -312,6 +326,12 @@ def select(changed: list[str], root: Path) -> tuple[str, list[str]]:
         return 'docs', []
     if set(changed) <= CI_FILES | RUNBOOK_DOCS:
         return 'ci', ['tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    if ({'clusterctl/onboarding_service.py', 'tests/test_receiving_update_selection.py'} <= set(changed)
+            and set(changed) <= UPDATE_SELECTION_FILES | CI_FILES
+            and all((root / path.split('::', 1)[0]).is_file() for path in UPDATE_SELECTION_TESTS)):
+        # Exact SDK/import startup and unit CAS: qualify the actual receiving
+        # launchers/admission and retained context, not archive export or new keys.
+        return 'update-selection', list(UPDATE_SELECTION_TESTS)
     if ({'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_update_preflight.py'} <= set(changed)
             and set(changed) <= UPDATE_PREFLIGHT_FILES | CI_FILES
             and all((root / path).is_file() for path in UPDATE_PREFLIGHT_TESTS)):

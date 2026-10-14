@@ -6,11 +6,14 @@ The wheelhouse is covered by the receiving release's content digest.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import uuid
 import zipfile
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
@@ -141,6 +144,132 @@ def interpreter(venv: Path) -> dict:
             or any(type(part) is not int for part in value['version'])):
         raise OnboardingError('qualified_receiving_interpreter_required')
     return value
+
+
+def runtime_imports(venv: Path, code: Path, *, code_uid: int = 0,
+                    matrix_commit: str = MATRIX_COMMIT,
+                    matrix_wheel_sha256: str | None = None) -> Path:
+    """Derive one closed import tree without altering the installed generation.
+
+    Startup executes only the trusted interpreter, approved code and these exact
+    wheel bytes. Installed extras, startup hooks and unverified bytecode never
+    become import paths. This is artifact closure, not a process sandbox.
+    """
+    sdk = verify(code, uid=code_uid, matrix_commit=matrix_commit,
+                 matrix_wheel_sha256=matrix_wheel_sha256)
+    root = private_directory(venv.parent)
+    expected_install = dict(schema='cluster-onboarding-sdk-installation/v1', sdk_digest=digest(sdk),
+                            matrix_commit=sdk['matrix_commit'], wheel_count=len(sdk['wheels']))
+    if venv.name != 'venv' or being_seed._read(root / 'installation.json') != expected_install:
+        raise OnboardingError('installed_onboarding_sdk_changed')
+    target = root / 'runtime-imports'
+    receipt = root / 'runtime-imports.json'
+    with being_seed._locked(root):
+        temporary = root / ('runtime-imports-' + uuid.uuid4().hex)
+        building = not target.exists() and not target.is_symlink()
+        if building:
+            temporary.mkdir(mode=0o700)
+        files: dict[str, str] = {}
+        total = 0
+        try:
+            for row in sdk['wheels']:
+                raw = onboarding_release.regular(code / 'sdk/wheels' / row['filename'], uid=code_uid)
+                if hashlib.sha256(raw).hexdigest() != row['sha256']:
+                    raise OnboardingError('onboarding_sdk_digest_mismatch')
+                with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                    for member in archive.infolist():
+                        if member.is_dir():
+                            continue
+                        name = PurePosixPath(member.filename).as_posix()
+                        if name != member.filename or member.file_size > 32 * 1024**2:
+                            raise OnboardingError('qualified_runtime_imports_required')
+                        contents = archive.read(member)
+                        checksum = hashlib.sha256(contents).hexdigest()
+                        if name in files:
+                            if files[name] != checksum:
+                                raise OnboardingError('qualified_runtime_imports_required')
+                            continue
+                        files[name] = checksum
+                        total += len(contents)
+                        if total > 256 * 1024**2 or len(files) > 20000:
+                            raise OnboardingError('qualified_runtime_imports_required')
+                        if building:
+                            destination = temporary / name
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            with destination.open('xb') as output:
+                                output.write(contents)
+                                output.flush()
+                                os.fsync(output.fileno())
+                            destination.chmod(0o600)
+            expected = dict(schema='cluster-onboarding-runtime-imports/v1', sdk_digest=digest(sdk),
+                            files_sha256=digest(files))
+            if building:
+                for directory in temporary.rglob('*'):
+                    if directory.is_dir():
+                        directory.chmod(0o700)
+                directories_to_sync = [temporary, *[p for p in temporary.rglob('*') if p.is_dir()]]
+                for directory in sorted(directories_to_sync, key=lambda p: len(p.parts), reverse=True):
+                    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                os.replace(temporary, target)
+                descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            directories = {''}
+            for name in files:
+                directories.update(str(parent) for parent in PurePosixPath(name).parents if str(parent) != '.')
+            actual_files, actual_directories = set(), {''}
+            private_directory(target)
+            for path in target.rglob('*'):
+                being_seed._path(path)
+                name = path.relative_to(target).as_posix()
+                if path.is_dir():
+                    private_directory(path)
+                    actual_directories.add(name)
+                else:
+                    if name not in files or hashlib.sha256(onboarding_release.regular(path,
+                            uid=os.geteuid())).hexdigest() != files[name]:
+                        raise OnboardingError('qualified_runtime_imports_required')
+                    actual_files.add(name)
+            if actual_files != set(files) or actual_directories != directories:
+                raise OnboardingError('qualified_runtime_imports_required')
+            # Extra installed distributions must not satisfy dependencies that
+            # are missing from this exact, deliberately closed runtime tree.
+            _pip(venv, 'check', str(target))
+            if receipt.exists():
+                if being_seed._read(receipt) != expected:
+                    raise OnboardingError('qualified_runtime_imports_required')
+            else:
+                being_seed._write(receipt, expected)
+            return target
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+
+
+def runtime_command(venv: Path, imports: Path, code: Path, module: str,
+                    arguments: list[str]) -> list[str]:
+    """Use a previously qualified tree without site startup or bytecode caches."""
+    if (not re.fullmatch(r'clusterctl\.[a-z][a-z0-9_]*', module)
+            or imports != venv.parent / 'runtime-imports'):
+        raise OnboardingError('qualified_runtime_imports_required')
+    launcher = '''import sys,runpy
+sys.prefix = sys.exec_prefix = sys.argv.pop(1)
+imports = sys.argv.pop(1)
+code = sys.argv.pop(1)
+module = sys.argv.pop(1)
+sys.path[:0] = [code, imports]
+sys.dont_write_bytecode = True
+sys.pycache_prefix = imports + '/.disabled-bytecode'
+runpy.run_module(module, run_name='__main__', alter_sys=True)
+'''
+    return [str(venv / 'bin/python'), '-B', '-I', '-S', '-c', launcher,
+            str(venv), str(imports), str(code), module, *arguments]
 
 
 def installed(venv: Path, code: Path, value: dict, *, code_uid: int) -> None:

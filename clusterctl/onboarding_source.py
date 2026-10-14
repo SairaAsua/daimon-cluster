@@ -132,6 +132,12 @@ class Source:
         return views
 
     def register(self, config: Path, unit: Path, original_sha256: str, python: Path, fingerprint: str) -> None:
+        from .onboarding_service import selection_lock
+        with selection_lock(unit):
+            self._register_locked(config, unit, original_sha256, python, fingerprint)
+
+    def _register_locked(self, config: Path, unit: Path, original_sha256: str,
+                         python: Path, fingerprint: str) -> None:
         """Retain all unit settings and original bytes; replace only its entry point.
 
         The host pins the original owner unit. This owner-local operation may

@@ -321,6 +321,9 @@ def test_target_reexec_preserves_selected_runtime_and_uses_qualified_runtime_sdk
         execs.append((executable, argv))
         raise RuntimeError('captured SDK reexec')
     monkeypatch.setattr(onboarding_code_successor, 'selection', owned_selection)
+    parameters = onboarding_code_successor.sdk_parameters
+    monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters',
+        lambda code, **kw: parameters(code, uid=os.geteuid()))
     monkeypatch.setattr(onboarding_target.onboarding_sdk, 'observe', sdk)
     monkeypatch.setattr(onboarding_target.os, 'execv', execute)
     args = ['observe', '--home', str(tmp_path / 'home'), '--code', str(base), '--plan', str(plan_path),
@@ -419,6 +422,9 @@ def test_target_sdk_observation_and_retry_do_not_load_body_custody(tmp_path, mon
     install, observe = onboarding_sdk.install, onboarding_sdk.observe
     monkeypatch.setattr(onboarding_code_successor, 'selection',
         lambda *a, **kw: selection(*a, uid=os.geteuid()))
+    parameters = onboarding_code_successor.sdk_parameters
+    monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters',
+        lambda code, **kw: parameters(code, uid=os.geteuid()))
     monkeypatch.setattr(onboarding_sdk, 'install',
         lambda *a, **kw: install(*a, code_uid=os.geteuid()))
     monkeypatch.setattr(onboarding_sdk, 'observe',

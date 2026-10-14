@@ -18,7 +18,29 @@ from .onboarding import OnboardingError, digest
 SCHEMA = 'cluster-onboarding-runtime-successor/v1'
 SDK_SCHEMA = 'cluster-onboarding-runtime-successor/v2'
 TELEGRAM_SCHEMA = 'cluster-onboarding-runtime-successor/v3'
+QUALIFIED_SDK_SCHEMA = 'cluster-onboarding-runtime-successor/v4'
 MARKER = 'runtime-successor.json'
+
+
+def sdk_parameters(code: Path, *, uid: int = 0) -> dict:
+    """Resolve the SDK already pinned by a verified receiving-code selection.
+
+    Call selection/verify first. This marker is inside that approved code digest,
+    not a standalone approval or a participant-supplied release manifest.
+    Legacy code keeps its original fixed-pin behavior.
+    """
+    if not (code / MARKER).exists():
+        return {}
+    marker = json.loads(onboarding_release.regular(code / MARKER, uid=uid))
+    if marker.get('schema') != QUALIFIED_SDK_SCHEMA:
+        return {}
+    if (not isinstance(marker.get('matrix_commit'), str)
+            or not re.fullmatch(r'[0-9a-f]{40}', marker['matrix_commit'])
+            or not isinstance(marker.get('matrix_wheel_sha256'), str)
+            or not re.fullmatch(r'[0-9a-f]{64}', marker['matrix_wheel_sha256'])):
+        raise OnboardingError('qualified_onboarding_sdk_selection_required')
+    return dict(matrix_commit=marker['matrix_commit'],
+                matrix_wheel_sha256=marker['matrix_wheel_sha256'])
 
 
 def plan_update(journal, *, manifest_digest: str, target: str,
@@ -72,15 +94,19 @@ def verify(code: Path, fingerprint: str, base: Path, base_fingerprint: str, *, u
     successor = onboarding_release.verify(code, fingerprint, uid=uid)
     marker = json.loads(onboarding_release.regular(code / MARKER, uid=uid))
     ordinary = dict(schema=SCHEMA, base_release_digest=base_fingerprint)
-    telegram_change = marker.get('schema') == TELEGRAM_SCHEMA
-    sdk_change = marker.get('schema') == SDK_SCHEMA or telegram_change and 'sdk_digest' in marker
+    qualified_sdk = marker.get('schema') == QUALIFIED_SDK_SCHEMA
+    telegram_change = (marker.get('schema') == TELEGRAM_SCHEMA
+                      or qualified_sdk and 'telegram_digest' in marker)
+    sdk_change = qualified_sdk or marker.get('schema') == SDK_SCHEMA or telegram_change and 'sdk_digest' in marker
     if sdk_change:
         from . import onboarding_sdk
         previous = onboarding_sdk.verify(base, uid=uid,
             matrix_commit=onboarding_sdk.PREVIOUS_MATRIX_COMMIT)
-        current = onboarding_sdk.verify(code, uid=uid)
+        current = onboarding_sdk.verify(code, uid=uid, **sdk_parameters(code, uid=uid))
         expected = dict(schema=SDK_SCHEMA, base_release_digest=base_fingerprint,
             previous_sdk_digest=digest(previous), sdk_digest=digest(current))
+        if qualified_sdk:
+            expected.update(schema=QUALIFIED_SDK_SCHEMA, **sdk_parameters(code, uid=uid))
     else:
         expected = ordinary
     if telegram_change:
@@ -90,7 +116,7 @@ def verify(code: Path, fingerprint: str, base: Path, base_fingerprint: str, *, u
         if current_telegram['commit'] not in {onboarding_telegram.COMMIT,
                 onboarding_telegram.RETAINED_CURRENT_COMMIT} or previous_telegram == current_telegram:
             raise OnboardingError('qualified_telegram_successor_required')
-        expected.update(schema=TELEGRAM_SCHEMA,
+        expected.update(schema=QUALIFIED_SDK_SCHEMA if qualified_sdk else TELEGRAM_SCHEMA,
             previous_telegram_digest=digest(previous_telegram), telegram_digest=digest(current_telegram))
     if (code.absolute() == base.absolute() or fingerprint == base_fingerprint
             or marker != expected or original['profile'] != successor['profile']):
@@ -132,11 +158,16 @@ def selection(code: Path | None, fingerprint: str | None, base: Path, base_finge
 
 
 def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, ...], output: Path,
-          *, sdk: Path | None = None, telegram: Path | None = None) -> dict:
+          *, sdk: Path | None = None, telegram: Path | None = None,
+          matrix_commit: str | None = None, matrix_wheel_sha256: str | None = None) -> dict:
     """Capture a code-only successor; never read receiving home or custody."""
     from . import being_seed
     from tools.build_onboarding_code import copy_code, capture_peer_tool
     original = onboarding_release.verify(base, base_fingerprint, uid=os.geteuid())
+    qualified_sdk = matrix_commit is not None or matrix_wheel_sha256 is not None
+    if qualified_sdk and (sdk is None or matrix_commit is None
+                          or matrix_wheel_sha256 is None):
+        raise OnboardingError('qualified_onboarding_sdk_selection_required')
     marker = dict(schema=SCHEMA, base_release_digest=base_fingerprint)
     if sdk is not None:
         from . import onboarding_sdk
@@ -144,9 +175,16 @@ def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, .
             raise OnboardingError('onboarding_sdk_directory_required')
         previous = onboarding_sdk.verify(base, uid=os.geteuid(),
             matrix_commit=onboarding_sdk.PREVIOUS_MATRIX_COMMIT)
-        current = onboarding_sdk.verify(sdk.parent, uid=os.geteuid())
+        if qualified_sdk:
+            assert matrix_commit is not None and matrix_wheel_sha256 is not None
+            parameters = dict(matrix_commit=matrix_commit, matrix_wheel_sha256=matrix_wheel_sha256)
+        else:
+            parameters = {}
+        current = onboarding_sdk.verify(sdk.parent, uid=os.geteuid(), **parameters)
         marker = dict(schema=SDK_SCHEMA, base_release_digest=base_fingerprint,
             previous_sdk_digest=digest(previous), sdk_digest=digest(current))
+        if qualified_sdk:
+            marker.update(schema=QUALIFIED_SDK_SCHEMA, **parameters)
     if telegram is not None:
         from . import onboarding_telegram
         # Validate before creating output; no receiving home or token is read.
@@ -155,7 +193,8 @@ def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, .
         if current_telegram['commit'] not in {onboarding_telegram.COMMIT,
                 onboarding_telegram.RETAINED_CURRENT_COMMIT} or current_telegram == previous_telegram:
             raise OnboardingError('qualified_telegram_successor_required')
-        marker.update(schema=TELEGRAM_SCHEMA, previous_telegram_digest=digest(previous_telegram),
+        marker.update(schema=QUALIFIED_SDK_SCHEMA if qualified_sdk else TELEGRAM_SCHEMA,
+                      previous_telegram_digest=digest(previous_telegram),
                       telegram_digest=digest(current_telegram))
     being_seed._path(output)
     if (output.exists() or output.is_symlink() or output.is_relative_to(base)
