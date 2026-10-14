@@ -320,12 +320,17 @@ def prepare_source_bootstrap(source, *, home: Path, code: Path, code_digest: str
 def source_bootstrap_group(source, bundle: dict) -> dict:
     """Freeze the existing signed group selector and external publications."""
     from types import SimpleNamespace
+    return bootstrap_group(SimpleNamespace(root=source.outputs, package=source.outputs),
+        bundle, socket_root=source.outputs)
+
+
+def bootstrap_group(target, bundle: dict, *, socket_root: Path | None = None) -> dict:
+    """Freeze one signed receiving group without changing its publication."""
     from .onboarding_peer import observed_group
     from daimon_matrix.canonical import unb64url
     from daimon_matrix.operator_rebirth import authority_from_runtime_bundle
     from daimon_matrix.messaging_config import _public_identity, verify_public_binding, _read_verified_publication
-    group = observed_group(SimpleNamespace(root=source.outputs, package=source.outputs),
-        bundle, socket_root=source.outputs)
+    group = observed_group(target, bundle, socket_root=socket_root)
     if group is None:
         raise OnboardingError('qualified_onboarding_group_required')
     authority = authority_from_runtime_bundle(bundle)
@@ -334,7 +339,7 @@ def source_bootstrap_group(source, bundle: dict) -> dict:
     key = unb64url(authority.credentials[identity['credential_id']]['body']['signing_key']['public'])
     application, metadata, publication = _read_verified_publication(Path(group['application']),
         lambda value, binding: verify_public_binding(identity, key, value, binding))
-    paths = dict(selection=source.outputs / 'tribe/selection.json',
+    paths = dict(selection=target.root / 'tribe/selection.json',
         publication=Path(group['application']) / 'publication.json',
         application=metadata / 'application.json', binding=metadata / 'binding.json', visibility=Path(group['visibility']))
     visibility = being_seed._read(Path(group['visibility']), limit=being_seed.MAX_SELECTION)
@@ -342,6 +347,253 @@ def source_bootstrap_group(source, bundle: dict) -> dict:
         installation_sha256=digest(visibility['document']),
         hashes={key: hashlib.sha256(onboarding_release.regular(
         path, uid=os.geteuid())).hexdigest() for key, path in paths.items()})
+
+
+def recover_capability_stage(upgrade, *, runtime_root: Path, transaction: Path,
+                             source_sha256: str, operation_id: str, observe, record, quiescence) -> None:
+    """Reuse retained unpublished-stage recovery under the native source locks.
+
+    The operation must own the transaction before calling this helper. Archive
+    intent precedes rename; all bytes and durability survive a lost reply.
+    Active publication is never rewound or relabelled as an incomplete stage.
+    """
+    with upgrade._locks(runtime_root):
+        quiescence()
+        if upgrade.inventory_digest(runtime_root) != source_sha256:
+            raise OnboardingError('receiving_bootstrap_source_changed')
+        observations = observe()
+        for attempt in range(8):
+            key = 'capability_archive_' + str(attempt)
+            done = key + '_retained'
+            archived = observations.get(key)
+            if done in observations:
+                continue
+            if archived is None:
+                if not transaction.exists():
+                    return
+                archive = transaction.parent / ('.bootstrap-' + operation_id + '-' + str(attempt) + '.incomplete')
+                if archive.exists() or archive.is_symlink():
+                    raise OnboardingError('receiving_bootstrap_archive_conflict')
+                archived = dict(path=str(archive), sha256=upgrade.inventory_digest(transaction))
+                record(key, archived)
+            archive = Path(archived['path'])
+            if archive.exists():
+                if transaction.exists() or upgrade.inventory_digest(archive) != archived['sha256']:
+                    raise OnboardingError('receiving_bootstrap_archive_conflict')
+            else:
+                if upgrade.inventory_digest(transaction) != archived['sha256']:
+                    raise OnboardingError('receiving_bootstrap_archive_conflict')
+                os.rename(transaction, archive)
+            # A failed file fsync may be the reason this tree is partial.
+            # Preserve its bytes, not just the rename's directory entry.
+            snapshot = upgrade._snapshot(archive)
+            if upgrade._inventory(snapshot) != archived['sha256']:
+                raise OnboardingError('receiving_bootstrap_archive_conflict')
+            for name in snapshot:
+                if name.endswith('/'):
+                    continue
+                descriptor = os.open(archive / name, os.O_RDONLY | os.O_NOFOLLOW)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            for name in sorted((key for key in snapshot if key.endswith('/')), key=len, reverse=True):
+                upgrade._sync(archive / name)
+            upgrade._sync(archive)
+            if upgrade.inventory_digest(archive) != archived['sha256']:
+                raise OnboardingError('receiving_bootstrap_archive_conflict')
+            upgrade._sync(transaction.parent)
+            record(done, archived)
+            return
+        raise OnboardingError('receiving_bootstrap_attempt_limit')
+
+
+def freeze_guest_bootstrap(target, *, deadline_ns: int) -> dict:
+    """Observe the receiving body before its separately owned unit is stopped."""
+    from .onboarding_service import GuestServiceBootstrap
+    GuestServiceBootstrap._budget(deadline_ns)
+    observed = target.running(admitted=True, deadline_ns=deadline_ns, bootstrap_base_only=True)
+    bundle = target.document_bundle()
+    if (observed['responder_association'] != 'same-connection'
+            or observed['origin'] != bundle['local_origin']
+            or observed['runtime_status'].get('being_ref') != bundle['manifest']['being_ref']
+            or observed['runtime_status'].get('local_origin') != bundle['local_origin']
+            or not isinstance(observed['admission_parent'], dict)):
+        raise OnboardingError('receiving_guest_bootstrap_identity_required')
+    group = bootstrap_group(target, bundle)
+    GuestServiceBootstrap._budget(deadline_ns)
+    return dict(plan_digest=digest(target.plan), genesis_digest=digest(target.genesis),
+        code_digest=target.code_digest, runtime_sha256=digest(bundle), group_sha256=digest(group),
+        predecessor=dict(process=observed['process'], admission_parent=observed['admission_parent']))
+
+
+class GuestOwnerBootstrap:
+    """Owner-side native capability publication for a host-owned operation.
+
+    The host keeps journal/job ownership and current stopped-unit verification
+    across root and owner calls. These protected local files retain only their
+    exact publication effects; they are not another authority or readiness.
+    This adapter never stops/starts a service or changes the signed group.
+    """
+
+    def __init__(self, target, request: dict):
+        from .owner_process import validate_process
+        fields = {'schema', 'operation_id', 'plan_digest', 'genesis_digest', 'code_digest',
+                  'runtime_sha256', 'group_sha256', 'predecessor', 'expires_at_ms'}
+        if (os.geteuid() != 1000 or set(request) != fields
+                or request['schema'] != 'cluster-guest-owner-bootstrap/v1'
+                or str(uuid.UUID(request['operation_id'])) != request['operation_id']
+                or any(not isinstance(request[key], str) or re.fullmatch('[0-9a-f]{64}', request[key]) is None
+                       for key in fields - {'schema', 'operation_id', 'predecessor', 'expires_at_ms'})
+                or type(request['expires_at_ms']) is not int or request['expires_at_ms'] <= 0
+                or request['plan_digest'] != digest(target.plan)
+                or request['genesis_digest'] != digest(target.genesis)
+                or request['code_digest'] != target.code_digest
+                or set(request['predecessor']) != {'process', 'admission_parent'}):
+            raise OnboardingError('receiving_guest_bootstrap_request_required')
+        child = validate_process(request['predecessor']['process'])
+        parent = validate_process(request['predecessor']['admission_parent'])
+        if (child['uid'] != 1000 or parent['uid'] != 1000 or child['pid'] == parent['pid']
+                or child['boot_id'] != parent['boot_id']):
+            raise OnboardingError('receiving_guest_bootstrap_request_required')
+        self.target, self.request = target, request
+        self.runtime = target.package / 'runtime'
+        self.operation_id = request['operation_id']
+        records_parent = private_directory(target.root / 'receiving-bootstrap', create=True)
+        self.records = private_directory(records_parent / self.operation_id, create=True)
+        self.transaction = self.runtime.parent / ('.receiving-bootstrap-' + self.operation_id)
+
+    def _record(self, name: str, value: dict) -> dict:
+        from .onboarding_service import GuestServiceBootstrap
+        return GuestServiceBootstrap._record(self.records / (name + '.json'), value)
+
+    def _observations(self) -> dict:
+        return {path.stem: json.loads(onboarding_release.regular(path, uid=1000))
+                for path in self.records.glob('*.json')}
+
+    def _exits(self) -> None:
+        from .owner_process import observe_process_exit
+        retained = self._observations()
+        for name, process in self.request['predecessor'].items():
+            proof = dict(process=process, exited=True)
+            if name + '_exited' in retained:
+                if retained[name + '_exited'] != proof:
+                    raise OnboardingError('receiving_guest_bootstrap_request_conflict')
+            else:
+                if not observe_process_exit(process):
+                    raise OnboardingError('receiving_guest_bootstrap_exit_required')
+                self._record(name + '_exited', proof)
+
+    def _group(self) -> dict:
+        group = bootstrap_group(self.target, self.target.document_bundle())
+        if (digest(group) != self.request['group_sha256']
+                or Path(group['selected']['socket']) != self.runtime / 'tribe.sock'):
+            raise OnboardingError('receiving_guest_bootstrap_group_changed')
+        return group
+
+    def _ready(self, upgrade, *, deadline_ns: int) -> tuple[dict, str]:
+        from .onboarding_service import GuestServiceBootstrap
+        ready_path = self.transaction / 'ready.json'
+        observations = self._observations()
+        intent = observations.get('capability_intent')
+        try:
+            receipt = json.loads(onboarding_release.regular(ready_path, uid=1000))
+            complete = isinstance(receipt, dict) and receipt.get('schema') == 'dm.operator.capability-upgrade/v1'
+        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+            complete = False
+        if not complete:
+            bundle = self.target.document_bundle()
+            if digest(bundle) != self.request['runtime_sha256']:
+                raise OnboardingError('receiving_guest_bootstrap_source_changed')
+            current = dict(source_sha256=upgrade.inventory_digest(self.runtime), counter=bundle['keystore']['counter'],
+                control_head=bundle['control_head'], being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'])
+            if intent is not None and current != intent:
+                raise OnboardingError('receiving_guest_bootstrap_source_changed')
+            intent = self._record('capability_intent', current)
+            stage = dict(transaction=str(self.transaction))
+            if 'capability_stage_intent' not in observations:
+                if self.transaction.exists() or self.transaction.is_symlink():
+                    raise OnboardingError('receiving_guest_bootstrap_unowned_stage')
+                self._record('capability_stage_intent', stage)
+            elif observations['capability_stage_intent'] != stage:
+                raise OnboardingError('receiving_guest_bootstrap_request_conflict')
+            recover_capability_stage(upgrade, runtime_root=self.runtime, transaction=self.transaction,
+                source_sha256=intent['source_sha256'], operation_id=self.operation_id,
+                observe=self._observations, record=self._record, quiescence=self._exits)
+            GuestServiceBootstrap._budget(deadline_ns)
+            password = self.target._reader()
+            try:
+                upgrade.stage_capabilities(source=self.runtime, transaction=self.transaction,
+                    expected_source_sha256=intent['source_sha256'], expected_counter=intent['counter'],
+                    expected_control_head=intent['control_head'], expected_being_ref=intent['being_ref'],
+                    expected_origin=intent['origin'], add_methods={}, provision_receiving_controller=True,
+                    expires_at_ms=self.request['expires_at_ms'], password=bytes(password), externally_quiesced=True)
+            finally:
+                password[:] = b'\0' * len(password)
+            receipt = json.loads(onboarding_release.regular(ready_path, uid=1000))
+        if (intent is None or receipt.get('source') != str(self.runtime)
+                or receipt.get('transaction') != str(self.transaction)
+                or receipt.get('source_sha256') != intent['source_sha256']
+                or receipt.get('counter_before') != intent['counter']
+                or receipt.get('counter_after') != intent['counter'] + 1
+                or receipt.get('control_head') != intent['control_head']
+                or receipt.get('being_ref') != intent['being_ref'] or receipt.get('origin') != intent['origin']
+                or receipt.get('provision_receiving_controller') is not True
+                or receipt.get('add_methods') != {} or receipt.get('expires_at_ms') != self.request['expires_at_ms']):
+            raise OnboardingError('receiving_guest_bootstrap_request_conflict')
+        raw = onboarding_release.regular(ready_path, uid=1000)
+        ready_sha256 = hashlib.sha256(raw).hexdigest()
+        descriptor = os.open(ready_path, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        upgrade._sync(self.transaction)
+        self._record('capability_ready', dict(ready_sha256=ready_sha256))
+        GuestServiceBootstrap._budget(deadline_ns)
+        return receipt, ready_sha256
+
+    def execute(self, action: str, *, deadline_ns: int, ready_sha256: str | None = None) -> dict:
+        from daimon_matrix import operator_runtime_upgrade as upgrade
+        from daimon_matrix.daemon import _prepare_socket
+        from .onboarding_service import GuestServiceBootstrap
+        if (action not in {'stage', 'publish'} or (action == 'publish') != (ready_sha256 is not None)
+                or ready_sha256 is not None and re.fullmatch('[0-9a-f]{64}', ready_sha256) is None):
+            raise OnboardingError('receiving_guest_bootstrap_request_required')
+        GuestServiceBootstrap._budget(deadline_ns)
+        with being_seed._locked(self.target.root), being_seed._locked(self.records):
+            self._record('request', self.request)
+            self._exits()
+            self._group()
+            with self.target._runtime_writer():
+                # The exact parent/child exits and native writer establish safe
+                # cleanup of ephemeral runtime sockets, never private history.
+                for name in ('matrix.sock', 'tribe.sock', 'peer.sock'):
+                    _prepare_socket(self.runtime / name)
+            self.target.observe()
+            GuestServiceBootstrap._budget(deadline_ns)
+            if action == 'stage':
+                _, pin = self._ready(upgrade, deadline_ns=deadline_ns)
+                return dict(schema='cluster-guest-owner-bootstrap-ready/v1', operation_id=self.operation_id,
+                    ready_sha256=pin, receiving_readiness='unobserved')
+            retained = self._observations().get('capability_ready')
+            if retained != dict(ready_sha256=ready_sha256):
+                raise OnboardingError('receiving_guest_bootstrap_ready_required')
+            password = self.target._reader()
+            try:
+                publication = upgrade.publish(source=self.runtime, transaction=self.transaction,
+                    expected_receipt_sha256=ready_sha256, password=bytes(password), externally_quiesced=True,
+                    capability_upgrade=True)
+            finally:
+                password[:] = b'\0' * len(password)
+            self.target.observe()
+            self._group()
+            result = dict(schema='cluster-guest-owner-bootstrap-publication/v1', operation_id=self.operation_id,
+                ready_sha256=ready_sha256, runtime_sha256=digest(self.target.document_bundle()),
+                counter_after=publication['counter_after'], receiving_readiness='unobserved')
+            self._record('capability_published', result)
+            GuestServiceBootstrap._budget(deadline_ns)
+            return result
 
 
 class SourceBootstrapController:
@@ -466,61 +718,10 @@ class SourceBootstrapController:
         return raw
 
     def _recover_stage(self, upgrade, transaction: Path, intent: dict, frozen: dict, candidate: dict) -> None:
-        """Retain an unpublished interrupted attempt; never rewind publication.
-
-        The operation owns the path before dispatch. Native source/parent locks
-        and its unchanged inventory prove that no successor became active. An
-        archive intent precedes rename, so a lost rename ACK is reconcilable.
-        """
-        with upgrade._locks(self.source.root):
-            self._stopped(frozen, candidate)
-            if upgrade.inventory_digest(self.source.root) != intent['source_sha256']:
-                raise OnboardingError('receiving_bootstrap_source_changed')
-            observations = (self._row()[0]['runtime_observation'] or {}).get('source_bootstrap', {})
-            for attempt in range(8):
-                key = 'capability_archive_' + str(attempt)
-                done = key + '_retained'
-                archived = observations.get(key)
-                if done in observations:
-                    continue
-                if archived is None:
-                    if not transaction.exists():
-                        return
-                    archive = transaction.parent / ('.bootstrap-' + self.operation_id + '-' + str(attempt) + '.incomplete')
-                    if archive.exists() or archive.is_symlink():
-                        raise OnboardingError('receiving_bootstrap_archive_conflict')
-                    archived = dict(path=str(archive), sha256=upgrade.inventory_digest(transaction))
-                    self._record(key, archived)
-                archive = Path(archived['path'])
-                if archive.exists():
-                    if transaction.exists() or upgrade.inventory_digest(archive) != archived['sha256']:
-                        raise OnboardingError('receiving_bootstrap_archive_conflict')
-                else:
-                    if upgrade.inventory_digest(transaction) != archived['sha256']:
-                        raise OnboardingError('receiving_bootstrap_archive_conflict')
-                    os.rename(transaction, archive)
-                # A failed file fsync may be the reason this tree is partial.
-                # Preserve its bytes, not just the rename's directory entry.
-                snapshot = upgrade._snapshot(archive)
-                if upgrade._inventory(snapshot) != archived['sha256']:
-                    raise OnboardingError('receiving_bootstrap_archive_conflict')
-                for name in snapshot:
-                    if name.endswith('/'):
-                        continue
-                    descriptor = os.open(archive / name, os.O_RDONLY | os.O_NOFOLLOW)
-                    try:
-                        os.fsync(descriptor)
-                    finally:
-                        os.close(descriptor)
-                for name in sorted((key for key in snapshot if key.endswith('/')), key=len, reverse=True):
-                    upgrade._sync(archive / name)
-                upgrade._sync(archive)
-                if upgrade.inventory_digest(archive) != archived['sha256']:
-                    raise OnboardingError('receiving_bootstrap_archive_conflict')
-                upgrade._sync(transaction.parent)
-                self._record(done, archived)
-                return
-            raise OnboardingError('receiving_bootstrap_attempt_limit')
+        recover_capability_stage(upgrade, runtime_root=self.source.root, transaction=transaction,
+            source_sha256=intent['source_sha256'], operation_id=self.operation_id,
+            observe=lambda: (self._row()[0]['runtime_observation'] or {}).get('source_bootstrap', {}),
+            record=self._record, quiescence=lambda: self._stopped(frozen, candidate))
 
     def _publish_visibility(self, upgrade, frozen: dict, transaction: Path) -> dict:
         """Derive through the owning signer, then journal an exact envelope CAS."""

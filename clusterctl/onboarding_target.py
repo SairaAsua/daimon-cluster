@@ -472,14 +472,19 @@ class Target:
                 pass
 
     def running(self, *, admitted: bool = False, require_loaded: bool = False,
-                deadline_ns: int | None = None) -> dict:
+                deadline_ns: int | None = None, bootstrap_base_only: bool = False) -> dict:
         """Observe a kernel-pinned daemon and authenticate its native status.
 
         Admitted observations also check the current native body scope. Loaded
         observations associate the selected group with that same process/base;
         candidate equality, resource fences and communication remain separate.
+        First adoption may observe only the compatible base/admission route:
+        the predecessor group profile does not expose authenticated status.
+        That mode never establishes group load or qualified receiving readiness.
         """
         from daimon_matrix.client import ClientConfig, LocalClient
+        if bootstrap_base_only and (not admitted or require_loaded):
+            raise OnboardingError('invalid_receiving_bootstrap_observation')
         if deadline_ns is not None:
             if 'deadline_ns' not in getattr(LocalClient, '__dataclass_fields__', {}):
                 raise OnboardingError('qualified_onboarding_deadline_client_required')
@@ -537,7 +542,7 @@ class Target:
                 raise OnboardingError('onboarding_daemon_responder_conflict')
             group = prepared.get('group')
             group_status = None
-            if connected and group is not None:
+            if connected and group is not None and not bootstrap_base_only:
                 from daimon_matrix.operator_capabilities import host_capability_profile
                 role = host_capability_profile('status')
                 directory = root / role['client_directory']
@@ -604,7 +609,7 @@ class Target:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "receiving-control-prepare", "receiving-control-apply"))
+    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "receiving-control-prepare", "receiving-control-apply", "receiving-bootstrap-freeze", "receiving-bootstrap-stage", "receiving-bootstrap-publish"))
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--genesis", type=Path, required=True)
@@ -627,9 +632,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--observation-timeout-seconds', type=float)
     parser.add_argument('--control-file', type=Path)
     parser.add_argument('--control-command', type=Path)
+    parser.add_argument('--bootstrap-request-json')
+    parser.add_argument('--bootstrap-ready-sha256')
+    parser.add_argument('--bootstrap-timeout-seconds', type=float)
     args = parser.parse_args(argv)
     try:
         controlling = args.action in {'receiving-control-prepare', 'receiving-control-apply'}
+        bootstrapping = args.action.startswith('receiving-bootstrap-')
+        if bootstrapping:
+            if (args.bootstrap_timeout_seconds is None or not math.isfinite(args.bootstrap_timeout_seconds)
+                    or not 0 < args.bootstrap_timeout_seconds <= 60 or args.ready_fd is not None
+                    or (args.action == 'receiving-bootstrap-freeze') != (args.bootstrap_request_json is None)
+                    or (args.action == 'receiving-bootstrap-publish') != (args.bootstrap_ready_sha256 is not None)
+                    or args.bootstrap_request_json is not None and len(args.bootstrap_request_json.encode()) > 131072):
+                raise OnboardingError('invalid_receiving_bootstrap_request')
+        elif any(value is not None for value in (args.bootstrap_request_json,
+                args.bootstrap_ready_sha256, args.bootstrap_timeout_seconds)):
+            raise OnboardingError('invalid_receiving_bootstrap_request')
         timeout = args.observation_timeout_seconds
         if timeout is not None and (args.action not in {'running', 'admitted-running'}
                 or not math.isfinite(timeout) or not 0 < timeout <= 60):
@@ -644,7 +663,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime = onboarding_code_successor.selection(args.runtime_code, args.runtime_digest,
             args.code, plan['release_digest'], uid=0)
         sdk_parameters = onboarding_code_successor.sdk_parameters(runtime)
-        if (controlling or args.require_loaded) and not sdk_parameters:
+        if (controlling or bootstrapping or args.require_loaded) and not sdk_parameters:
             raise OnboardingError('qualified_onboarding_target_observer_required')
         matrix_commit = sdk_parameters.get('matrix_commit', onboarding_sdk.MATRIX_COMMIT)
         if args.action == 'sdk-prepare':
@@ -680,6 +699,17 @@ def main(argv: list[str] | None = None) -> int:
             if sdk_parameters else None)
         target = Target(args.home, plan, document(args.genesis), code=runtime,
             code_digest=args.runtime_digest or plan['release_digest'], qualified_startup=startup)
+        if bootstrapping:
+            from .onboarding_receiving_update import GuestOwnerBootstrap, freeze_guest_bootstrap
+            deadline_ns = time.monotonic_ns() + int(args.bootstrap_timeout_seconds * 1_000_000_000)
+            if args.action == 'receiving-bootstrap-freeze':
+                result = freeze_guest_bootstrap(target, deadline_ns=deadline_ns)
+            else:
+                owner = GuestOwnerBootstrap(target, json.loads(args.bootstrap_request_json))
+                result = owner.execute(args.action.removeprefix('receiving-bootstrap-'),
+                    deadline_ns=deadline_ns, ready_sha256=args.bootstrap_ready_sha256)
+            print(json.dumps(result))
+            return 0
         if controlling:
             control_command = (None if args.control_command is None
                                else being_seed._read(args.control_command, limit=being_seed.MAX_SELECTION))
