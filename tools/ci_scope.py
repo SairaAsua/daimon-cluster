@@ -300,7 +300,8 @@ LOADED_STARTUP_FILES = {'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_t
     'tests/test_onboarding_source.py', 'tests/test_receiving_process_observation.py',
     'tests/test_receiving_update_preflight.py', 'tests/test_receiving_update_selection.py',
     'tests/test_onboarding_service.py', 'clusterctl/onboarding_peer.py',
-    'tests/test_onboarding_peer.py', 'tests/test_guest_service_bootstrap.py', 'tests/test_guest_owner_bootstrap.py'}
+    'tests/test_onboarding_peer.py', 'tests/test_guest_service_bootstrap.py', 'tests/test_guest_owner_bootstrap.py',
+    'tests/test_guest_bootstrap_controller.py'}
 LOADED_STARTUP_TESTS = ('tests/test_onboarding_sdk.py', 'tests/test_onboarding_code_successor.py',
     'tests/test_source_bootstrap.py',
     'tests/test_receiving_cohort_control.py', 'tests/test_receiving_host_selection.py',
@@ -310,6 +311,7 @@ LOADED_STARTUP_TESTS = ('tests/test_onboarding_sdk.py', 'tests/test_onboarding_c
     'tests/test_receiving_process_observation.py', 'tests/test_onboarding_group.py',
     'tests/test_onboarding_target.py', 'tests/test_onboarding_admission.py',
     'tests/test_onboarding_peer.py', 'tests/test_guest_service_bootstrap.py', 'tests/test_guest_owner_bootstrap.py',
+    'tests/test_guest_bootstrap_controller.py',
     'tests/test_matrix_host_process.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
 
 
@@ -387,8 +389,9 @@ def host_observation_only(root: Path, base: str) -> bool:
     return (hashlib.sha256(original).hexdigest() in {
         '742fb3e396d4619369152cde4c3811c22df18504e504d7012e99c99772040c59',
         '8b0a728465958acb8da5ae0d212fd69c3b548a07f9f9d677e66ec3146b3780d2'}
-        and hashlib.sha256(current).hexdigest() ==
-        '0ec24cc2096f5b88b498d1e49578810404c2248b0a8309d027c30d28d5f2daee')
+        and hashlib.sha256(current).hexdigest() in {
+        '0ec24cc2096f5b88b498d1e49578810404c2248b0a8309d027c30d28d5f2daee',
+        '45bb1547863ee1dfcbcdeac970a7a217a792e8755a52df9b63ffed152819c32c'})
 
 
 def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:

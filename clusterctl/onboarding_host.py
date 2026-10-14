@@ -933,7 +933,11 @@ class HostBackend:
                      peer_packet: dict | None = None, peer_being_ref: str | None = None,
                      candidate: tuple[Path, str] | None = None,
                      observation_timeout_seconds: float | None = None,
-                     require_loaded: bool = False) -> dict:
+                     require_loaded: bool = False,
+                     bootstrap_request: dict | None = None,
+                     bootstrap_ready_sha256: str | None = None,
+                     bootstrap_timeout_seconds: float | None = None,
+                     control_file: Path | None = None, control_command: Path | None = None) -> dict:
         """Probe prepared receiving code without changing active selectors.
 
         Candidate calls require the already verified public read-only mount.
@@ -941,6 +945,23 @@ class HostBackend:
         A host timeout is uncertain observation, never proof of guest exit.
         """
         deadline_ns = None
+        bootstrapping = action in {'receiving-bootstrap-freeze', 'receiving-bootstrap-stage', 'receiving-bootstrap-publish'}
+        controlling = action in {'receiving-control-prepare', 'receiving-control-apply'}
+        if bootstrapping:
+            if (candidate is None or bootstrap_timeout_seconds is None
+                    or observation_timeout_seconds is not None
+                    or not math.isfinite(bootstrap_timeout_seconds) or not 0 < bootstrap_timeout_seconds <= 60
+                    or (action == 'receiving-bootstrap-freeze') != (bootstrap_request is None)
+                    or (action == 'receiving-bootstrap-publish') != (bootstrap_ready_sha256 is not None)):
+                raise OnboardingError('invalid_receiving_bootstrap_request')
+            deadline_ns = time.monotonic_ns() + int(bootstrap_timeout_seconds * 1_000_000_000)
+        elif any(item is not None for item in (bootstrap_request, bootstrap_ready_sha256, bootstrap_timeout_seconds)):
+            raise OnboardingError('invalid_receiving_bootstrap_request')
+        if controlling:
+            if control_file is None or (action == 'receiving-control-prepare') != (control_command is not None):
+                raise OnboardingError('invalid_receiving_control_request')
+        elif control_file is not None or control_command is not None:
+            raise OnboardingError('invalid_receiving_control_request')
         if observation_timeout_seconds is not None:
             if (action not in {'running', 'admitted-running'}
                     or not math.isfinite(observation_timeout_seconds)
@@ -958,7 +979,8 @@ class HostBackend:
             else self._runtime_paths(plan, guest_code, candidate=candidate))
         if candidate is not None:
             if (action not in {'sdk-observe', 'sdk-prepare', 'observe', 'running', 'admitted-running',
-                    'receiving-control-prepare', 'receiving-control-apply'}
+                    'receiving-control-prepare', 'receiving-control-apply', 'receiving-bootstrap-freeze',
+                    'receiving-bootstrap-stage', 'receiving-bootstrap-publish'}
                     or profile is not None or peer_packet is not None or peer_being_ref is not None
                     or not onboarding_code_successor.sdk_parameters(candidate[0], uid=os.geteuid())
                     or not self._mounted(plan, mounts, deadline_ns=deadline_ns)):
@@ -987,12 +1009,25 @@ class HostBackend:
             *peer_args, *(['--public-profile-json', json.dumps(profile, separators=(',', ':'))] if profile is not None else [])]
         if require_loaded:
             arguments += ['--require-loaded']
+        if control_file is not None:
+            arguments += ['--control-file', str(control_file)]
+        if control_command is not None:
+            arguments += ['--control-command', str(control_command)]
+        if bootstrap_request is not None:
+            encoded = json.dumps(bootstrap_request, sort_keys=True, separators=(',', ':'))
+            if len(encoded.encode()) > 131072:
+                raise OnboardingError('invalid_receiving_bootstrap_request')
+            arguments += ['--bootstrap-request-json', encoded]
+        if bootstrap_ready_sha256 is not None:
+            if not sha(bootstrap_ready_sha256):
+                raise OnboardingError('invalid_receiving_bootstrap_request')
+            arguments += ['--bootstrap-ready-sha256', bootstrap_ready_sha256]
         remaining = None
         if deadline_ns is not None:
             remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
             if remaining <= 0:
                 raise OnboardingError('receiving_host_deadline_expired')
-            arguments += ['--observation-timeout-seconds', str(remaining)]
+            arguments += ['--bootstrap-timeout-seconds' if bootstrapping else '--observation-timeout-seconds', str(remaining)]
         command = ["exec", self.instance(plan), "--user", "1000", "--group", "1000",
             "--env", "HOME=/home/agent", "--", *code_command(Path('/usr/bin/python3'), runtime_code,
                 'clusterctl.onboarding_target', arguments)]
@@ -1002,6 +1037,51 @@ class HostBackend:
         if not isinstance(value, dict):
             raise OnboardingError('invalid_onboarding_observation')
         if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('receiving_host_deadline_expired')
+        return value
+
+    def _guest_service_call(self, plan: dict, action: str, *, candidate: tuple[Path, str],
+                            timeout_seconds: float, request: dict | None = None,
+                            owner_observation: dict | None = None) -> dict:
+        """Named-unit root effects execute public Cluster code, never owner SDK.
+
+        The caller holds the host operation/job locks and records uncertainty.
+        This method does not create mounts or authorize a live interruption.
+        """
+        if (action not in {'bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce', 'bootstrap-select', 'bootstrap-start'}
+                or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 60
+                or (action == 'bootstrap-inspect') != (request is None)
+                or action != 'bootstrap-inspect' and owner_observation is not None):
+            raise OnboardingError('receiving_guest_service_request_required')
+        deadline_ns = time.monotonic_ns() + int(timeout_seconds * 1_000_000_000)
+        if not self._ceremony(plan).authorize(plan):
+            raise OnboardingError('identity_authorization_required')
+        _, base, _ = self._guest_paths(plan)
+        code, runtime_args, mounts = self._runtime_paths(plan, base, candidate=candidate)
+        if (not onboarding_code_successor.sdk_parameters(candidate[0], uid=os.geteuid())
+                or not self._mounted(plan, mounts, deadline_ns=deadline_ns)):
+            raise OnboardingError('qualified_onboarding_candidate_mount_required')
+        arguments = ['--action', action, '--code', str(base), *runtime_args,
+            '--plan', '/home/agent/.onboarding-input/plan.json']
+        for flag, value, limit in (('--bootstrap-request-json', request, 65536),
+                                   ('--owner-observation-json', owner_observation, 2 * 1024**2)):
+            if value is not None:
+                encoded = json.dumps(value, sort_keys=True, separators=(',', ':'))
+                if len(encoded.encode()) > limit:
+                    raise OnboardingError('receiving_guest_service_request_required')
+                arguments += [flag, encoded]
+        remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+        if remaining <= 0:
+            raise OnboardingError('receiving_host_deadline_expired')
+        arguments += ['--timeout-seconds', str(remaining)]
+        from .onboarding_service import code_command
+        command = ['exec', self.instance(plan), '--user', '0', '--group', '0', '--',
+            *code_command(Path('/usr/bin/python3'), code, 'clusterctl.onboarding_service', arguments)]
+        raw = self._dispatch(plan, command, timeout_seconds=remaining, deadline_ns=deadline_ns)
+        value = json.loads(raw)
+        if not isinstance(value, dict) or value.get('installed') is False:
+            raise OnboardingError('receiving_guest_service_observation_failed')
+        if time.monotonic_ns() >= deadline_ns:
             raise OnboardingError('receiving_host_deadline_expired')
         return value
 

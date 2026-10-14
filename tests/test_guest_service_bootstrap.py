@@ -480,3 +480,16 @@ def test_late_durability_preserves_evidence_without_late_success(
     clock[0] = 0
     controller.execute(stage, request, deadline_ns=limit)
     assert manager.stops == 1 and manager.starts == (1 if stage == "start" else 0)
+
+
+def test_root_validates_actual_candidate_before_any_lifecycle_effect(fixture):
+    controller, manager, request = fixture
+    original = manager.unit.read_bytes()
+    result = controller.execute('validate', request, deadline_ns=deadline())
+    assert result['receiving_readiness'] == 'unobserved'
+    assert manager.unit.read_bytes() == original and manager.stops == manager.starts == 0
+    assert not (root_for(manager, request) / 'quiesced.json').exists()
+    manager.invocation = 'different-invocation'
+    with pytest.raises(OnboardingError, match='predecessor_changed'):
+        controller.execute('validate', request, deadline_ns=deadline())
+    assert manager.stops == manager.starts == 0

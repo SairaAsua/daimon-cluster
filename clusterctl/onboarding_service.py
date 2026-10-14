@@ -316,12 +316,20 @@ class GuestServiceBootstrap:
     def execute(self, action: str, request: dict, *, deadline_ns: int) -> dict:
         from .owner_process import ProcessPresence, observe_process_exit
         from contextlib import ExitStack
-        if action not in {'quiesce', 'select', 'start'}:
+        if action not in {'validate', 'quiesce', 'select', 'start'}:
             raise OnboardingError('receiving_guest_service_request_required')
         self._budget(deadline_ns)
         with selection_lock(self.manager.unit):
             root, previous, candidate = self._request(request)
             self._budget(deadline_ns)
+            if action == 'validate':
+                current = self.manager.inspect(deadline_ns=deadline_ns)
+                if (current != previous['service'] or self.manager.bind_admitted_process(previous, current)
+                        != previous['scope']):
+                    raise OnboardingError('receiving_guest_service_predecessor_changed')
+                self._budget(deadline_ns)
+                return dict(schema='cluster-guest-service-candidate/v1',
+                    candidate_sha256=hashlib.sha256(candidate).hexdigest(), receiving_readiness='unobserved')
             if action == 'quiesce':
                 retained = self._retained(root, 'quiesced')
                 if retained is not None:
@@ -637,7 +645,7 @@ def main(argv=None) -> int:
     parser.add_argument('--runtime-code', type=Path)
     parser.add_argument('--runtime-digest')
     parser.add_argument('--messaging-application', type=Path)
-    parser.add_argument('--action', choices=('install', 'bootstrap-inspect', 'bootstrap-quiesce',
+    parser.add_argument('--action', choices=('install', 'bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce',
         'bootstrap-select', 'bootstrap-start'), default='install')
     parser.add_argument('--bootstrap-request-json')
     parser.add_argument('--owner-observation-json')

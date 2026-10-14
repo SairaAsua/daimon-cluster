@@ -424,6 +424,8 @@ def freeze_guest_bootstrap(target, *, deadline_ns: int) -> dict:
     GuestServiceBootstrap._budget(deadline_ns)
     return dict(plan_digest=digest(target.plan), genesis_digest=digest(target.genesis),
         code_digest=target.code_digest, runtime_sha256=digest(bundle), group_sha256=digest(group),
+        being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'], group=group,
+        observer_startup=target.qualified_startup,
         predecessor=dict(process=observed['process'], admission_parent=observed['admission_parent']))
 
 
@@ -1040,6 +1042,249 @@ class SourceBootstrapController:
                 if time.monotonic_ns() >= deadline_ns:
                     raise OnboardingError('receiving_bootstrap_start_unobserved')
                 time.sleep(min(0.1, max(0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)))
+
+
+def prepare_guest_bootstrap(backend, plan: dict, *, candidate: tuple[Path, str],
+                            manifest_path: Path, manifest_digest: str, expires_at_ms: int,
+                            timeout_seconds: float = 30, manifest_uid: int = 0) -> tuple[dict, dict]:
+    """Prepare one guest without selecting code or interrupting its service.
+
+    A receiving operation freezes these vectors before any lifecycle effect.
+    Read-only candidate mounts must already be installed by supported preparation.
+    """
+    from .onboarding_service import command
+    if type(expires_at_ms) is not int or expires_at_ms <= time.time_ns() // 1_000_000:
+        raise OnboardingError('receiving_guest_bootstrap_authorization_expired')
+    manifest = _manifest(manifest_path, manifest_digest, uid=manifest_uid)
+    onboarding_release.verify(candidate[0], candidate[1], uid=os.geteuid())
+    onboarding_sdk.verify(candidate[0], uid=os.geteuid(),
+        matrix_commit=manifest['provenance']['matrix_revision'],
+        matrix_wheel_sha256=manifest['artifacts']['matrix_sdk'])
+    if not any({**manifest['artifacts'], **receiver.get('artifacts', {})}.get('receiving_code') == candidate[1]
+            for receiver in manifest['required_receivers']):
+        raise OnboardingError('receiving_artifact_selection_mismatch')
+    installed = backend._target_call(plan, 'sdk-prepare', candidate=candidate)
+    if installed.get('ready') is not True:
+        raise OnboardingError('qualified_guest_bootstrap_candidate_required')
+    owner = backend._target_call(plan, 'receiving-bootstrap-freeze', candidate=candidate,
+        bootstrap_timeout_seconds=timeout_seconds)
+    checked = preflight(candidate[0], candidate[1], manifest_path, manifest_digest,
+        being_ref=owner['being_ref'], embodiment_id=owner['origin']['embodiment_id'],
+        code_uid=os.geteuid(), manifest_uid=manifest_uid)
+    if installed.get('matrix_commit') != checked['matrix_revision']:
+        raise OnboardingError('qualified_guest_bootstrap_candidate_required')
+    startup = owner.get('observer_startup')
+    if (not isinstance(startup, dict) or any(startup.get(key) != value for key, value in dict(
+            code_digest=checked['code_digest'], matrix_commit=checked['matrix_revision'],
+            matrix_wheel_sha256=checked['matrix_wheel_sha256'], sdk_digest=checked['sdk_digest'],
+            reader=checked['reader']).items()) or not isinstance(startup.get('interpreter'), dict)
+            or any(startup['interpreter'].get(key) != value
+                   for key, value in checked['reader']['contract']['interpreter'].items())
+            or not isinstance(startup['interpreter'].get('executable_sha256'), str)
+            or re.fullmatch('[0-9a-f]{64}', startup['interpreter']['executable_sha256']) is None):
+        raise OnboardingError('qualified_guest_bootstrap_candidate_required')
+    root = backend._guest_service_call(plan, 'bootstrap-inspect', candidate=candidate,
+        timeout_seconds=timeout_seconds, owner_observation=owner['predecessor'])
+    if (root.get('scope') is None or root['scope']['process'] != owner['predecessor']['process']
+            or root['scope']['admission_parent'] != owner['predecessor']['admission_parent']):
+        raise OnboardingError('receiving_guest_bootstrap_identity_required')
+    _, base, _ = backend._guest_paths(plan)
+    selected, _, _ = backend._runtime_paths(plan, base, candidate=candidate)
+    argv = command(base, receive_only=False, visibility=Path(owner['group']['selected']['visibility']),
+        runtime_code=selected, runtime_digest=candidate[1])
+    # Validate the maintained unit encoding locally before interruption. Root
+    # subsequently validates against its actual preserved disk unit too.
+    from .onboarding_service import entrypoint
+    entrypoint(b'[Service]\nExecStart=/prepared\n', argv)
+    return dict(plan=plan, owner=owner, root=root), dict(
+        runtime_code=str(candidate[0]), runtime_digest=candidate[1], manifest_path=str(manifest_path),
+        manifest_uid=manifest_uid, code_uid=os.geteuid(), prepared=checked,
+        argv=argv, expires_at_ms=expires_at_ms)
+
+
+class GuestBootstrapController:
+    """One journal/job-owned operation spans public root and private owner calls.
+
+    Call only after exact candidate/readiness/recovery preparation and scoped
+    human interruption consent for live receivers. No global Stop is performed.
+    This controller retains bootstrap/load evidence, not cohort readiness.
+    """
+
+    def __init__(self, journal, operation_id: str, backend, name: str):
+        self.journal, self.operation_id, self.backend, self.name = journal, operation_id, backend, name
+
+    def _row(self) -> tuple[dict, dict, dict]:
+        row = self.journal.get(self.operation_id)
+        if (row is None or row['operation'] != 'receiving-update'
+                or row['state'] in {'degraded', 'compensated', 'completed'}):
+            raise OnboardingError('receiving_guest_bootstrap_operation_required')
+        before, after = row['expected_precondition'], row['intended_transition']
+        call = row['intent'].get('runtime_call', {})
+        if (call.get('precondition_digest') != digest(before) or call.get('transition_digest') != digest(after)
+                or not re.fullmatch('[0-9a-f]{64}', call.get('manifest_digest', ''))
+                or before.get('host_config_sha256') != digest(before.get('host_configuration'))
+                or being_seed._read(Path(before['host_config'])) != before['host_configuration']
+                or Path(before['host_configuration']['jobs']) != self.backend.config.jobs):
+            raise OnboardingError('receiving_guest_bootstrap_binding_conflict')
+        frozen = before['guest_bootstraps'][self.name]
+        candidate = after['guest_bootstraps'][self.name]
+        if (set(frozen) != {'plan', 'owner', 'root'} or frozen['plan']['name'] != self.name
+                or type(candidate['expires_at_ms']) is not int or candidate['expires_at_ms'] <= 0
+                or frozen['owner']['plan_digest'] != digest(frozen['plan'])
+                or candidate['runtime_digest'] != frozen['owner']['code_digest']
+                or (candidate['prepared']['being_ref'], candidate['prepared']['embodiment_id']) != (
+                    frozen['owner']['being_ref'], frozen['owner']['origin']['embodiment_id'])
+                or candidate['prepared']['release_digest'] != call['manifest_digest']):
+            raise OnboardingError('receiving_guest_bootstrap_binding_conflict')
+        from .onboarding_service import command
+        base = Path('/opt/daimon-onboarding') / frozen['plan']['release_digest']
+        selected = Path('/opt/daimon-onboarding-runtime') / candidate['runtime_digest']
+        if candidate['argv'] != command(base, receive_only=False,
+                visibility=Path(frozen['owner']['group']['selected']['visibility']),
+                runtime_code=selected, runtime_digest=candidate['runtime_digest']):
+            raise OnboardingError('receiving_guest_bootstrap_binding_conflict')
+        return row, frozen, candidate
+
+    def _record(self, name: str, value: dict) -> None:
+        from .operation_journal import JournalConflict
+        row, _, _ = self._row()
+        observations = dict(row['runtime_observation'] or {})
+        guests = dict(observations.get('guest_bootstraps', {}))
+        effects = dict(guests.get(self.name, {}))
+        if name in effects and effects[name] != value:
+            raise JournalConflict('receiving guest effect changed')
+        effects[name] = value
+        guests[self.name] = effects
+        observations['guest_bootstraps'] = guests
+        self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
+            expected_runtime_observation=row['runtime_observation'])
+
+    def execute(self, *, timeout_seconds: float = 30) -> dict:
+        """Resume exact local effects; never blindly stop a replacement process."""
+        from .onboarding_host import HostConfig
+        with ExitStack() as locks:
+            locks.enter_context(self.journal.mutation_lock(self.operation_id))
+            row, frozen, candidate = self._row()
+            jobs = private_directory(self.backend.config.jobs)
+            locks.enter_context(being_seed._locked(jobs))
+            store = JobStore(jobs)
+            for name in store.names():
+                locks.enter_context(being_seed._locked(private_directory(store.directory(name))))
+            row, frozen, candidate = self._row()
+            if self.backend.config != HostConfig.load(Path(row['expected_precondition']['host_config'])):
+                raise OnboardingError('receiving_guest_bootstrap_binding_conflict')
+            vector = (Path(candidate['runtime_code']), candidate['runtime_digest'])
+            checked = preflight(vector[0], vector[1], Path(candidate['manifest_path']),
+                row['intent']['runtime_call']['manifest_digest'], being_ref=frozen['owner']['being_ref'],
+                embodiment_id=frozen['owner']['origin']['embodiment_id'],
+                code_uid=candidate['code_uid'], manifest_uid=candidate['manifest_uid'])
+            if checked != candidate['prepared']:
+                raise OnboardingError('receiving_guest_bootstrap_candidate_changed')
+            root_previous = {**frozen['owner']['predecessor'],
+                'service': frozen['root']['service'], 'scope': frozen['root']['scope']}
+            root_request = dict(schema='cluster-guest-service-bootstrap/v1', operation_id=self.operation_id,
+                plan_digest=digest(frozen['plan']), predecessor=root_previous, argv=candidate['argv'])
+            owner_request = {key: frozen['owner'][key] for key in (
+                'plan_digest', 'genesis_digest', 'code_digest', 'runtime_sha256', 'group_sha256', 'predecessor')}
+            owner_request.update(schema='cluster-guest-owner-bootstrap/v1', operation_id=self.operation_id,
+                expires_at_ms=candidate['expires_at_ms'])
+            effects = (row['runtime_observation'] or {}).get('guest_bootstraps', {}).get(self.name, {})
+            if row['state'] == 'planned':
+                self.journal.advance(self.operation_id, 'runtime-dispatching')
+            def root_call(action):
+                return self.backend._guest_service_call(frozen['plan'], action, candidate=vector,
+                    timeout_seconds=timeout_seconds, request=root_request)
+            def owner_call(action, **kwargs):
+                return self.backend._target_call(frozen['plan'], action, candidate=vector,
+                    bootstrap_timeout_seconds=timeout_seconds, bootstrap_request=owner_request, **kwargs)
+            if 'candidate_validated' not in effects:
+                self._record('candidate_validated', root_call('bootstrap-validate'))
+            if 'controlled_loaded' in effects:
+                return self._loaded(frozen, candidate, vector, timeout_seconds)
+            if 'quiesced' not in effects:
+                current = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
+                    timeout_seconds=timeout_seconds)
+                if current['service']['manager']['ActiveState'] == 'active':
+                    if (current['service'] != frozen['root']['service']
+                            or candidate['expires_at_ms'] <= time.time_ns() // 1_000_000):
+                        raise OnboardingError('receiving_guest_bootstrap_predecessor_or_expiry_changed')
+                    fresh = self.backend._target_call(frozen['plan'], 'receiving-bootstrap-freeze', candidate=vector,
+                        bootstrap_timeout_seconds=timeout_seconds)
+                    if any(fresh.get(key) != value for key, value in frozen['owner'].items()
+                           if key != 'observer_startup'):
+                        raise OnboardingError('receiving_guest_bootstrap_predecessor_changed')
+                    expected_startup = dict(code_digest=candidate['prepared']['code_digest'],
+                        matrix_commit=candidate['prepared']['matrix_revision'],
+                        matrix_wheel_sha256=candidate['prepared']['matrix_wheel_sha256'],
+                        sdk_digest=candidate['prepared']['sdk_digest'], reader=candidate['prepared']['reader'],
+                        interpreter=frozen['owner']['observer_startup']['interpreter'])
+                    if any(fresh.get('observer_startup', {}).get(key) != value
+                           for key, value in expected_startup.items()):
+                        raise OnboardingError('qualified_guest_bootstrap_candidate_required')
+                    if candidate['expires_at_ms'] <= time.time_ns() // 1_000_000:
+                        raise OnboardingError('receiving_guest_bootstrap_authorization_expired')
+                self._record('quiesced', root_call('bootstrap-quiesce'))
+            # Root rechecks current quiescence before every owner mutation; its
+            # retained independent exits do not imply the unit stayed stopped.
+            if 'owner_ready' not in effects:
+                root_call('bootstrap-quiesce')
+                ready = owner_call('receiving-bootstrap-stage')
+                self._record('owner_ready', ready)
+            else:
+                ready = effects['owner_ready']
+            if 'owner_published' not in effects:
+                root_call('bootstrap-quiesce')
+                published = owner_call('receiving-bootstrap-publish', bootstrap_ready_sha256=ready['ready_sha256'])
+                self._record('owner_published', published)
+            if 'unit_selected' not in effects:
+                self._record('unit_selected', root_call('bootstrap-select'))
+            # Reconcile the retained start, rather than reissuing it after a
+            # lost ACK. Actual owner load/admission is checked independently.
+            self._record('started', root_call('bootstrap-start'))
+            loaded = self._loaded(frozen, candidate, vector, timeout_seconds)
+            self._record('controlled_loaded', loaded)
+            return loaded
+
+    def _loaded(self, frozen: dict, candidate: dict, vector: tuple[Path, str], timeout_seconds: float) -> dict:
+        observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=vector,
+            observation_timeout_seconds=timeout_seconds, require_loaded=True)
+        root = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
+            timeout_seconds=timeout_seconds, owner_observation={key: observed[key]
+                for key in ('process', 'admission_parent')})
+        effects = self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]
+        loaded = observed['runtime_status']['loaded_runtime']
+        startup = loaded['qualified_startup']
+        application = observed['group_runtime_status']['loaded_application']
+        gate = observed['group_runtime_status']['receiving']['channels']['tribe']
+        if (root['scope']['process'] != observed['process']
+                or root['scope']['admission_parent'] != observed['admission_parent']
+                or root['service']['unit_sha256'] != effects['unit_selected']['selected_sha256']
+                or root['service']['manager'] != effects['started']['manager']
+                or any(startup.get(key) != value for key, value in dict(
+                    code_digest=candidate['runtime_digest'], matrix_commit=candidate['prepared']['matrix_revision'],
+                    sdk_digest=candidate['prepared']['sdk_digest'], reader=candidate['prepared']['reader'],
+                    matrix_wheel_sha256=candidate['prepared']['matrix_wheel_sha256']).items())
+                or startup['process_id'] != observed['process']['pid']
+                or loaded['runtime_bundle_sha256'] != effects['owner_published']['runtime_sha256']
+                or observed['runtime_sha256'] != effects['owner_published']['runtime_sha256']
+                or observed.get('responder_association') != 'same-connection'
+                or observed['origin'] != frozen['owner']['origin']
+                or observed['group'] != frozen['owner']['group']['selected']
+                or application['application_sha256'] != frozen['owner']['group']['application_sha256']
+                or application['publication_sha256'] != frozen['owner']['group']['publication_sha256']
+                or application['visibility']['installation_sha256'] != frozen['owner']['group']['installation_sha256']
+                or gate['controlled'] is not True or gate['process_id'] != observed['process']['pid']
+                or 'controlled_loaded' not in effects and (gate['phase'] != 'unselected' or gate['readers'])):
+            raise OnboardingError('receiving_guest_bootstrap_loaded_conflict')
+        result = dict(schema='cluster-guest-bootstrap-loaded/v1', process=observed['process'],
+            admission_parent=observed['admission_parent'], runtime_sha256=observed['runtime_sha256'],
+            code_digest=startup['code_digest'], matrix_revision=startup['matrix_commit'],
+            startup_instance_id=startup['startup_instance_id'],
+            loaded_runtime=loaded, loaded_application={key: value for key, value in application.items() if key != 'reader_gates'},
+            group_sha256=frozen['owner']['group_sha256'], receiving_readiness='unobserved')
+        if effects.get('controlled_loaded', result) != result:
+            raise OnboardingError('receiving_guest_bootstrap_loaded_conflict')
+        return result
 
 
 class CohortController:

@@ -418,3 +418,62 @@ def test_slow_candidate_mount_inspection_never_starts_owner_command(tmp_path, mo
     with pytest.raises(OnboardingError, match='deadline_expired'):
         backend._target_call(value, 'admitted-running', candidate=candidate, observation_timeout_seconds=5)
     assert inspections == [5] and not calls
+
+
+@pytest.mark.parametrize('phase', ['freeze', 'stage', 'publish'])
+def test_host_forwards_owner_bootstrap_only_as_guest_owner(tmp_path, monkeypatch, phase):
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    options = dict(candidate=candidate, bootstrap_timeout_seconds=5)
+    if phase != 'freeze':
+        options['bootstrap_request'] = {'operation_id': 'synthetic', 'plan_digest': digest(value)}
+    if phase == 'publish':
+        options['bootstrap_ready_sha256'] = 'a' * 64
+    backend._target_call(value, 'receiving-bootstrap-' + phase, **options)
+    argv, bounds = calls[0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    assert 0 < bounds['timeout_seconds'] <= 5
+    assert '--bootstrap-timeout-seconds' in argv and '--observation-timeout-seconds' not in argv
+    if phase != 'freeze':
+        assert json.loads(argv[argv.index('--bootstrap-request-json') + 1]) == options['bootstrap_request']
+    if phase == 'publish':
+        assert argv[argv.index('--bootstrap-ready-sha256') + 1] == 'a' * 64
+
+
+@pytest.mark.parametrize('action', ['bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce',
+                                  'bootstrap-select', 'bootstrap-start'])
+def test_host_root_service_route_never_executes_private_sdk_or_installer(tmp_path, monkeypatch, action):
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    options = dict(candidate=candidate, timeout_seconds=5)
+    if action == 'bootstrap-inspect':
+        options['owner_observation'] = {'process': {'pid': 123}, 'admission_parent': {'pid': 122}}
+    else:
+        options['request'] = {'plan_digest': digest(value)}
+    backend._guest_service_call(value, action, **options)
+    argv, bounds = calls[0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '0', '--group', '0']
+    assert '--' in argv and argv[argv.index('--') + 1] == '/usr/bin/python3'
+    assert argv[argv.index('--action') + 1] == action
+    assert 'clusterctl.onboarding_service' in ''.join(argv)
+    assert not any('site-packages' in item or '/venv/' in item for item in argv)
+    assert '--receive-only' not in argv and '--visibility-installation' not in argv
+    assert 0 < bounds['timeout_seconds'] <= 5
+
+
+@pytest.mark.parametrize('phase', ['freeze', 'stage', 'publish'])
+def test_host_bootstrap_rejects_unqualified_or_incomplete_parameters_before_dispatch(tmp_path, phase):
+    _, value, run, backend = configured(tmp_path)
+    with pytest.raises(OnboardingError, match='invalid_receiving_bootstrap_request'):
+        backend._target_call(value, 'receiving-bootstrap-' + phase, bootstrap_timeout_seconds=5)
+    assert not run.calls
+
+
+def test_host_forwards_control_paths_without_fabricating_a_native_request(tmp_path, monkeypatch):
+    from pathlib import Path
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    private = Path('/home/agent/body/runtime/receiving-control/test.json')
+    command = Path('/home/agent/approved-control.json')
+    backend._target_call(value, 'receiving-control-prepare', candidate=candidate,
+        control_file=private, control_command=command)
+    argv = calls[0][0]
+    assert argv[argv.index('--control-file') + 1] == str(private)
+    assert argv[argv.index('--control-command') + 1] == str(command)
