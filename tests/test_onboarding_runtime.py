@@ -138,3 +138,89 @@ def test_actual_receiving_scope_reports_running_only_under_current_shared_lease(
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+
+@pytest.mark.parametrize('receive_only', [False, True])
+def test_signed_group_is_selected_before_base_visibility_composition(tmp_path, monkeypatch, receive_only):
+    """Composition-order seam only; actual group startup has its own qualification."""
+    import socket
+    from types import SimpleNamespace
+    from clusterctl import onboarding_runtime, onboarding_target, onboarding_code_successor
+    from daimon_matrix import runtime, daemon
+    selected=dict(application=str(tmp_path/'tribe/application'),
+        visibility=str(tmp_path/'tribe/visibility/installation.json'))
+    monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda *_args, **_kwargs:{})
+    monkeypatch.setattr(onboarding_target, 'Target', lambda *_args, **_kwargs:
+        SimpleNamespace(observe=lambda:dict(phase='v8',group=selected), package=tmp_path,
+            _reader=lambda: pytest.fail('composition test opened custody')))
+    observed=[]
+    def load(*_args, **kwargs):
+        observed.append(kwargs)
+        assert 'egress_factory' not in kwargs
+        assert kwargs['egress'].release_enabled is False
+        raise RuntimeError('composition-observed')
+    monkeypatch.setattr(runtime, 'load_runtime', load)
+    root=tmp_path/'runtime'
+    root.mkdir(mode=0o700)
+    acquire=daemon.acquire_lock
+    monkeypatch.setattr(daemon, 'acquire_lock', lambda *_args:acquire(root))
+    left,right=socket.socketpair()
+    descriptor=left.detach()
+    try:
+        expected=OnboardingError if receive_only else RuntimeError
+        match='onboarding_visibility_selection_required' if receive_only else 'composition-observed'
+        with pytest.raises(expected,match=match):
+            onboarding_runtime.child_main(tmp_path,{'release_digest':'a'*64},{},descriptor,
+                None,os.getppid(),receive_only,None,code_uid=os.geteuid())
+        assert len(observed)==(0 if receive_only else 1)
+    finally:
+        right.close()
+        # Explicit receive-only refusal happens before the child takes the FD.
+        if receive_only:
+            os.close(descriptor)
+
+
+@pytest.mark.parametrize('change', [
+    'disappeared', 'appeared', 'appeared_receive_only',
+    'tribe_ref', 'directory', 'visibility', 'socket',
+])
+def test_changed_group_selection_never_composes_an_application(tmp_path, monkeypatch, change):
+    """Race seam: neither legacy fallback nor a new late group may start."""
+    import socket
+    from types import SimpleNamespace
+    from clusterctl import onboarding_runtime, onboarding_target, onboarding_code_successor, onboarding_peer
+    from daimon_matrix import runtime, chat_host
+    state_root=tmp_path/'runtime'
+    state_root.mkdir(mode=0o700)
+    early=dict(tribe_ref='synthetic-tribe', application=str(tmp_path/'tribe/application'),
+        visibility=str(tmp_path/'tribe/visibility/installation.json'),
+        socket=str(state_root/'tribe.sock'))
+    late=dict(tribe_ref=early['tribe_ref'], directory=early['application'],
+        visibility=early['visibility'], socket='tribe.sock')
+    if change == 'disappeared':
+        late=None
+    elif change.startswith('appeared'):
+        early=None
+    else:
+        late[change]='changed-selection'
+    monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda *_args, **_kwargs:{})
+    monkeypatch.setattr(onboarding_target, 'Target', lambda *_args, **_kwargs:
+        SimpleNamespace(observe=lambda:dict(phase='v8',group=early), package=tmp_path,
+            _reader=lambda:pytest.fail('race test opened custody')))
+    monkeypatch.setattr(runtime, 'load_runtime', lambda *_args, **_kwargs:
+        SimpleNamespace(state_root=state_root))
+    monkeypatch.setattr(onboarding_peer, 'group_application', lambda *_args:late)
+    monkeypatch.setattr(chat_host, 'application_view', lambda *_args:
+        pytest.fail('changed selection composed an application'))
+    left,right=socket.socketpair()
+    descriptor=left.detach()
+    try:
+        with pytest.raises(OnboardingError, match='onboarding_group_selection_changed'):
+            onboarding_runtime.child_main(tmp_path,{'release_digest':'a'*64},{},descriptor,
+                None,os.getppid(),change=='appeared_receive_only',
+                None if change=='appeared_receive_only' else tmp_path/'visibility.json',
+                code_uid=os.geteuid())
+        assert not (state_root/'peer.sock').exists()
+        assert not (state_root/'tribe.sock').exists()
+    finally:
+        right.close()

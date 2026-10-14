@@ -263,8 +263,19 @@ def child_main(home, plan, genesis, descriptor, ready_descriptor, guardian_pid,
     from .onboarding_target import Target
     target = Target(home, plan, genesis, code_uid=code_uid, code_digest=code_digest,
                     qualified_startup=startup)
-    if target.observe()['phase'] != 'v8' or os.getppid() != guardian_pid:
+    prepared = target.observe()
+    if prepared['phase'] != 'v8' or os.getppid() != guardian_pid:
         raise OnboardingError('onboarding_runtime_parent_rejected')
+    selected_group = prepared.get('group')
+    if selected_group is not None:
+        # The owner-signed group already selects its application and visibility.
+        # Resolve it before composing the base: its disclosure belongs to the
+        # group application, not the native runtime bundle. No redundant CLI
+        # application hint or archived pair selection is needed.
+        if receive_only:
+            raise OnboardingError('onboarding_visibility_selection_required')
+        messaging_application = Path(selected_group['application'])
+        visibility_installation = Path(selected_group['visibility'])
     stopping = threading.Event()
     connection = socket.socket(fileno=descriptor)
     connection.settimeout(5)
@@ -303,7 +314,16 @@ def child_main(home, plan, genesis, descriptor, ready_descriptor, guardian_pid,
             **({} if startup is None else {'qualified_startup': startup}), **options)
         from .onboarding_peer import group_application
         group = group_application(target, hosted)
+        if (selected_group is None) != (group is None):
+            raise OnboardingError('onboarding_group_selection_changed')
         if group is not None:
+            if receive_only:
+                raise OnboardingError('onboarding_visibility_selection_required')
+            if (group['tribe_ref'] != selected_group['tribe_ref']
+                    or Path(group['directory']) != Path(selected_group['application'])
+                    or Path(group['visibility']) != Path(selected_group['visibility'])
+                    or hosted.state_root / group['socket'] != Path(selected_group['socket'])):
+                raise OnboardingError('onboarding_group_selection_changed')
             # Reuse the same admitted daemon, native lock and visibility adapter.
             # A group selection replaces bootstrap/default pair apps, not history.
             messaging_application = Path(group['directory'])
