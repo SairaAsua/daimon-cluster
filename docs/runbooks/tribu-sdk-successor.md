@@ -339,6 +339,14 @@ receiver/runtime and group socket; an archived bilateral leg cannot substitute. 
 relays bytes; shared control sockets require WebSocket framing. Reuse the library,
 not a new hand-written protocol or an historical task dependency directory.
 
+Inspect a catalog with the same closed SDK/import tree that launched its tools.
+A development interpreter may expose different contracts and manufacture a
+catalog mismatch. Inspect the actual tool names, schemas and implementation
+version before classifying a refusal as a product defect; do not alter the
+candidate to accommodate a mismatched diagnostic environment. Codex's advertised
+endpoint may be an owner-controlled symlink: pin its resolved socket and peer,
+and refuse a changed selector or target during the observation.
+
 Freeze controller `mode` before any interruption. `issue` retains the original
 first-controller stage/publication and its exact recovery; absent mode in old
 operations still means `issue`. A retry never switches branches because its own

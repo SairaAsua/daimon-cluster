@@ -20,6 +20,30 @@ TOOLING_INSTALLER_MODULE = 'onboarding_chat_native.py'
 TOOLING_INSTALLER_SHA256 = '93bb1446b16832a2f50dd0f55b6f83275fe4a3a9969d1232b91e392ba1fedc1d'
 
 
+# Only these maintained domain codes may cross the CLI boundary. Exception
+# text, including syntactically plausible identifiers, can contain private data.
+_PUBLIC_STARTUP_ERRORS = frozenset({
+    'native_tooling_binding_changed', 'native_tooling_catalog_mismatch',
+    'native_tooling_catalog_unavailable', 'native_tooling_configuration_changed',
+    'native_tooling_context_required', 'native_tooling_context_unloaded',
+    'native_tooling_endpoint_changed', 'native_tooling_endpoint_required',
+    'native_tooling_observation_expired', 'native_tooling_observation_limit',
+    'native_tooling_observation_refused', 'qualified_native_peer_tool_required',
+    'qualified_runtime_context_required', 'qualified_runtime_imports_required',
+    'qualified_runtime_module_required', 'qualified_receiving_interpreter_required',
+    'installed_onboarding_sdk_changed', 'native_onboarding_sdk_refused',
+    'receiving_native_tooling_changed', 'receiving_native_tooling_group_changed',
+    'receiving_native_tooling_identity_changed', 'receiving_native_tooling_unobserved',
+    'receiving_owner_deadline_expired',
+})
+
+
+def _public_error(error: Exception) -> str:
+    if isinstance(error, OnboardingError) and str(error) in _PUBLIC_STARTUP_ERRORS:
+        return str(error)
+    return 'native_matrix_tool_startup_refused'
+
+
 def _installer(code: Path, uid: int):
     import types
     raw = onboarding_release.regular(code / 'clusterctl' / TOOLING_INSTALLER_MODULE, uid=uid)
@@ -148,7 +172,7 @@ def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict
     from .owner_process import ConnectedProcessObserver
     import uuid
     from websockets.asyncio.client import unix_connect
-    if (not endpoint.is_absolute() or '..' in endpoint.parts or endpoint.is_symlink()
+    if (not endpoint.is_absolute() or '..' in endpoint.parts
             or len(threads) != len(set(threads)) or len(threads) > 128
             or any(not isinstance(item, str) or str(uuid.UUID(item)) != item for item in threads)):
         raise OnboardingError('native_tooling_context_required')
@@ -167,7 +191,13 @@ def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict
     version = tooling_version(startup, fingerprint)
     catalog = asyncio.run(bridge(binding).list_tools(None, None))
     expected = {tool.name: tool.input_schema for tool in catalog.tools}
-    socket_info = endpoint.lstat()
+    selector = endpoint.lstat()
+    if selector.st_uid != os.geteuid():
+        raise OnboardingError('native_tooling_endpoint_required')
+    # Codex publishes an owner-selected alias to its instance socket. Resolve
+    # once, pin the actual peer, and refuse a changed selector or target.
+    target = endpoint.resolve(strict=True)
+    socket_info = target.lstat()
     if (not stat.S_ISSOCK(socket_info.st_mode) or socket_info.st_uid != os.geteuid()
             or socket_info.st_mode & 0o022):
         raise OnboardingError('native_tooling_endpoint_required')
@@ -233,20 +263,25 @@ def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict
             configuration()
             if _installer(code, code_uid)._binding_fingerprint(attachment)[1] != fingerprint:
                 raise OnboardingError('native_tooling_binding_changed')
-            after = endpoint.lstat()
-            if (socket_info.st_dev, socket_info.st_ino) != (after.st_dev, after.st_ino):
+            after = target.lstat()
+            current_selector = endpoint.lstat()
+            if ((socket_info.st_dev, socket_info.st_ino) != (after.st_dev, after.st_ino)
+                    or (selector.st_dev, selector.st_ino, selector.st_ctime_ns) != (
+                        current_selector.st_dev, current_selector.st_ino, current_selector.st_ctime_ns)
+                    or endpoint.resolve(strict=True) != target):
                 raise OnboardingError('native_tooling_endpoint_changed')
             observer.verify()
             remaining()
             return dict(schema='cluster-native-tool-catalog/v1', config_sha256=config_sha256,
                 binding_sha256=fingerprint, native_process=observer.process,
-                endpoint_sha256=digest(dict(path=str(endpoint), device=after.st_dev, inode=after.st_ino)),
+                endpoint_sha256=digest(dict(path=str(endpoint), target=str(target), device=after.st_dev,
+                    inode=after.st_ino, selector_inode=selector.st_ino, selector_ctime_ns=selector.st_ctime_ns)),
                 contexts=records, acceptance='selected-existing-contexts' if threads else 'server-catalog-only',
                 model_turns_started=0, messages_sent=0)
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream, ConnectedProcessObserver() as observer:
         stream.settimeout(remaining())
-        stream.connect(str(endpoint))
+        stream.connect(str(target))
         with observer(stream):
             return asyncio.run(query(stream, observer))
 
@@ -735,6 +770,6 @@ if __name__ == '__main__':
     import sys
     try:
         raise SystemExit(main())
-    except Exception:
-        print(json.dumps({'error': 'native_matrix_tool_startup_refused'}), file=sys.stderr)
+    except Exception as error:
+        print(json.dumps({'error': _public_error(error)}), file=sys.stderr)
         raise SystemExit(1)

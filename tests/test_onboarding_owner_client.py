@@ -13,7 +13,7 @@ import pytest
 
 from daimon_matrix.neutral_binding import OwnerClientPlan, render_owner_client
 from daimon_matrix import operator_rebirth
-from clusterctl.onboarding import Observation
+from clusterctl.onboarding import Observation, OnboardingError
 from clusterctl.onboarding_owner_client import OwnerClient, PROGRAM
 from tests.test_onboarding_target import receiving
 
@@ -642,6 +642,8 @@ def test_native_server_version_binds_the_qualified_sdk_code_and_attachment(
         "config-drift",
         "stall",
         "pagination",
+        "alias",
+        "alias-drift",
     ],
 )
 def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
@@ -659,6 +661,10 @@ def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
     # Short actual AF_UNIX socket; no native harness or model is created.
     with tempfile.TemporaryDirectory(prefix="dm-catalog-") as short:
         endpoint = Path(short) / "native.sock"
+        selected_endpoint = endpoint
+        if fault in {'alias', 'alias-drift'}:
+            selected_endpoint = Path(short) / 'control.sock'
+            selected_endpoint.symlink_to(endpoint.name)
         home = tmp_path / "codex"
         home.mkdir(mode=0o700)
         config = home / "config.toml"
@@ -728,6 +734,10 @@ def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
                     tools = {
                         n: {"name": n, "inputSchema": s} for n, s in expected.items()
                     }
+                    if fault == 'alias-drift':
+                        replacement = selected_endpoint.with_suffix('.next')
+                        replacement.symlink_to(str(endpoint))
+                        os.replace(replacement, selected_endpoint)
                     if fault == "schema":
                         tools["messaging_send"]["inputSchema"] = {"type": "object"}
                     result = {
@@ -765,7 +775,7 @@ def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
                         code_uid=os.geteuid(),
                         startup=startup,
                         codex_home=home,
-                        endpoint=endpoint,
+                        endpoint=selected_endpoint,
                         threads=(thread_id,),
                         config_sha256=config_sha,
                         reload=True,
@@ -773,7 +783,7 @@ def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
                         + int((0.1 if fault == "stall" else 3) * 1e9),
                     )
 
-                if fault is None:
+                if fault in (None, 'alias'):
                     result = observe()
                     assert result["acceptance"] == "selected-existing-contexts"
                     assert result["native_process"]["pid"] == os.getpid()
@@ -966,3 +976,13 @@ def test_guest_tooling_budget_starts_before_qualification(tmp_path, monkeypatch)
                 "1",
             ]
         )
+
+
+@pytest.mark.parametrize('error,expected', [
+    (OnboardingError('native_tooling_catalog_mismatch'), 'native_tooling_catalog_mismatch'),
+    (OnboardingError('private_identifier'), 'native_matrix_tool_startup_refused'),
+    (RuntimeError('native_tooling_catalog_mismatch'), 'native_matrix_tool_startup_refused'),
+])
+def test_startup_diagnostic_exposes_only_declared_domain_codes(error, expected):
+    from clusterctl.onboarding_owner_client import _public_error
+    assert _public_error(error) == expected
