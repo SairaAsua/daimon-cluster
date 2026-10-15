@@ -9,9 +9,43 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 from pathlib import Path
 from . import onboarding_release, onboarding_sdk
 from .onboarding import Observation, OnboardingError, digest, validate_plan
+
+
+def chat_command(venv: Path, imports: Path, code: Path, *, code_digest: str,
+                 binding: Path, code_uid: int = 0) -> list[str]:
+    """Render the existing attachment through the selected closed SDK tree."""
+    if (not binding.is_absolute() or '..' in binding.parts or type(code_uid) is not int
+            or code_uid < 0 or not re.fullmatch('[0-9a-f]{64}', code_digest)):
+        raise OnboardingError('qualified_native_peer_tool_required')
+    return onboarding_sdk.runtime_command(venv, imports, code,
+        'clusterctl.onboarding_owner_client', ['--code-digest', code_digest,
+            '--code-owner', str(code_uid), '--binding', str(binding)])
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Qualify once in this MCP process, then serve the existing chat adapter."""
+    import argparse
+    import sys
+    from . import onboarding_code_successor
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--code-digest', required=True)
+    parser.add_argument('--code-owner', type=int, default=0)
+    parser.add_argument('--binding', type=Path, required=True)
+    parser.add_argument('chat_arguments', nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    code = Path(__file__).resolve().parents[1]
+    parameters = onboarding_code_successor.sdk_parameters(code, uid=args.code_owner)
+    if not parameters:
+        raise OnboardingError('qualified_native_peer_tool_required')
+    onboarding_sdk.qualified_startup(Path(sys.prefix), code,
+        code_digest=args.code_digest, code_uid=args.code_owner, **parameters)
+    # Import only after the exact interpreter, code and SDK tree are qualified.
+    from daimon_matrix.agent_chat import main as chat_main
+    return chat_main(['--binding', str(args.binding), *args.chat_arguments])
 
 # This maintained program runs as the receiving owner, using the already
 # qualified SDK interpreter. Existing or partly published artifacts are checked
@@ -333,3 +367,7 @@ class OwnerClient:
 
     def execute(self, plan: dict, expected: dict) -> None:
         self._call(plan, expected, install=True)
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

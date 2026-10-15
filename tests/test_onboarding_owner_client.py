@@ -20,6 +20,38 @@ from tests.test_onboarding_target import receiving
 pytest_plugins = ["tests.test_onboarding_peer"]
 
 
+def test_chat_successor_uses_closed_startup_and_qualifies_before_adapter(tmp_path, monkeypatch):
+    from clusterctl import onboarding_owner_client as owner, onboarding_code_successor
+    from daimon_matrix import agent_chat
+    venv = tmp_path / 'sdk/venv'
+    code = tmp_path / 'code'
+    binding = tmp_path / 'existing/binding.json'
+    command = owner.chat_command(venv, venv.parent / 'runtime-imports', code,
+        code_digest='a' * 64, binding=binding)
+    assert command[:5] == [str(venv / 'bin/python'), '-B', '-I', '-S', '-c']
+    assert command[6:10] == [str(venv), str(venv.parent / 'runtime-imports'),
+        str(code), 'clusterctl.onboarding_owner_client']
+    calls = []
+    monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters',
+        lambda *a, **k: {'matrix_commit': 'b' * 40, 'matrix_wheel_sha256': 'c' * 64})
+    def qualify(*args, **kwargs):
+        calls.append(('qualified', kwargs['code_digest']))
+    def serve(args):
+        assert calls == [('qualified', 'a' * 64)]
+        calls.append(('serve', args))
+        return 0
+    monkeypatch.setattr(owner.onboarding_sdk, 'qualified_startup', qualify)
+    monkeypatch.setattr(agent_chat, 'main', serve)
+    assert owner.main(command[10:] + ['mcp']) == 0
+    assert calls[-1] == ('serve', ['--binding', str(binding), 'mcp'])
+    def refuse(*args, **kwargs):
+        raise owner.OnboardingError('qualified_runtime_context_required')
+    monkeypatch.setattr(owner.onboarding_sdk, 'qualified_startup', refuse)
+    with pytest.raises(owner.OnboardingError, match='qualified_runtime_context_required'):
+        owner.main(command[10:] + ['mcp'])
+    assert len(calls) == 2, 'failed qualification must never start the adapter'
+
+
 @pytest.fixture
 def native(tmp_path):
     # Native AF_UNIX endpoints must fit the kernel path budget.
