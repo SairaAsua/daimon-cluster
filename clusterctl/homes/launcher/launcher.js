@@ -49,6 +49,10 @@
     }catch{byId('notice').textContent='No pudimos actualizar las aplicaciones. Tocá ↻ para reintentar.';if(!entries.length)byId('empty').hidden=true;}
     finally{clearTimeout(deadline);pending=null;byId('refresh').disabled=false;}
   }
+  // First-paint data is request-scoped HTML, never a persistent catalog cache.
+  try{const value=JSON.parse(byId('initial-apps')?.textContent||'null');if(value?.schema==='dm.miniapp-navigation/v1'&&Array.isArray(value.apps)){
+    entries=value.apps.filter(e=>e&&['id','title','summary','url','author'].every(k=>typeof e[k]==='string'&&e[k].length<4096)&&safeURL(e));render();
+  }}catch{}
   byId('search').addEventListener('input',render);
   byId('favorites').onclick=()=>{favoritesOnly=!favoritesOnly;byId('favorites').setAttribute('aria-pressed',String(favoritesOnly));render();};
   byId('refresh').onclick=load;

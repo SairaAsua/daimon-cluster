@@ -82,3 +82,35 @@ scoped launch handoff; extend cross-home private discovery through an explicitly
 authorized contract; document paired onboarding/registration and portable skill
 adoption. Preserve independent app code/origins, target authority and updates.
 Do not treat an iframe, a public URL or launcher login as target authorization.
+
+## Shared public entry and startup
+
+A public `apps.dmn.homes` alias can reuse the same gateway and wildcard TLS.
+The proxy must admit only GET/HEAD on launcher assets/catalog and public style
+resources, strip all Cookie/Authorization input and Set-Cookie output, and
+select the registered publication host explicitly. Removing Origin on that
+narrow read-only projection must never become a general proxy bypass. Reject
+POST and all login, owner, session/control or artifact paths. This alias exposes
+public navigation only; it is not a new identity service or private viewer.
+Keep existing home entry points and the registered bot app until the exact new
+URL and actual phone launch are accepted. Per-bot Sessions launch/grants remain
+independent: a public launcher does not turn another bot's signed launch into
+the receiving bot's identity.
+
+The initial response contains current local cards and selected appearance;
+foreign sources reconcile asynchronously. Public static files use content-based
+version URLs and immutable caching. HTML, initial catalog and permissions retain
+no-store behavior, so withdrawal/revocation is not masked by browser storage.
+The old local fallback is used only when no permitted appearance is available.
+
+## Returning from an app
+
+Sessions, Nexus and the official Homemaker adapter expose a compact **Apps**
+link to `https://apps.dmn.homes/`. Normal same-WebView navigation selects the
+launcher explicitly; `openLink` would open an external browser and
+`openTelegramLink` can retain another Mini App. Neither is a reset-to-launcher
+guarantee. Preserve each app's internal BackButton and protect unsaved edits
+before leaving. Never append Telegram launch data or private session parameters.
+Saved server work continues independently; preserving every in-memory view after
+a cross-origin navigation is not promised. Qualify actual Android/iOS WebView
+return behavior separately from browser routing.

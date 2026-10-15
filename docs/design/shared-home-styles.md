@@ -196,3 +196,30 @@ assets/API routes return410 and cannot remain competing editors/writers. Public
 font and read-only style consumers remain local adapters of the same authority.
 Use temporary redirects during rollout to preserve compatible-code rollback.
 This source behavior alone is not an activation or physical-device receipt.
+
+## Independent app appearance and first paint
+
+Sessions and Nexus can opt into their receiving home's public
+`/style.css?surface=sessions` or `nexus` as a normal stylesheet in the HTML head.
+The bounded formatter accepts only Homemaker appearance roles, not arbitrary CSS,
+URLs, actor fields or recipe contents. This endpoint always resolves the public
+author with no viewer, ignoring ambient cookies/bearers and refusing viewer or
+resource-identity overrides. Existing authenticated `/style.json` is unchanged.
+This is appearance delivery, not cross-origin identity or access delegation.
+
+Use one `link[data-home-style]` and the same maintained `home-style.js`. The
+initial stylesheet resolves before paint. Visible foreground updates replace it
+only after a successful load; failure/timeout/hidden pages retain the last valid
+sheet. The app maps `--dm-background`, `--dm-surface`, `--dm-text`, `--dm-accent`,
+font roles, gap and radius into its authored controls. Light and dark modes and
+actual font delivery need browser qualification. Native chrome follows the
+computed background. No parallel editor/default store or raw Telegram payload
+transfer is involved. Private viewer appearance still needs the verified adapter.
+
+Apps embeds current style and local publication cards in request-scoped HTML.
+Peer discovery follows after that first useful screen. HTML and private data
+remain no-store; only content-versioned public JS/CSS is immutable. Static
+Homemaker modules/fonts support conditional revalidation, and the owner entry
+preloads its actual module roots. No cache restores old private grants, native
+actions or style preferences. New code changes asset URLs; no model wakeup or
+global Stop is part of this browser delivery.
