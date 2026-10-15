@@ -94,16 +94,22 @@ def test_target_launcher_selects_qualified_sdk_before_body_or_native_reexec(tmp_
     def prepare(home_arg, code_arg, fingerprint, **kwargs):
         calls.append((home_arg, code_arg, fingerprint, kwargs))
         return home / 'prepared-venv'
+    def prepare_imports(venv, code, **kwargs):
+        assert calls == [(home, output, result['runtime_digest'], selected_parameters)]
+        assert (venv, code, kwargs) == (home / 'prepared-venv', output, selected_parameters)
+        calls.append('closed-imports-prepared')
+        return home / 'closed-imports'
     def no_body(*a, **k):
         pytest.fail('SDK preparation loaded private native state')
     monkeypatch.setattr(onboarding_sdk, 'install', prepare)
+    monkeypatch.setattr(onboarding_sdk, 'runtime_imports', prepare_imports)
     monkeypatch.setattr(onboarding_target, 'Target', no_body)
     path = tmp_path / 'plan.json'
     being_seed._write(path, {**plan(), 'release_digest': original})
     assert onboarding_target.main(['sdk-prepare', '--home', str(home), '--code', str(base),
         '--runtime-code', str(output), '--runtime-digest', result['runtime_digest'],
         '--plan', str(path), '--genesis', str(tmp_path / 'absent-genesis.json')]) == 0
-    assert calls == [(home, output, result['runtime_digest'], selected_parameters)]
+    assert calls == [(home, output, result['runtime_digest'], selected_parameters), 'closed-imports-prepared']
     assert json.loads(capsys.readouterr().out) == dict(ready=True, matrix_commit=REVISION)
     assert manifest['artifacts']['matrix_sdk'] == selected_parameters['matrix_wheel_sha256']
 
