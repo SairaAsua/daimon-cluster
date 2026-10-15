@@ -789,10 +789,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--bootstrap-timeout-seconds', type=float)
     parser.add_argument('--bootstrap-initial', action='store_true')
     parser.add_argument('--bootstrap-initial-service', action='store_true')
+    parser.add_argument('--initial-context-json')
     parser.add_argument('--group-request', type=Path)
     args = parser.parse_args(argv)
     stage = 'arguments'
     try:
+        expected_initial_context = None
+        if args.initial_context_json is not None:
+            from .onboarding_service import initial_context
+            if args.action != 'admitted-serve' or len(args.initial_context_json.encode()) > 1024:
+                raise OnboardingError('receiving_initial_context_required')
+            expected_initial_context = initial_context(json.loads(args.initial_context_json))
         controlling = args.action in {'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
         identity_query = args.action == 'receiving-identity'
         grouping = args.action in {'group-relationship', 'group-publication'}
@@ -984,7 +991,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise OnboardingError("onboarding_admission_profile_required")
             return serve(target, document(args.admission_profile), receive_only=args.receive_only,
                 visibility_installation=args.visibility_installation, messaging_application=args.messaging_application,
-                ready_descriptor=args.ready_fd)
+                ready_descriptor=args.ready_fd, expected_initial_context=expected_initial_context)
         if args.action == "serve":
             return target.serve(receive_only=args.receive_only, visibility_installation=args.visibility_installation,
                                 ready_descriptor=args.ready_fd)

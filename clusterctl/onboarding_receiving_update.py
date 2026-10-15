@@ -970,6 +970,48 @@ def recover_capability_stage(upgrade, *, runtime_root: Path, transaction: Path,
         raise OnboardingError('receiving_bootstrap_attempt_limit')
 
 
+def _freeze_initial_guest_owner(target, *, deadline_ns: int, initial_service: bool) -> dict:
+    """Read initial context while the caller holds the actual native writer.
+
+    Both offline freeze and the initial child's under-lock pre-load assertion
+    use this same validation. Never acquire the daemon lock recursively here.
+    """
+    from .onboarding_service import GuestServiceBootstrap
+    prepared = target.observe()
+    if (prepared['phase'] != 'v8'
+            or (prepared.get('group') is not None) != initial_service):
+        raise OnboardingError('receiving_guest_bootstrap_initial_required')
+    bundle = target.document_bundle()
+    preservation = controller_preservation(target.package / 'runtime', bundle)
+    mode = controller_bootstrap_mode(bundle, preservation)
+    group = None
+    if initial_service:
+        # First service start uses the already published optional
+        # controller and signed group. It must not issue/renew authority
+        # after the group's owner context has been frozen.
+        if preservation is None or mode != 'preserve':
+            raise OnboardingError('receiving_initial_controller_required')
+        now = time.time_ns() // 1_000_000
+        if (not preservation['active']
+                or not preservation['not_before_ms'] <= now < preservation['not_after_ms']):
+            raise OnboardingError('receiving_initial_controller_required')
+        group = bootstrap_group(target, bundle)
+        if group['selected'] != prepared['group']:
+            raise OnboardingError('receiving_guest_bootstrap_group_changed')
+    renewal = {}
+    if mode == 'renew':
+        from daimon_matrix import operator_runtime_upgrade as upgrade
+        renewal['renewal_not_after_ms'] = upgrade._controller_grant_expiry(
+            bundle, time.time_ns() // 1_000_000)
+    GuestServiceBootstrap._budget(deadline_ns)
+    return dict(plan_digest=digest(target.plan), genesis_digest=digest(target.genesis),
+        code_digest=target.code_digest, runtime_sha256=digest(bundle),
+        group_sha256=digest({'group': None} if group is None else group),
+        mode=mode, preservation=preservation, **renewal,
+        being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'], group=group,
+        observer_startup=target.qualified_startup, predecessor=None)
+
+
 def freeze_guest_bootstrap(target, *, deadline_ns: int, initial: bool = False,
                            initial_service: bool = False) -> dict:
     """Freeze a predecessor, initial controller or first selected group load."""
@@ -980,39 +1022,7 @@ def freeze_guest_bootstrap(target, *, deadline_ns: int, initial: bool = False,
     GuestServiceBootstrap._budget(deadline_ns)
     if initial or initial_service:
         with being_seed._locked(target.root), target._runtime_writer():
-            prepared = target.observe()
-            if (prepared['phase'] != 'v8'
-                    or (prepared.get('group') is not None) != initial_service):
-                raise OnboardingError('receiving_guest_bootstrap_initial_required')
-            bundle = target.document_bundle()
-            preservation = controller_preservation(target.package / 'runtime', bundle)
-            mode = controller_bootstrap_mode(bundle, preservation)
-            group = None
-            if initial_service:
-                # First service start uses the already published optional
-                # controller and signed group. It must not issue/renew authority
-                # after the group's owner context has been frozen.
-                if preservation is None or mode != 'preserve':
-                    raise OnboardingError('receiving_initial_controller_required')
-                now = time.time_ns() // 1_000_000
-                if (not preservation['active']
-                        or not preservation['not_before_ms'] <= now < preservation['not_after_ms']):
-                    raise OnboardingError('receiving_initial_controller_required')
-                group = bootstrap_group(target, bundle)
-                if group['selected'] != prepared['group']:
-                    raise OnboardingError('receiving_guest_bootstrap_group_changed')
-            renewal = {}
-            if mode == 'renew':
-                from daimon_matrix import operator_runtime_upgrade as upgrade
-                renewal['renewal_not_after_ms'] = upgrade._controller_grant_expiry(
-                    bundle, time.time_ns() // 1_000_000)
-            GuestServiceBootstrap._budget(deadline_ns)
-            return dict(plan_digest=digest(target.plan), genesis_digest=digest(target.genesis),
-                code_digest=target.code_digest, runtime_sha256=digest(bundle),
-                group_sha256=digest({'group': None} if group is None else group),
-                mode=mode, preservation=preservation, **renewal,
-                being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'], group=group,
-                observer_startup=target.qualified_startup, predecessor=None)
+            return _freeze_initial_guest_owner(target, deadline_ns=deadline_ns, initial_service=initial_service)
     observed = target.running(admitted=True, deadline_ns=deadline_ns, bootstrap_base_only=True)
     bundle = target.document_bundle()
     if (observed['responder_association'] != 'same-connection'
@@ -2019,40 +2029,52 @@ class GuestBootstrapController:
                 for key in ('process', 'admission_parent')})
         effects = self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]
         expected_runtime, _ = bootstrap_effects(effects, source=False, mode=frozen['owner'].get('mode', 'issue'))
-        loaded = observed['runtime_status']['loaded_runtime']
-        startup = loaded['qualified_startup']
-        application = observed['group_runtime_status']['loaded_application']
-        gate = observed['group_runtime_status']['receiving']['channels']['tribe']
-        if (root['scope']['process'] != observed['process']
-                or root['scope']['admission_parent'] != observed['admission_parent']
-                or root['service']['unit_sha256'] != effects['unit_selected']['selected_sha256']
-                or root['service'].get('dropins', {}) != frozen['root']['service'].get('dropins', {})
-                or root['service']['manager'] != effects['started']['manager']
-                or any(startup.get(key) != value for key, value in dict(
-                    code_digest=candidate['runtime_digest'], matrix_commit=candidate['prepared']['matrix_revision'],
-                    sdk_digest=candidate['prepared']['sdk_digest'], reader=candidate['prepared']['reader'],
-                    matrix_wheel_sha256=candidate['prepared']['matrix_wheel_sha256']).items())
-                or startup['process_id'] != observed['process']['pid']
-                or loaded['runtime_bundle_sha256'] != expected_runtime
-                or observed['runtime_sha256'] != expected_runtime
-                or observed.get('responder_association') != 'same-connection'
-                or observed['origin'] != frozen['owner']['origin']
-                or observed['group'] != frozen['owner']['group']['selected']
-                or application['application_sha256'] != frozen['owner']['group']['application_sha256']
-                or application['publication_sha256'] != frozen['owner']['group']['publication_sha256']
-                or application['visibility']['installation_sha256'] != frozen['owner']['group']['installation_sha256']
-                or gate['controlled'] is not True or gate['process_id'] != observed['process']['pid']
-                or 'controlled_loaded' not in effects and (gate['phase'] != 'unselected' or gate['readers'])):
-            raise OnboardingError('receiving_guest_bootstrap_loaded_conflict')
-        result = dict(schema='cluster-guest-bootstrap-loaded/v1', process=observed['process'],
-            admission_parent=observed['admission_parent'], runtime_sha256=observed['runtime_sha256'],
-            code_digest=startup['code_digest'], matrix_revision=startup['matrix_commit'],
-            startup_instance_id=startup['startup_instance_id'],
-            loaded_runtime=loaded, loaded_application={key: value for key, value in application.items() if key != 'reader_gates'},
-            group_sha256=frozen['owner']['group_sha256'], receiving_readiness='unobserved')
+        result = dict(schema='cluster-guest-bootstrap-loaded/v1', **guest_loaded_observation(
+            observed, root, frozen['owner'], candidate, expected_runtime=expected_runtime,
+            unit_sha256=effects['unit_selected']['selected_sha256'],
+            manager=effects['started']['manager'], dropins=frozen['root']['service'].get('dropins', {}),
+            initial_observation='controlled_loaded' not in effects))
         if effects.get('controlled_loaded', result) != result:
             raise OnboardingError('receiving_guest_bootstrap_loaded_conflict')
         return result
+
+
+def guest_loaded_observation(observed: dict, root: dict, owner: dict, candidate: dict, *,
+                             expected_runtime: str, unit_sha256: str, manager: dict,
+                             dropins: dict, initial_observation: bool) -> dict:
+    """Bind the qualified native child/load to its independent manager observation."""
+    loaded = observed['runtime_status']['loaded_runtime']
+    startup = loaded['qualified_startup']
+    application = observed['group_runtime_status']['loaded_application']
+    gate = observed['group_runtime_status']['receiving']['channels']['tribe']
+    if (root['scope']['process'] != observed['process']
+            or root['scope']['admission_parent'] != observed['admission_parent']
+            or root['service']['unit_sha256'] != unit_sha256
+            or root['service'].get('dropins', {}) != dropins
+            or root['service']['manager'] != manager
+            or any(startup.get(key) != value for key, value in dict(
+                code_digest=candidate['runtime_digest'], matrix_commit=candidate['prepared']['matrix_revision'],
+                sdk_digest=candidate['prepared']['sdk_digest'], reader=candidate['prepared']['reader'],
+                matrix_wheel_sha256=candidate['prepared']['matrix_wheel_sha256']).items())
+            or startup['process_id'] != observed['process']['pid']
+            or loaded['runtime_bundle_sha256'] != expected_runtime
+            or observed['runtime_sha256'] != expected_runtime
+            or observed.get('responder_association') != 'same-connection'
+            or observed['origin'] != owner['origin']
+            or observed['group'] != owner['group']['selected']
+            or application['application_sha256'] != owner['group']['application_sha256']
+            or application['publication_sha256'] != owner['group']['publication_sha256']
+            or application['visibility']['installation_sha256'] != owner['group']['installation_sha256']
+            or gate['controlled'] is not True or gate['process_id'] != observed['process']['pid']
+            or initial_observation and (gate['phase'] != 'unselected' or gate['readers'])):
+        raise OnboardingError('receiving_guest_bootstrap_loaded_conflict')
+    result = dict(process=observed['process'],
+        admission_parent=observed['admission_parent'], runtime_sha256=observed['runtime_sha256'],
+        code_digest=startup['code_digest'], matrix_revision=startup['matrix_commit'],
+        startup_instance_id=startup['startup_instance_id'],
+        loaded_runtime=loaded, loaded_application={key: value for key, value in application.items() if key != 'reader_gates'},
+        group_sha256=owner['group_sha256'], receiving_readiness='unobserved')
+    return result
 
 
 class CohortController:

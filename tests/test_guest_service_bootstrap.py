@@ -171,6 +171,7 @@ def initial(fixture):
 def test_initial_service_recovers_lost_start_reply_without_fake_exit_or_second_start(initial):
     controller, manager, request = initial
     prepared = controller.execute('validate', request, deadline_ns=deadline())
+    assert prepared['dispatch_state'] == 'not-dispatched'
     assert prepared['initial_service'] == dict(unit_sha256=None, service=None)
     controller.execute('select', request, deadline_ns=deadline())
     assert manager.enables == 1 and manager.starts == manager.stops == 0
@@ -182,12 +183,52 @@ def test_initial_service_recovers_lost_start_reply_without_fake_exit_or_second_s
     assert result['initial_service'] == prepared['initial_service']
     assert not {'exits', 'exit_observed', 'quiesced', 'predecessor'} & set(result)
     assert result['admission_parent']['pid'] == 222
-    assert controller.execute('validate', request, deadline_ns=deadline()) == prepared
+    observed = controller.execute('validate', request, deadline_ns=deadline())
+    assert observed == {**prepared, 'dispatch_state': 'started-recorded'}
     controller.execute('select', request, deadline_ns=deadline())
     assert controller.execute('start', request, deadline_ns=deadline()) == result
     assert manager.enables == manager.starts == 1 and manager.stops == 0
     records = list(manager.unit.parent.glob('.*.selection/operations/*/*.json'))
     assert not any(path.stem in {'quiesced', 'process-exited', 'admission_parent-exited'} for path in records)
+
+
+def test_initial_root_rechecks_fixed_expiry_after_guest_startup_work(initial, monkeypatch):
+    controller, manager, request = initial
+    wall = [time.time_ns()]
+    request = {**request, 'not_after_ms': wall[0] // 1_000_000 + 60000}
+    controller.execute('validate', request, deadline_ns=deadline())
+    controller.execute('select', request, deadline_ns=deadline())
+    start = manager.start
+    def delayed(**options):
+        wall[0] = request['not_after_ms'] * 1_000_000
+        return start(**options)
+    manager.start = delayed
+    monkeypatch.setattr(onboarding_service.time, 'time_ns', lambda: wall[0])
+    with pytest.raises(OnboardingError, match='authorization_expired'):
+        controller.execute('start', request, deadline_ns=deadline())
+    assert manager.starts == 0
+
+
+def test_initial_root_expiry_does_not_replay_or_hide_recorded_start(initial, monkeypatch):
+    controller, manager, request = initial
+    request = {**request, 'not_after_ms': time.time_ns() // 1_000_000 + 60000}
+    controller.execute('validate', request, deadline_ns=deadline())
+    selected = controller.execute('select', request, deadline_ns=deadline())
+    started = controller.execute('start', request, deadline_ns=deadline())
+    monkeypatch.setattr(onboarding_service.time, 'time_ns', lambda: (request['not_after_ms'] + 1) * 1_000_000)
+    assert controller.execute('select', request, deadline_ns=deadline()) == selected
+    assert controller.execute('start', request, deadline_ns=deadline()) == started
+    assert manager.starts == manager.enables == 1
+
+
+def test_initial_root_refuses_expired_first_selection_without_publishing(initial, monkeypatch):
+    controller, manager, request = initial
+    request = {**request, 'not_after_ms': time.time_ns() // 1_000_000 + 60000}
+    controller.execute('validate', request, deadline_ns=deadline())
+    monkeypatch.setattr(onboarding_service.time, 'time_ns', lambda: request['not_after_ms'] * 1_000_000)
+    with pytest.raises(OnboardingError, match='authorization_expired'):
+        controller.execute('select', request, deadline_ns=deadline())
+    assert not manager.unit.exists() and manager.starts == manager.enables == 0
 
 
 @pytest.mark.parametrize('evidence', ['unseen-stopped', 'pending', 'started'])

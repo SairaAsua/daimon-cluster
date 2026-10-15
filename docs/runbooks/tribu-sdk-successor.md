@@ -621,8 +621,9 @@ and original pre-selection pins cannot drift during derivation.
 
 This record alone cannot enable senders. Native loaded adoption must still prove
 the same Tribe, and an added receiver cannot borrow another operation's replacement
-history as its own first managed start. The ManagedRuntime producer, admission
-publication/lifecycle derivation, after-only sender revocation/repair and complete
+history as its own first managed start. ManagedRuntime now has the explicit
+first-load producer below. Admission publication/lifecycle derivation, the cohort
+consumer, after-only sender revocation/repair and complete
 portal/cohort activation remain unfinished integration, not deployed acceptance.
 Added-body lifecycle qualification currently refuses even a locally retained
 marker until its genuine initial-managed producer and validator are integrated.
@@ -674,10 +675,8 @@ controller without querying a running predecessor or issuing/renewing authority.
 The qualified host route retains the guest owner, prepared SDK and finite budget.
 
 This snapshot has no process predecessor and does not authorize a start or enable
-delivery. The ManagedRuntime first-start caller and cohort consumer must still
-retain/revalidate this exact context, independently bind the actual manager/native
-child and verify the loaded application and default-disabled sending gate. Those
-consumers remain unfinished; the after-only lifecycle refusal stays in effect.
+delivery. The first-load producer below retains/revalidates that exact context;
+the cohort consumer remains unfinished and after-only activation still refuses.
 
 ### First guest service publication and start
 
@@ -704,9 +703,51 @@ and pinned parent. Ordinary rendering and legacy installation remain unchanged.
 
 This is the physical first-service primitive. Manager/process test seams do not
 qualify an actual systemd deployment, native child/application load, receiving
-controller, default-disabled sender gate or cohort adoption. The ManagedRuntime
-and distinct-cohort integration still belongs to #227. These future-admission
+controller, default-disabled sender gate or cohort adoption. Distinct-cohort
+integration still belongs to #227. These future-admission
 changes are independent of the frozen current-member rollout candidate.
+
+### Initial managed load in the admission operation
+
+`ManagedRuntime.execute_initial(plan, cohort)` operates outside `JobStore.tick`,
+using operation -> jobs parent -> all jobs ownership. It verifies the stored plan,
+host authorization, frozen after-only receiver/candidate and reader assessment,
+prepared native profile/proxy, and the original sender-revocation barrier before
+retaining its first intent. `runtime_observation.initial_managed[name]` retains
+the immutable owner/group/profile/unit/request binding, physical effects and
+`controlled_loaded` proof. No replacement history or fictional exit is used.
+
+Initial root validation reports current `dispatch_state` separately from its
+immutable preparation. `not-dispatched` requires current exact owner context and
+fixed authorization before a possible start, with the native root deadline capped
+by that horizon. The immutable root request also carries `not_after_ms`: the
+guest checks that absolute bound before fresh unit publication/enable and in the
+actual pre-start callback, including after launch-intent durability. Transport or
+guest code verification cannot reset that permission by starting a new relative
+timer. `intent-retained` and `started-recorded` only reconcile the same
+first invocation; expiration cannot authorize redispatch or prevent historical
+observation. A changed/dead invocation refuses rather than becoming another start.
+The finite invocation budget is not an extension of the frozen authority horizon.
+
+The unit's initial context pins the native owner, prepared profile and fixed
+expiry. The parent checks profile/expiry before admission; the native child checks the same owner
+snapshot under its actual writer lock before runtime load/listeners, reusing the
+offline freeze validator without reacquiring that lock, and checks expiry again
+immediately before loading. The independent root
+manager/parent/cgroup and authenticated same-connection native load must agree on
+the same code/SDK/runtime/application and initially disabled sender gate. Actual
+registry adoption follows loaded proof; retry reobserves that process.
+
+This producer does not enable a sender or establish full cohort receiving or
+communication. Its isolated orchestration tests use real journal/job/reader/root
+records with explicitly fake manager/native RPC/registry seams. Real native
+admission and ordinary child/controller tests provide narrower separate evidence.
+The after-only cohort consumer/revocation/repair and end-to-end portal integration
+remain unfinished; a retained initial record alone cannot bypass their refusal.
+That integration must also retain the authorized CAS from the initial guarded
+unit to the normal service lifecycle after acceptance. Do not leave a completed
+onboarding dependent on a startup-only authorization horizon or silently remove
+its initial guard before the first-load evidence is accepted.
 
 ### Public authority histories for future group admission
 

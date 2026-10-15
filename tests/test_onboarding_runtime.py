@@ -146,7 +146,8 @@ def test_actual_receiving_scope_reports_running_only_under_current_shared_lease(
 
 
 @pytest.mark.parametrize('receive_only', [False, True])
-def test_signed_group_is_selected_before_base_visibility_composition(tmp_path, monkeypatch, receive_only):
+@pytest.mark.parametrize('context', ['ordinary', 'same', 'changed', 'expired', 'authority-expired'])
+def test_signed_group_is_selected_before_base_visibility_composition(tmp_path, monkeypatch, receive_only, context):
     """Composition-order seam only; actual group startup has its own qualification."""
     import socket
     from types import SimpleNamespace
@@ -160,7 +161,12 @@ def test_signed_group_is_selected_before_base_visibility_composition(tmp_path, m
             root=tmp_path/'matrix', document_bundle=lambda:{},
             _reader=lambda: pytest.fail('composition test opened custody')))
     # Signed authority loading is covered by the native group-authority tests.
-    monkeypatch.setattr(onboarding_peer, 'approved_group_authorities', lambda *_args:{})
+    def authorities(*_args):
+        if context == 'authority-expired':
+            monkeypatch.setattr(onboarding_runtime.time, 'time_ns',
+                lambda: expected_context['not_after_ms'] * 1_000_000)
+        return {}
+    monkeypatch.setattr(onboarding_peer, 'approved_group_authorities', authorities)
     observed=[]
     def load(*_args, **kwargs):
         observed.append(kwargs)
@@ -172,20 +178,46 @@ def test_signed_group_is_selected_before_base_visibility_composition(tmp_path, m
     root.mkdir(mode=0o700)
     acquire=daemon.acquire_lock
     monkeypatch.setattr(daemon, 'acquire_lock', lambda *_args:acquire(root))
+    from clusterctl import onboarding_receiving_update
+    from clusterctl.onboarding import digest
+    frozen = {'synthetic': 'initial owner context'}
+    def current_owner(*_args, **_kwargs):
+        # A second descriptor proves the guard runs under the child's real
+        # native writer, before runtime load or application composition.
+        with pytest.raises(BlockingIOError):
+            acquire(root)
+        return {**frozen, 'synthetic': 'changed' if context == 'changed' else frozen['synthetic'],
+            'observer_startup': {'separate': 'observer process'}}
+    monkeypatch.setattr(onboarding_receiving_update, '_freeze_initial_guest_owner', current_owner)
+    expected_context = None if context == 'ordinary' else dict(schema='cluster-initial-start-context/v1',
+        owner_sha256=digest(frozen), profile_sha256='a' * 64,
+        not_after_ms=time.time_ns() // 1_000_000 + (-1 if context == 'expired' else 60000))
     left,right=socket.socketpair()
     descriptor=left.detach()
     try:
-        expected=OnboardingError if receive_only else RuntimeError
-        match='onboarding_visibility_selection_required' if receive_only else 'composition-observed'
+        expected=OnboardingError if receive_only or context in {'changed', 'expired', 'authority-expired'} else RuntimeError
+        match=('onboarding_visibility_selection_required' if receive_only else
+            'receiving_initial_context_changed' if context == 'changed' else
+            'authorization_expired' if context in {'expired', 'authority-expired'} else 'composition-observed')
         with pytest.raises(expected,match=match):
             onboarding_runtime.child_main(tmp_path,{'release_digest':'a'*64},{},descriptor,
-                None,os.getppid(),receive_only,None,code_uid=os.geteuid())
-        assert len(observed)==(0 if receive_only else 1)
+                None,os.getppid(),receive_only,None,code_uid=os.geteuid(), expected_initial_context=expected_context)
+        assert len(observed)==(0 if receive_only or context in {'changed', 'expired', 'authority-expired'} else 1)
     finally:
         right.close()
         # Explicit receive-only refusal happens before the child takes the FD.
         if receive_only:
             os.close(descriptor)
+
+
+def test_initial_parent_refuses_a_changed_profile_before_admission(monkeypatch):
+    from clusterctl import onboarding_runtime
+    monkeypatch.setattr(onboarding_runtime, 'ReceivingHolder',
+        lambda _: pytest.fail('changed profile reached admission'))
+    with pytest.raises(OnboardingError, match='initial_context_changed'):
+        onboarding_runtime.serve(None, {'synthetic': 'changed profile'}, expected_initial_context=dict(
+            schema='cluster-initial-start-context/v1', owner_sha256='a' * 64, profile_sha256='b' * 64,
+            not_after_ms=time.time_ns() // 1_000_000 + 60000))
 
 
 @pytest.mark.parametrize('change', [

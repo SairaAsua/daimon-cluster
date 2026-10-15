@@ -380,8 +380,10 @@ class GuestServiceBootstrap:
     def _initial(self, action: str, request: dict, *, deadline_ns: int) -> dict:
         """Retain a genuine first unit/start, with no predecessor exit receipt."""
         from .owner_process import PresenceError
-        if (set(request) != {'schema', 'operation_id', 'plan_digest', 'predecessor', 'argv'}
+        if (set(request) - {'not_after_ms'} != {'schema', 'operation_id', 'plan_digest', 'predecessor', 'argv'}
                 or request['schema'] != 'cluster-guest-service-initial/v1'
+                or 'not_after_ms' in request and (type(request['not_after_ms']) is not int
+                    or not 0 < request['not_after_ms'] < 2**53)
                 or request['predecessor'] is not None or action == 'quiesce'
                 or str(uuid.UUID(request['operation_id'])) != request['operation_id']
                 or re.fullmatch('[0-9a-f]{64}', request['plan_digest']) is None):
@@ -397,6 +399,10 @@ class GuestServiceBootstrap:
             if (not self.manager.unit.exists() or
                     onboarding_release.regular(self.manager.unit, uid=self.manager._unit_uid) != candidate):
                 raise OnboardingError('receiving_guest_service_candidate_changed')
+
+        def authorized_effect() -> None:
+            if request.get('not_after_ms', 2**53 - 1) <= time.time_ns() // 1_000_000:
+                raise OnboardingError('receiving_preservation_authorization_expired')
 
         def inactive(*, require_loaded: bool = False) -> dict:
             if require_loaded:
@@ -425,7 +431,13 @@ class GuestServiceBootstrap:
             else:
                 inactive()
             self._budget(deadline_ns)
-            return prepared
+            # Preparation stays immutable. Dispatch classification is a fresh
+            # observation used to distinguish a possible first effect from
+            # observation-only recovery of an uncertain/recorded invocation.
+            dispatch = ('started-recorded' if self._retained(root, 'initial-started') is not None else
+                'intent-retained' if self._retained(root, 'initial-start-intent') is not None else 'not-dispatched')
+            self._budget(deadline_ns)
+            return {**prepared, 'dispatch_state': dispatch}
         if prepared is None or prepared['candidate_sha256'] != fingerprint:
             raise OnboardingError('receiving_guest_service_initial_preparation_required')
         if action == 'select':
@@ -434,7 +446,9 @@ class GuestServiceBootstrap:
                 owned()
             else:
                 inactive()
+                authorized_effect()
                 publish(self.manager.unit, candidate)
+                authorized_effect()
                 self.manager.enable(deadline_ns=deadline_ns)
                 retained = self._record(root / 'selected.json', dict(
                     selected_sha256=fingerprint, receiving_readiness='unobserved'))
@@ -454,13 +468,16 @@ class GuestServiceBootstrap:
             return started
         intent = self._retained(root, 'initial-start-intent')
         if intent is None:
+            authorized_effect()
             inactive()
             def before_start() -> None:
                 owned()
                 observed = inactive(require_loaded=True)
+                authorized_effect()
                 self._record(root / 'initial-start-intent.json', dict(
                     selected_sha256=fingerprint, launch_precondition=observed))
                 self._budget(deadline_ns)
+                authorized_effect()
             self.manager.start(deadline_ns=deadline_ns, pre_start=before_start)
             intent = self._retained(root, 'initial-start-intent')
         precondition = None if intent is None else intent.get('launch_precondition')
@@ -764,9 +781,20 @@ def select_entrypoint(unit: Path, argv: list[str], *, previous_sha256: str) -> d
         return result
 
 
+def initial_context(value: dict) -> dict:
+    """Closed public pins for an initial child's native pre-load assertion."""
+    if (not isinstance(value, dict) or set(value) != {'schema', 'owner_sha256', 'profile_sha256', 'not_after_ms'}
+            or value['schema'] != 'cluster-initial-start-context/v1'
+            or type(value['not_after_ms']) is not int or not 0 < value['not_after_ms'] < 2**53
+            or any(not isinstance(value[key], str) or re.fullmatch('[0-9a-f]{64}', value[key]) is None
+                for key in ('owner_sha256', 'profile_sha256'))):
+        raise OnboardingError('receiving_initial_context_required')
+    return dict(value)
+
+
 def command(code: Path, *, receive_only: bool, visibility: Path | None = None,
             runtime_code: Path | None = None, runtime_digest: str | None = None,
-            messaging_application: Path | None = None) -> list[str]:
+            messaging_application: Path | None = None, expected_initial_context: dict | None = None) -> list[str]:
     if receive_only == (visibility is not None):
         raise OnboardingError('onboarding_visibility_selection_required')
     if messaging_application is not None and receive_only:
@@ -782,6 +810,11 @@ def command(code: Path, *, receive_only: bool, visibility: Path | None = None,
             '--genesis', public + 'genesis.json', '--admission-profile', public + 'admission.json',
             *(['--messaging-application', str(messaging_application)] if messaging_application is not None else [])]
     arguments += (['--receive-only'] if receive_only else ['--visibility-installation', str(visibility)])
+    if expected_initial_context is not None:
+        if receive_only:
+            raise OnboardingError('receiving_initial_context_required')
+        arguments += ['--initial-context-json', json.dumps(initial_context(expected_initial_context),
+            sort_keys=True, separators=(',', ':'))]
     return code_command(Path('/usr/bin/python3'), runtime_code or code, 'clusterctl.onboarding_target', arguments)
 
 

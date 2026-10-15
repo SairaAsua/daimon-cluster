@@ -1,6 +1,8 @@
 """Managed reconciliation uses native admission and preserves uncertain effects."""
+import copy
 import json
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +17,23 @@ from clusterctl.onboarding_runtime import AdmittedDaemon
 from clusterctl.onboarding_target import Target
 from tests.test_admission import _key
 from tests.test_onboarding_target import receiving
+from tests import test_guest_service_bootstrap as service_fixtures
+
+fixture = service_fixtures.fixture
+initial = service_fixtures.initial
+
+
+def test_initial_proxy_observation_uses_the_existing_bounded_inventory_route():
+    managed = object.__new__(ManagedRuntime)
+    managed.settings = dict(host_port=1234, guest_port=5678)
+    calls = []
+    def dispatch(plan, argv, **options):
+        calls.append((argv, options))
+        return json.dumps([dict(name='dm-newcomer', expanded_devices={
+            'onboarding-admission': managed._proxy()})])
+    managed.backend = SimpleNamespace(_dispatch=dispatch, instance=lambda _: 'dm-newcomer')
+    assert managed._check_proxy({}, deadline_ns=12345)
+    assert calls == [(['list', '--format=json'], {'deadline_ns': 12345})]
 
 
 def test_each_receiving_body_selects_its_verified_peer_application(monkeypatch):
@@ -154,3 +173,182 @@ def test_lost_enrollment_and_registry_ack_resume_same_holder_and_native_body(tmp
             server.shutdown()
             server.server_close()
             thread.join(timeout=5)
+
+
+def initial_managed_fixture(tmp_path, initial):
+    """Real journal/job/reader/root orchestration, fake manager and native RPC.
+
+    This does not qualify an actual guest, signed application, native process
+    or canonical registry adoption. Native authority is tested separately above.
+    """
+    from clusterctl.onboarding import JobStore
+    from tests.test_onboarding import plan as make_plan
+    from tests.test_receiving_cohort_control import admission_fixture
+    cohort, owners, journal, row, _ = admission_fixture(tmp_path)
+    plan = make_plan('newcomer')
+    jobs = tmp_path / 'jobs'
+    jobs.mkdir(mode=0o700)
+    backend = SimpleNamespace(config=SimpleNamespace(jobs=jobs), authorize=lambda *_: True)
+    JobStore(jobs).submit(plan, backend)
+    cohort.revoke_senders()
+    barrier = cohort.require_revocation_barrier
+    def bounded_barrier():
+        assert all(getattr(cohort.owners[sender['name']], 'deadline_ns', 0) > time.monotonic_ns()
+            for sender in row['expected_precondition']['senders'])
+        return barrier()
+    cohort.require_revocation_barrier = bounded_barrier
+    approved = row['intended_transition']['cohort_admission']['receivers']['newcomer']
+    prepared = approved['recipe']['prepared']
+    root_controller, manager, _ = initial
+    parent = root_controller._parent({})
+    process = {**parent, 'pid': 223, 'start_ticks': 10}
+    expected = dict(body_ref='codex:fixture:newcomer', embodiment_id=approved['embodiment_id'],
+        incarnation_id='incarnation:fixture')
+    selected = dict(tribe_ref='tribe:fixture', socket=str(owners['newcomer'].socket),
+        application='/home/agent/synthetic/application', visibility='/home/agent/synthetic/visibility.json')
+    group = dict(selected=selected, application_sha256='a' * 64,
+        publication_sha256='b' * 64, installation_sha256='c' * 64)
+    startup = dict(code_digest=prepared['code_digest'], matrix_commit=prepared['matrix_revision'],
+        sdk_digest=prepared['sdk_digest'], matrix_wheel_sha256=prepared['matrix_wheel_sha256'],
+        reader=prepared['reader'], process_id=process['pid'], startup_instance_id='fixture-first-start')
+    owner = dict(plan_digest=digest(plan), genesis_digest='d' * 64, origin=expected,
+        being_ref=approved['being_ref'], runtime_sha256='e' * 64, group=group,
+        group_sha256=digest(group), predecessor=None, observer_startup=startup, mode='preserve',
+        preservation=dict(active=True, not_before_ms=0, not_after_ms=time.time_ns() // 1_000_000 + 600000))
+    gate = dict(controlled=True, process_id=process['pid'], phase='unselected', readers=[])
+    observed = dict(origin=expected, process=process, admission_parent=parent, group=selected,
+        runtime_sha256=owner['runtime_sha256'], responder_association='same-connection',
+        runtime_status={'loaded_runtime': dict(qualified_startup=startup,
+            runtime_bundle_sha256=owner['runtime_sha256'], process_id=process['pid'])},
+        group_runtime_status=dict(loaded_application=dict(application_sha256=group['application_sha256'],
+            publication_sha256=group['publication_sha256'], visibility={'installation_sha256': group['installation_sha256']},
+            reader_gates={'tribe': gate}), receiving={'channels': {'tribe': gate}}))
+    calls, adopted = [], []
+    fault = []
+    def target_call(_plan, action, **options):
+        calls.append(action)
+        if action == 'receiving-bootstrap-freeze':
+            assert options['bootstrap_initial_service'] is True
+            return copy.deepcopy(owner)
+        assert action == 'admitted-running' and options['require_loaded'] is True
+        if 'load' in fault:
+            fault.remove('load')
+            raise OSError('synthetic lost loaded observation')
+        return copy.deepcopy(observed)
+    def root_call(_plan, action, *, timeout_seconds, request=None, owner_observation=None, **_):
+        backend.root_budgets.append((action, timeout_seconds))
+        expiry = time.monotonic_ns() + int(timeout_seconds * 1_000_000_000)
+        if action == 'bootstrap-inspect':
+            return root_controller.inspect(owner_observation, deadline_ns=expiry)
+        result = root_controller.execute(action.removeprefix('bootstrap-'), request, deadline_ns=expiry)
+        if action == 'bootstrap-select' and hasattr(backend, 'after_select'):
+            backend.after_select()
+        step = action.removeprefix('bootstrap-')
+        if step in fault:
+            fault.remove(step)
+            raise OSError('synthetic lost ' + step + ' return')
+        return result
+    def adopt(**origin):
+        adopted.append(origin)
+        if 'registry' in fault:
+            fault.remove('registry')
+            raise OSError('synthetic lost registry adoption return')
+    backend._target_call, backend._guest_service_call = target_call, root_call
+    backend.frozen_owner = owner
+    backend.root_budgets = []
+    backend._receiving_base = lambda _: Path('/opt/frozen-base')
+    backend._runtime_paths = lambda _plan, _base, candidate: (
+        Path('/opt/daimon-onboarding-runtime') / candidate[1], [], {})
+    managed = object.__new__(ManagedRuntime)
+    managed.backend, managed.registry = backend, SimpleNamespace(adopt_running=adopt)
+    managed._profile = lambda _: {'synthetic': 'already prepared profile'}
+    managed._expected = lambda _: copy.deepcopy(expected)
+    managed._registered = lambda _: False
+    managed._check_proxy = lambda _, **_options: True
+    return managed, plan, cohort, manager, observed, calls, adopted, fault
+
+
+@pytest.mark.parametrize('lost', ['start', 'load', 'registry'])
+def test_initial_managed_load_resumes_same_operation_without_second_start(tmp_path, initial, lost):
+    managed, plan, cohort, manager, observed, calls, adopted, fault = initial_managed_fixture(tmp_path, initial)
+    fault.append(lost)
+    with pytest.raises(OSError, match='synthetic lost'):
+        managed.execute_initial(plan, cohort)
+    row = cohort._row()
+    intent = copy.deepcopy(row['runtime_observation']['initial_managed']['newcomer']['intent'])
+    loaded = managed.execute_initial(plan, cohort)
+    assert loaded == managed.execute_initial(plan, cohort)
+    assert loaded['process'] == observed['process'] and loaded['admission_parent'] == observed['admission_parent']
+    assert loaded['schema'] == 'cluster-guest-initial-loaded/v1' and loaded['receiving_readiness'] == 'unobserved'
+    assert calls.count('receiving-bootstrap-freeze') == 2
+    assert manager.starts == manager.enables == 1
+    assert cohort._row()['runtime_observation']['initial_managed']['newcomer']['intent'] == intent
+    assert all(owner.gate['phase'] == 'revoke' for name, owner in cohort.owners.items() if name != 'newcomer')
+    assert observed['group_runtime_status']['receiving']['channels']['tribe']['readers'] == []
+    assert adopted and all(origin == observed['origin'] for origin in adopted)
+    manager.invocation = 'unexpected replacement'
+    with pytest.raises(OnboardingError, match='started_process_changed'):
+        managed.execute_initial(plan, cohort)
+    assert manager.starts == 1
+
+
+@pytest.mark.parametrize('drift', ['group', 'gate', 'process', 'profile'])
+def test_initial_managed_load_refuses_changed_context_without_readiness(tmp_path, initial, drift):
+    managed, plan, cohort, manager, observed, calls, adopted, fault = initial_managed_fixture(tmp_path, initial)
+    if drift == 'profile':
+        fault.append('start')
+        with pytest.raises(OSError):
+            managed.execute_initial(plan, cohort)
+        managed._profile = lambda _: {'synthetic': 'unexpected replacement profile'}
+    elif drift == 'group':
+        observed['group_runtime_status']['loaded_application']['publication_sha256'] = 'f' * 64
+    elif drift == 'gate':
+        observed['group_runtime_status']['receiving']['channels']['tribe']['phase'] = 'select'
+    else:
+        observed['runtime_status']['loaded_runtime']['qualified_startup']['process_id'] += 1
+    with pytest.raises(OnboardingError, match='loaded_conflict|binding_changed'):
+        managed.execute_initial(plan, cohort)
+    assert manager.starts == 1 and not adopted
+    assert 'controlled_loaded' not in cohort._row()['runtime_observation']['initial_managed']['newcomer']
+
+
+def test_changed_owner_after_lost_selection_is_refused_before_first_start(tmp_path, initial):
+    managed, plan, cohort, manager, _, _, adopted, fault = initial_managed_fixture(tmp_path, initial)
+    fault.append('select')
+    with pytest.raises(OSError, match='lost select'):
+        managed.execute_initial(plan, cohort)
+    assert manager.starts == 0
+    managed.backend.frozen_owner['runtime_sha256'] = 'f' * 64
+    with pytest.raises(OnboardingError, match='initial_owner_changed'):
+        managed.execute_initial(plan, cohort)
+    assert manager.starts == 0 and not adopted
+
+
+def test_expired_horizon_does_not_block_retained_start_observation(tmp_path, initial, monkeypatch):
+    managed, plan, cohort, manager, _, _, _, fault = initial_managed_fixture(tmp_path, initial)
+    fault.append('start')
+    with pytest.raises(OSError, match='lost start'):
+        managed.execute_initial(plan, cohort)
+    expiry = cohort._row()['intended_transition']['cohort_admission']['activation']['expires_at_ms']
+    monkeypatch.setattr('clusterctl.onboarding_managed.time.time_ns', lambda: (expiry + 1) * 1_000_000)
+    assert managed.execute_initial(plan, cohort)['receiving_readiness'] == 'unobserved'
+    assert manager.starts == 1
+
+
+def test_expiry_during_selection_cannot_authorize_a_first_start(tmp_path, initial, monkeypatch):
+    managed, plan, cohort, manager, _, _, adopted, _ = initial_managed_fixture(tmp_path, initial)
+    expiry = cohort._row()['intended_transition']['cohort_admission']['activation']['expires_at_ms']
+    managed.backend.after_select = lambda: monkeypatch.setattr(
+        'clusterctl.onboarding_managed.time.time_ns', lambda: (expiry + 1) * 1_000_000)
+    with pytest.raises(OnboardingError, match='authorization_expired'):
+        managed.execute_initial(plan, cohort)
+    assert manager.starts == 0 and not adopted
+
+
+def test_fresh_root_effects_share_the_fixed_authorization_remainder(tmp_path, initial, monkeypatch):
+    managed, plan, cohort, _, _, _, _, _ = initial_managed_fixture(tmp_path, initial)
+    expiry = cohort._row()['intended_transition']['cohort_admission']['activation']['expires_at_ms']
+    monkeypatch.setattr('clusterctl.onboarding_managed.time.time_ns', lambda: (expiry - 700) * 1_000_000)
+    managed.execute_initial(plan, cohort)
+    assert all(0 < budget <= .7 for action, budget in managed.backend.root_budgets
+        if action in {'bootstrap-start', 'bootstrap-select'})
