@@ -1835,6 +1835,16 @@ def prepare_guest_bootstrap(backend, plan: dict, *, candidate: tuple[Path, str],
         argv=argv, expires_at_ms=expires_at_ms)
 
 
+def guest_bootstrap_operation_id(operation_id: str) -> str:
+    """Preserve canonical UUIDs; retain the existing namespaced journal route."""
+    try:
+        if str(uuid.UUID(operation_id)) == operation_id:
+            return operation_id
+    except ValueError:
+        pass
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, 'cluster-guest-bootstrap:' + operation_id))
+
+
 class GuestBootstrapController:
     """One journal/job-owned operation spans public root and private owner calls.
 
@@ -1847,14 +1857,7 @@ class GuestBootstrapController:
         self.journal, self.operation_id, self.backend, self.name = journal, operation_id, backend, name
 
     def _native_operation_id(self) -> str:
-        # Preserve every previously accepted canonical UUID. Other journal
-        # labels must not alias a differently spelled canonical operation.
-        try:
-            if str(uuid.UUID(self.operation_id)) == self.operation_id:
-                return self.operation_id
-        except ValueError:
-            pass
-        return str(uuid.uuid5(uuid.NAMESPACE_URL, 'cluster-guest-bootstrap:' + self.operation_id))
+        return guest_bootstrap_operation_id(self.operation_id)
 
     def _row(self) -> tuple[dict, dict, dict]:
         row = self.journal.get(self.operation_id)
@@ -2416,7 +2419,8 @@ class CohortController:
         loaded, application = status.get('loaded_runtime'), status.get('loaded_application')
         if not isinstance(loaded, dict) or not isinstance(application, dict):
             raise OnboardingError('receiving_cohort_loaded_required')
-        admission = self._admission(self._row())
+        cohort_row = self._row()
+        admission = self._admission(cohort_row)
         if admission is not None and application.get('tribe', {}).get('policy', {}).get('tribe_ref') != admission['tribe_ref']:
             raise OnboardingError('receiving_cohort_admission_group_changed')
         startup = loaded.get('qualified_startup')
@@ -2496,8 +2500,12 @@ class CohortController:
         if recipe['profile'] == 'guest' and not isinstance(current.get('admission_parent'), dict):
             raise OnboardingError('receiving_cohort_admission_required')
         effects = {} if lifecycle_row is None else lifecycle_row['runtime_observation'] or {}
-        lifecycle = (effects.get('source_bootstrap', {}) if recipe['profile'] == 'source'
-            else effects.get('guest_bootstraps', {}).get(name, {})).get('controlled_loaded')
+        if (admission is not None and lifecycle_row is not None
+                and name not in {item['name'] for item in cohort_row['expected_precondition']['senders']}):
+            lifecycle = self._initial_lifecycle(lifecycle_row, name, recipe)['controlled_loaded']
+        else:
+            lifecycle = (effects.get('source_bootstrap', {}) if recipe['profile'] == 'source'
+                else effects.get('guest_bootstraps', {}).get(name, {})).get('controlled_loaded')
         if (not isinstance(lifecycle, dict) or lifecycle.get('process') != current['process']
                 or lifecycle.get('loaded_runtime') != loaded
                 or lifecycle.get('loaded_application') != {key: val for key, val in application.items() if key != 'reader_gates'}
@@ -2558,10 +2566,8 @@ class CohortController:
         cohort = self._row()
         admission = self._admission(cohort)
         if admission is not None and name not in {item['name'] for item in cohort['expected_precondition']['senders']}:
-            # The genuine initial-managed producer/validator is not wired yet.
-            # A marker or same-operation replacement record cannot substitute
-            # that contract; keep after-only activation explicitly unqualified.
-            raise OnboardingError('receiving_initial_managed_lifecycle_unobserved')
+            self._initial_lifecycle(cohort, name, recipe)
+            return cohort
         owner = self.owners[name]
         inspect = getattr(owner, 'lifecycle_operation', None)
         if recipe['profile'] == 'source' and inspect is not None:
@@ -2581,6 +2587,68 @@ class CohortController:
             raise OnboardingError('receiving_cohort_lifecycle_unobserved')
         return row
 
+    def _initial_lifecycle(self, row: dict, name: str, recipe: dict) -> dict:
+        """Consume the actual first-load producer, never replacement markers."""
+        from .onboarding_service import initial_context, unit_content
+        try:
+            admission = self._admission(row)
+            if (admission is None or name in {item['name'] for item in row['expected_precondition']['senders']}
+                    or recipe['profile'] != 'guest' or recipe['lifecycle_operation_id'] != self.operation_id):
+                raise ValueError
+            effect = row['runtime_observation']['initial_managed'][name]
+            if set(effect) != {'intent', 'validated', 'selected', 'started', 'controlled_loaded'}:
+                raise ValueError
+            intent, prepared, selected, started, loaded = (effect[key] for key in (
+                'intent', 'validated', 'selected', 'started', 'controlled_loaded'))
+            binding, owner, request = intent['binding'], intent['owner'], intent['request']
+            receiver = admission['receivers'][name]
+            group = owner['group']
+            expected_origin = {key: binding['origin'][key] for key in ('body_ref', 'embodiment_id', 'incarnation_id')}
+            context = initial_context(json.loads(request['argv'][request['argv'].index('--initial-context-json') + 1]))
+            fingerprint = hashlib.sha256(unit_content(request['argv'])).hexdigest()
+            if (set(intent) != {'binding', 'owner', 'request', 'unit_sha256'}
+                    or set(binding) != {'schema', 'plan_digest', 'admission_sha256', 'profile_sha256', 'receiver', 'origin'}
+                    or binding['schema'] != 'cluster-managed-initial-binding/v1'
+                    or binding['admission_sha256'] != digest(admission) or binding['receiver'] != receiver
+                    or any(re.fullmatch('[0-9a-f]{64}', binding[key]) is None for key in ('profile_sha256', 'plan_digest'))
+                    or owner['plan_digest'] != binding['plan_digest'] or owner['predecessor'] is not None
+                    or owner['being_ref'] != receiver['being_ref'] or owner['origin'] != expected_origin
+                    or owner['origin']['embodiment_id'] != receiver['embodiment_id']
+                    or owner['mode'] != 'preserve' or owner['group_sha256'] != digest(group)
+                    or owner['preservation']['schema'] != 'cluster-receiving-controller-preservation/v1'
+                    or owner['preservation']['active'] is not True
+                    or owner['preservation']['runtime_sha256'] != owner['runtime_sha256']
+                    or owner['preservation']['origin'] != owner['origin']
+                    or group['selected']['tribe_ref'] != admission['tribe_ref']
+                    or group['selected']['socket'] != receiver['socket']
+                    or request['schema'] != 'cluster-guest-service-initial/v1' or request['predecessor'] is not None
+                    or request['operation_id'] != guest_bootstrap_operation_id(self.operation_id)
+                    or request['plan_digest'] != binding['plan_digest']
+                    or request['not_after_ms'] != admission['activation']['expires_at_ms']
+                    or request['argv'].count('--initial-context-json') != 1
+                    or context != dict(schema='cluster-initial-start-context/v1', owner_sha256=digest(owner),
+                        profile_sha256=binding['profile_sha256'], not_after_ms=request['not_after_ms'])
+                    or intent['unit_sha256'] != fingerprint or selected['selected_sha256'] != fingerprint
+                    or prepared['schema'] != 'cluster-guest-service-initial-candidate/v1'
+                    or prepared['candidate_sha256'] != fingerprint
+                    or started['schema'] != 'cluster-guest-service-initial-start/v1'
+                    or started['initial_service'] != prepared['initial_service']
+                    or started['service']['unit_sha256'] != fingerprint
+                    or started['service']['manager']['MainPID'] != str(started['admission_parent']['pid'])
+                    or loaded['schema'] != 'cluster-guest-initial-loaded/v1'
+                    or loaded['admission_parent'] != started['admission_parent']
+                    or loaded['runtime_sha256'] != owner['runtime_sha256']
+                    or loaded['loaded_runtime']['runtime_bundle_sha256'] != owner['runtime_sha256']
+                    or loaded['group_sha256'] != owner['group_sha256']
+                    or loaded['loaded_application']['application_sha256'] != group['application_sha256']
+                    or loaded['loaded_application']['publication_sha256'] != group['publication_sha256']
+                    or loaded['loaded_application']['visibility']['installation_sha256'] != group['installation_sha256']
+                    or loaded['receiving_readiness'] != 'unobserved'):
+                raise ValueError
+            return effect
+        except (KeyError, TypeError, ValueError, AttributeError, IndexError, OnboardingError):
+            raise OnboardingError('receiving_initial_managed_lifecycle_unobserved') from None
+
     def _qualified_preflight(self, name: str, recipe: dict, plan: dict, manifest: dict, lifecycle: dict | None) -> dict:
         """Reuse the maintained isolated reader against this exact release.
 
@@ -2590,10 +2658,16 @@ class CohortController:
         """
         if lifecycle is None or lifecycle['operation'] != 'receiving-update':
             raise OnboardingError('receiving_cohort_lifecycle_unobserved')
-        candidate = (lifecycle['intended_transition'].get('source_bootstrap', {}).get('qualification', {})
+        admission = self._admission(lifecycle)
+        if admission is not None and name not in {item['name'] for item in lifecycle['expected_precondition']['senders']}:
+            self._initial_lifecycle(lifecycle, name, recipe)
+            candidate = admission['receivers'][name]['candidate']
+            code, uid = candidate['code'], candidate['code_uid']
+        else:
+            candidate = (lifecycle['intended_transition'].get('source_bootstrap', {}).get('qualification', {})
             if recipe['profile'] == 'source' else lifecycle['intended_transition'].get('guest_bootstraps', {}).get(name, {}))
-        code = candidate.get('code' if recipe['profile'] == 'source' else 'runtime_code')
-        uid = candidate.get('code_uid')
+            code = candidate.get('code' if recipe['profile'] == 'source' else 'runtime_code')
+            uid = candidate.get('code_uid')
         if not isinstance(code, str) or not Path(code).is_absolute() or '..' in Path(code).parts or type(uid) is not int or uid < 0:
             raise OnboardingError('receiving_cohort_preflight_unobserved')
         cache_key = digest(dict(code=code, uid=uid, prepared=recipe['prepared'], manifest=manifest))
@@ -2768,6 +2842,54 @@ class CohortController:
             observations['sender_replacements'] = replacements
             row = self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
                 expected_runtime_observation=row['runtime_observation'])
+        admission = self._admission(row)
+        if admission is not None:
+            before = {item['name'] for item in row['expected_precondition']['senders']}
+            for name in sorted(set(self.owners) - before):
+                recipe = plan['receivers'][name]
+                initial = self._initial_lifecycle(row, name, recipe)
+                current, proof = current_observations[name], records[name]
+                if (current['process'] != proof['process'] or current['server'] != proof['server']
+                        or proof['process'] != initial['controlled_loaded']['process']):
+                    raise OnboardingError('receiving_initial_sender_changed')
+                observations = dict(row['runtime_observation'] or {})
+                senders = dict(observations.get('sender_initials', {}))
+                if name not in senders:
+                    gate = current['gate']
+                    if gate.get('phase') != 'unselected' or gate.get('readers') != []:
+                        raise OnboardingError('receiving_initial_sender_unfenced')
+                    command = dict(process_instance_id=gate['process_instance_id'], channel_id='tribe',
+                        expected_head=gate['head'], operation_id=control_id, release_digest=release,
+                        phase='revoke', readers=[])
+                    senders[name] = dict(process=current['process'], server=current['server'], command=command,
+                        lifecycle_operation_id=self.operation_id, initial_sha256=digest(initial['controlled_loaded']))
+                    observations['sender_initials'] = senders
+                    row = self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
+                        expected_runtime_observation=row['runtime_observation'])
+                sender = senders[name]
+                if (sender['process'] != current['process'] or sender['server'] != current['server']
+                        or sender['lifecycle_operation_id'] != self.operation_id
+                        or sender['initial_sha256'] != digest(initial['controlled_loaded'])):
+                    raise OnboardingError('receiving_initial_sender_changed')
+                now = time.time_ns() // 1_000_000
+                deadline = min(proof['observed_at_ns'] + plan['observation_window_ms'] * 1_000_000,
+                    time.monotonic_ns() + (min(plan['expires_at_ms'], proof['reader']['expires_at_ms']) - now) * 1_000_000)
+                with self._owner_deadline(self.owners[name], deadline):
+                    result = self.owners[name].prepare_apply_control(sender['command'],
+                        self.owners[name].root / 'receiving-control' / (control_id + '-initial-revoke.json'))
+                accepted = {key: result[key] for key in ('server', 'process', 'gate', 'request_sha256', 'command_sha256')}
+                if (accepted['process'] != sender['process'] or accepted['server'] != sender['server']
+                        or accepted['gate'].get('phase') != 'revoke' or accepted['gate'].get('readers') != []
+                        or accepted['gate'].get('operation_id') != control_id
+                        or accepted['gate'].get('release_digest') != release
+                        or accepted['gate'].get('request_sha256') != accepted['request_sha256']):
+                    raise OnboardingError('receiving_initial_sender_uncertain')
+                if sender.get('accepted', accepted) != accepted:
+                    raise OnboardingError('receiving_initial_sender_changed')
+                senders[name] = {**sender, 'accepted': accepted}
+                observations['sender_initials'] = senders
+                row = self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
+                    expected_runtime_observation=row['runtime_observation'])
         return row
 
     def _current_activation(self, row: dict, plan: dict, manifest: dict, activation: dict,
@@ -2806,6 +2928,32 @@ class CohortController:
         finally:
             owner.deadline_ns = previous
 
+    def _sender_revocation(self, row: dict, name: str) -> dict | None:
+        observations = row['runtime_observation'] or {}
+        before = {item['name'] for item in row['expected_precondition']['senders']}
+        if name not in before:
+            if name in observations.get('sender_replacements', {}) or name in observations.get('sender_revocations', {}):
+                raise OnboardingError('receiving_initial_sender_changed')
+            return observations.get('sender_initials', {}).get(name, {}).get('accepted')
+        if name in observations.get('sender_initials', {}):
+            raise OnboardingError('receiving_sender_barrier_changed')
+        replacement = observations.get('sender_replacements', {}).get(name)
+        return (replacement.get('accepted') if replacement is not None else
+            observations.get('sender_revocations', {}).get(name))
+
+    def _require_all_revocations(self, row: dict, activation: dict) -> None:
+        control_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'receiving-control:' + self.operation_id))
+        release = row['intent']['runtime_call']['manifest_digest']
+        for name in self.owners:
+            revoked = self._sender_revocation(row, name)
+            if (not isinstance(revoked, dict) or revoked['process'] != activation['records'][name]['process']
+                    or revoked['server'] != activation['records'][name]['server']
+                    or revoked['gate'].get('phase') != 'revoke' or revoked['gate'].get('readers') != []
+                    or revoked['gate'].get('operation_id') != control_id
+                    or revoked['gate'].get('release_digest') != release
+                    or revoked['gate'].get('request_sha256') != revoked.get('request_sha256')):
+                raise OnboardingError('receiving_sender_barrier_changed')
+
     def _fence_partial_activation(self, activation: dict) -> None:
         """Retain a finite forward repair before revoking known positive grants."""
         row = self._row()
@@ -2840,10 +2988,19 @@ class CohortController:
                 command = dict(process_instance_id=gate['process_instance_id'], channel_id='tribe',
                     expected_head=gate['head'], operation_id=repair_id, release_digest=release, phase='revoke', readers=[])
                 if gate['phase'] == 'revoke':
-                    original = observations.get('sender_revocations', {}).get(name)
-                    replacement = observations.get('sender_replacements', {}).get(name)
-                    if replacement is not None:
-                        original = replacement.get('accepted')
+                    try:
+                        original = self._sender_revocation(row, name)
+                    except OnboardingError:
+                        repairs[name] = {'state': 'uncertain'}
+                        continue
+                    pending = observations.get('sender_initials', {}).get(name)
+                    if original is None and pending is not None:
+                        try:
+                            original = owner.prepare_apply_control(pending['command'], owner.root /
+                                'receiving-control' / (old_id + '-initial-revoke.json'))
+                        except (OnboardingError, OSError):
+                            repairs[name] = {'state': 'uncertain'}
+                            continue
                     if (not isinstance(original, dict) or any(current[key] != original[key]
                             for key in ('process', 'server', 'gate'))):
                         repairs[name] = {'state': 'uncertain'}
@@ -2913,6 +3070,8 @@ class CohortController:
                     # An unacknowledged replacement remains uncertain. It must
                     # never inherit the old process's observation.
                     records[name] = value.get('accepted', value)
+                for name, value in (row['runtime_observation'] or {}).get('sender_initials', {}).items():
+                    records[name] = value.get('accepted', value)
                 activation = {'records': records}
             elif 'cohort_reassessment' not in row['runtime_observation']:
                 raise OnboardingError('receiving_cohort_reassessment_required')
@@ -2970,6 +3129,11 @@ class CohortController:
             if set(row['runtime_observation'].get('sender_selections', {})) == set(self.owners):
                 return self._confirmed_selection(row, plan, manifest, activation)
             control_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'receiving-control:' + self.operation_id))
+            try:
+                self._require_all_revocations(row, activation)
+            except (OnboardingError, OSError):
+                self._fence_partial_activation(activation)
+                raise
             for name in sorted(self.owners):
                 # Refresh all required observers before each positive step. A
                 # local roster CAS remains enforced by each actual sender.
@@ -2978,10 +3142,7 @@ class CohortController:
                 except (OnboardingError, OSError):
                     self._fence_partial_activation(activation)
                     raise
-                revoked = (row['runtime_observation'] or {}).get('sender_revocations', {}).get(name)
-                replacement = row['runtime_observation'].get('sender_replacements', {}).get(name)
-                if replacement is not None:
-                    revoked = replacement.get('accepted')
+                revoked = self._sender_revocation(row, name)
                 if (not isinstance(revoked, dict) or revoked['process'] != activation['records'][name]['process']
                         or revoked['server'] != activation['records'][name]['server']
                         or revoked['gate'].get('phase') != 'revoke'

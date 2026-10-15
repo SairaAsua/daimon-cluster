@@ -4,7 +4,7 @@ import json
 import tempfile
 import time
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 
@@ -175,7 +175,7 @@ def test_lost_enrollment_and_registry_ack_resume_same_holder_and_native_body(tmp
             thread.join(timeout=5)
 
 
-def initial_managed_fixture(tmp_path, initial):
+def initial_managed_fixture(tmp_path, initial, *, complete_origins=False):
     """Real journal/job/reader/root orchestration, fake manager and native RPC.
 
     This does not qualify an actual guest, signed application, native process
@@ -184,7 +184,7 @@ def initial_managed_fixture(tmp_path, initial):
     from clusterctl.onboarding import JobStore
     from tests.test_onboarding import plan as make_plan
     from tests.test_receiving_cohort_control import admission_fixture
-    cohort, owners, journal, row, _ = admission_fixture(tmp_path)
+    cohort, owners, journal, row, _ = admission_fixture(tmp_path, complete_origins=complete_origins)
     plan = make_plan('newcomer')
     jobs = tmp_path / 'jobs'
     jobs.mkdir(mode=0o700)
@@ -203,7 +203,7 @@ def initial_managed_fixture(tmp_path, initial):
     parent = root_controller._parent({})
     process = {**parent, 'pid': 223, 'start_ticks': 10}
     expected = dict(body_ref='codex:fixture:newcomer', embodiment_id=approved['embodiment_id'],
-        incarnation_id='incarnation:fixture')
+        incarnation_id=owners['newcomer'].server.get('incarnation_id', 'incarnation:fixture'))
     selected = dict(tribe_ref='tribe:fixture', socket=str(owners['newcomer'].socket),
         application='/home/agent/synthetic/application', visibility='/home/agent/synthetic/visibility.json')
     group = dict(selected=selected, application_sha256='a' * 64,
@@ -214,7 +214,8 @@ def initial_managed_fixture(tmp_path, initial):
     owner = dict(plan_digest=digest(plan), genesis_digest='d' * 64, origin=expected,
         being_ref=approved['being_ref'], runtime_sha256='e' * 64, group=group,
         group_sha256=digest(group), predecessor=None, observer_startup=startup, mode='preserve',
-        preservation=dict(active=True, not_before_ms=0, not_after_ms=time.time_ns() // 1_000_000 + 600000))
+        preservation=dict(schema='cluster-receiving-controller-preservation/v1', runtime_sha256='e' * 64,
+            origin=expected, active=True, not_before_ms=0, not_after_ms=time.time_ns() // 1_000_000 + 600000))
     gate = dict(controlled=True, process_id=process['pid'], phase='unselected', readers=[])
     observed = dict(origin=expected, process=process, admission_parent=parent, group=selected,
         runtime_sha256=owner['runtime_sha256'], responder_association='same-connection',
@@ -352,3 +353,141 @@ def test_fresh_root_effects_share_the_fixed_authorization_remainder(tmp_path, in
     managed.execute_initial(plan, cohort)
     assert all(0 < budget <= .7 for action, budget in managed.backend.root_budgets
         if action in {'bootstrap-start', 'bootstrap-select'})
+
+
+def admission_activation_fixture(tmp_path, initial):
+    """Connect the real first-load journal producer to fake qualified peers.
+
+    The SDK reader, job, root state machine and controls use real protected
+    records. Native/group/manager/identity/registry seams remain explicit fakes;
+    this does not claim installed or genuine three-being receiving acceptance.
+    """
+    from clusterctl.onboarding_code_successor import plan_update
+    managed, plan, cohort, manager, observed, _, _, _ = initial_managed_fixture(
+        tmp_path, initial, complete_origins=True)
+    row = cohort._row()
+    admission = row['intended_transition']['cohort_admission']
+    epoch = '1' * 64
+    application = observed['group_runtime_status']['loaded_application']
+    application.update(loaded_view_sha256='9' * 64, tribe={'policy': {'tribe_ref': admission['tribe_ref']}},
+        shared_relationships=True, communication_store_role='ledger',
+        shared_stores={'ledger': {'schema_versions': {'communication': 4}}},
+        authorities={owner.being: dict(accepted_manifest_hashes=[epoch], active_manifest_hash=epoch,
+            active_control_head='control:fixture') for owner in cohort.owners.values()})
+    application['visibility'].update(catalog_mode='validate', catalog_validation='validated',
+        release_enabled=True, catalog_schema_version=1)
+    observed['runtime_status']['loaded_runtime'].update(authority_epoch={'accepted_manifest_hashes': [epoch]},
+        runtime_id='runtime:newcomer')
+    newcomer = cohort.owners['newcomer']
+    observed['group_runtime_status']['receiving']['channels']['tribe'].update({key: value for key, value
+        in newcomer.gate.items() if key not in {'controlled', 'process_id', 'phase', 'readers'}})
+    observed['group_runtime_status']['receiving']['channels']['tribe']['process_instance_id'] = 'newcomer:first'
+    managed.execute_initial(plan, cohort)
+    recipes = {}
+    for name, owner in cohort.owners.items():
+        if name == 'newcomer':
+            owner.process, owner.parent = observed['process'], observed['admission_parent']
+            owner.gate = copy.deepcopy(observed['group_runtime_status']['receiving']['channels']['tribe'])
+        else:
+            owner.parent = dict(uid=1, pid=1, start_ticks=2, boot_id='fixture')
+        owner.loaded = copy.deepcopy(observed['runtime_status']['loaded_runtime'])
+        owner.loaded.update(process_id=owner.process['pid'], runtime_id='runtime:' + name)
+        owner.loaded['qualified_startup'].update(process_id=owner.process['pid'], startup_instance_id=(
+            'fixture-first-start' if name == 'newcomer' else name))
+        owner.application = {key: copy.deepcopy(value) for key, value in application.items() if key != 'reader_gates'}
+        owner.identity = dict(being_ref=owner.being, manifest_hash=epoch, credential_ref='credential:' + name)
+        original = owner.status
+        def status(self, original=original):
+            result = original()
+            result['runtime_status'].update(loaded_runtime=copy.deepcopy(self.loaded),
+                loaded_application=copy.deepcopy(self.application), receiving=dict(features=['signed-roster-cas/v1'],
+                    rosters={'tribe': dict(schema='dm.runtime.tribe-roster/v1', roster_sha256='5' * 64,
+                        required_authority_epochs=[epoch])}))
+            return result
+        owner.status = MethodType(status, owner)
+        def qualified(self, *, expires_at_ms, require_admitted, **_):
+            assert require_admitted
+            return {**self.status(), 'admission_parent': copy.deepcopy(self.parent), 'identity': self.identity,
+                'verified_identity': dict(identity=self.identity, runtime_bundle_sha256=self.loaded['runtime_bundle_sha256'],
+                    authority_control_head='control:fixture', expires_at_ms=expires_at_ms)}
+        owner.qualified_identity = MethodType(qualified, owner)
+        lifecycle_id = cohort.operation_id
+        if name != 'newcomer':
+            life = plan_update(cohort.journal, manifest_digest=row['intent']['runtime_call']['manifest_digest'],
+                target='lifecycle:' + name, expected_precondition={},
+                intended_transition={'guest_bootstraps': {name: dict(
+                    runtime_code=admission['receivers'][name]['candidate']['code'],
+                    code_uid=admission['receivers'][name]['candidate']['code_uid'])}}, audit_identity={'actor': 'fixture'})
+            lifecycle_id = life['operation_id']
+            cohort.journal.advance(lifecycle_id, 'runtime-dispatching', runtime_observation={'guest_bootstraps': {
+                name: {'controlled_loaded': dict(process=owner.process, admission_parent=owner.parent,
+                    loaded_runtime=owner.loaded, loaded_application=owner.application)}}})
+        startup = owner.loaded['qualified_startup']
+        recipes[name] = {**admission['receivers'][name]['recipe'], 'lifecycle_operation_id': lifecycle_id,
+            'selection': dict(receiving_code=startup['code_digest'], matrix_sdk=startup['matrix_wheel_sha256'],
+                runtime_bundle_sha256=owner.loaded['runtime_bundle_sha256'],
+                application_sha256=application['application_sha256'], publication_sha256=application['publication_sha256'],
+                visibility_installation_sha256=application['visibility']['installation_sha256'])}
+    cohort.retain_admission_activation({**admission['activation'], 'roster_sha256': '5' * 64, 'receivers': recipes})
+    return cohort, manager
+
+
+def test_first_load_is_consumed_by_the_same_cohort_and_all_senders_activate(tmp_path, initial):
+    cohort, manager = admission_activation_fixture(tmp_path, initial)
+    before = copy.deepcopy(cohort._row()['runtime_observation']['sender_revocations'])
+    prepared = cohort.prepare_activation()
+    row = cohort._row()
+    assert row['runtime_observation']['sender_revocations'] == before
+    assert set(row['runtime_observation']['sender_initials']) == {'newcomer'}
+    assert all(owner.gate['phase'] == 'revoke' and owner.gate['readers'] == [] for owner in cohort.owners.values())
+    result = cohort.activate()
+    assert len(result['readers']) == 3 and result['readers'] == prepared['readers']
+    assert all(owner.gate['readers'] == result['readers'] for owner in cohort.owners.values())
+    counts = [owner.effects for owner in cohort.owners.values()]
+    assert cohort.activate() == result and [owner.effects for owner in cohort.owners.values()] == counts
+    assert manager.starts == 1
+
+
+def test_lost_initial_revoke_is_recoverable_before_any_activation_vector(tmp_path, initial, monkeypatch):
+    cohort, _ = admission_activation_fixture(tmp_path, initial)
+    owner = cohort.owners['newcomer']
+    actual = owner.prepare_apply_control
+    def lost(*args):
+        actual(*args)
+        raise OSError('synthetic lost initial revoke return')
+    monkeypatch.setattr(owner, 'prepare_apply_control', lost)
+    with pytest.raises(OSError, match='lost initial revoke'):
+        cohort.prepare_activation()
+    row = cohort._row()
+    assert 'cohort_activation' not in row['runtime_observation']
+    assert 'accepted' not in row['runtime_observation']['sender_initials']['newcomer']
+    assert all(peer.gate['readers'] == [] for peer in cohort.owners.values())
+    monkeypatch.setattr(owner, 'prepare_apply_control', actual)
+    repairs = cohort.reconcile_reassessment()
+    assert set(repairs) == set(cohort.owners) and all(value['state'] == 'disabled' for value in repairs.values())
+    assert all(peer.gate['phase'] == 'select' and peer.gate['readers'] == [] for peer in cohort.owners.values())
+
+
+def test_missing_initial_revoke_cannot_enable_an_old_sender(tmp_path, initial):
+    cohort, _ = admission_activation_fixture(tmp_path, initial)
+    cohort.prepare_activation()
+    row = cohort._row()
+    changed = copy.deepcopy(row['runtime_observation'])
+    del changed['sender_initials']['newcomer']['accepted']
+    cohort.journal.advance(cohort.operation_id, row['state'], runtime_observation=changed,
+        expected_runtime_observation=row['runtime_observation'])
+    with pytest.raises(OnboardingError, match='sender_barrier_changed'):
+        cohort.activate()
+    assert all(peer.gate['readers'] == [] for peer in cohort.owners.values())
+
+
+def test_initial_context_marker_cannot_replace_the_produced_load(tmp_path, initial):
+    cohort, _ = admission_activation_fixture(tmp_path, initial)
+    row = cohort._row()
+    changed = copy.deepcopy(row['runtime_observation'])
+    changed['initial_managed']['newcomer']['intent']['request']['not_after_ms'] += 1
+    cohort.journal.advance(cohort.operation_id, row['state'], runtime_observation=changed,
+        expected_runtime_observation=row['runtime_observation'])
+    with pytest.raises(OnboardingError, match='initial_managed_lifecycle_unobserved'):
+        cohort.prepare_activation()
+    assert all(peer.gate['readers'] == [] for peer in cohort.owners.values())

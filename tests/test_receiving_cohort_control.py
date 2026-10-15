@@ -274,7 +274,7 @@ def fixture(tmp_path):
     return path, original, runtime, owners, journal, row['operation_id']
 
 
-def admission_fixture(tmp_path):
+def admission_fixture(tmp_path, *, complete_origins=False):
     from tests.test_receiving_update_preflight import fixture as reader_fixture
     code, code_digest, _, manifest_path, manifest, _ = reader_fixture(tmp_path)
     owners, previous = {}, {}
@@ -282,6 +282,8 @@ def admission_fixture(tmp_path):
         root = tmp_path / name
         root.mkdir(mode=0o700)
         owners[name] = FakeOwner(root, name)
+        if complete_origins:
+            owners[name].server.update(body_ref='codex:fixture:' + name, incarnation_id='incarnation:' + name)
         previous[name] = {'previous': name}
     manifest['required_receivers'] = [dict(being_ref=owner.being,
         embodiment_id=owner.server['embodiment_id'], expected_selection_sha256=digest(previous[name]))
