@@ -1,6 +1,6 @@
 """A read-only Mini App client of existing publication and style authorities.
 
-Public Telegram app links published through any selected home's ordinary owner
+Public app links published through any selected home's ordinary owner
 workflow become shared navigation. Only this home may contribute private links
 through its current authorized reader. No launch is a permission grant.
 """
@@ -38,6 +38,14 @@ def app_url(value):
         return False
 
 
+def owner_app_url(app):
+    """Only the configured, qualified owner application is a web launch target."""
+    home = app.homemaker_home
+    if home and app.designs and app.designs.owner_application:
+        return app.homes[home]['public_url'] + '/homemaker/miniapp.html'
+    return None
+
+
 def catalog(app, home, subject, vpn):
     # Aggregate only registered members of this home's already-selected public
     # ring. Do not invent membership from labels or forward its private session.
@@ -58,10 +66,13 @@ def catalog(app, home, subject, vpn):
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(read, selected))
     apps, seen, unavailable = [], set(), len(homes) - len(selected)
+    owner_url = owner_app_url(app)
     for ref, entries, available in results:
         unavailable += not available
         for entry in entries:
-            if entry.get('kind') != 'link' or not app_url(entry.get('url')):
+            url = entry.get('url')
+            owner_app = owner_url is not None and url == owner_url
+            if entry.get('kind') != 'link' or not (owner_app or app_url(url)):
                 continue
             # Private links are never collapsed into a public author's entry.
             key = (entry['url'], ref)
@@ -71,6 +82,7 @@ def catalog(app, home, subject, vpn):
             apps.append({'id': ref + ':' + entry['artifact_ref'],
                          'title': entry['title'], 'summary': entry.get('summary', ''),
                          'url': entry['url'], 'author': app.homes[ref]['name'],
+                         'launch': 'web' if owner_app else 'telegram',
                          'source': app.homes[ref]['public_url'] + '/view/' + entry['artifact_ref'],
                          'version_ref': entry['version_ref']})
             if len(apps) == 256:

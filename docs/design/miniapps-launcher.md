@@ -41,9 +41,20 @@ is needed. Catalog rows retain author, resource identity and revision. A link
 does not grant access to its target's private sessions or data. The navigation
 projection is not a second resource registry.
 
-Only canonical `https://t.me/<bot>?startapp=...` or named-app URLs are recognized
-in this slice. Other home links remain ordinary publications. Each app opens
-through its own Telegram launch/auth path. The initial catalog may include
+Canonical `https://t.me/<bot>?startapp=...` and named-app URLs use Telegram's
+launch method. One qualified web target is also recognized: the exact compact
+entry of the configured Homemaker owner application. Publish that official URL
+once through the existing link publisher; every selected home discovers it.
+The catalog marks this entry `launch: web`, and its ordinary HTTPS anchor
+navigates the same WebView instead of calling `openTelegramLink`. Other links
+remain ordinary publications, including old editor origins, artifact previews,
+and URLs with added identity or return parameters. No arbitrary HTTPS app is
+promoted by its title. No additional BotFather registration, iframe, editor,
+style store or identity parameters are needed. Shared login and the owner
+application resolve the current human/pair and keep its authored workshop shell.
+Browser navigation is qualified separately from physical Telegram launch.
+
+The initial catalog may include
 receiver-specific tools; their author labels remain visible instead of claiming
 that everyone has access to the same native conversations.
 
