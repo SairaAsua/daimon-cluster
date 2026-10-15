@@ -177,7 +177,15 @@ def _runtime_imports(venv: Path, code: Path, *, code_uid: int = 0,
         raise OnboardingError('installed_onboarding_sdk_changed')
     target = root / 'runtime-imports'
     receipt = root / 'runtime-imports.json'
-    with being_seed._locked(root):
+    # Prepared imports are immutable: serving startup and owner observation
+    # must not interrupt each other's full verification. Construction and SDK
+    # installation retain exclusive ownership of this same lock.
+    prepared = target.exists() and receipt.exists()
+    with being_seed._locked(root, shared=prepared):
+        if prepared and (not target.exists() or not receipt.exists()):
+            # Do not build or mint a receipt while holding read ownership if
+            # preparation changed before acquiring it.
+            raise OnboardingError('qualified_runtime_imports_required')
         temporary = root / ('runtime-imports-' + uuid.uuid4().hex)
         building = not target.exists() and not target.is_symlink()
         if building:

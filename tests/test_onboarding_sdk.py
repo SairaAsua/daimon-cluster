@@ -281,3 +281,62 @@ except OnboardingError as error:
                                          'qualified_runtime_module_required'}
     assert snapshots[0]['startup_instance_id'] != snapshots[1]['startup_instance_id']
     assert not marker.exists() and not list(home.rglob('custody.json'))
+
+
+def test_prepared_import_readers_do_not_interrupt_each_other_or_admit_a_writer(tmp_path, monkeypatch):
+    """A startup and its status CLI verify the same immutable SDK concurrently."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from clusterctl import being_seed
+    code, fingerprint, home = fixture(tmp_path)
+    venv = onboarding_sdk.install(home, code, fingerprint, code_uid=os.geteuid())
+    imports = onboarding_sdk.runtime_imports(venv, code, code_uid=os.geteuid())
+    before = {p.relative_to(venv.parent): p.read_bytes()
+              for p in imports.rglob('*') if p.is_file()}
+    before[Path('runtime-imports.json')] = (venv.parent/'runtime-imports.json').read_bytes()
+    entered, release = threading.Event(), threading.Event()
+    original = onboarding_sdk._pip
+    def pause_first_reader(*args):
+        if threading.current_thread().name.startswith('sdk-reader'):
+            entered.set()
+            assert release.wait(10), 'second reader never completed'
+        return original(*args)
+    monkeypatch.setattr(onboarding_sdk, '_pip', pause_first_reader)
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix='sdk-reader') as pool:
+        first = pool.submit(onboarding_sdk.runtime_imports, venv, code, code_uid=os.geteuid())
+        try:
+            assert entered.wait(10), 'first reader never reached dependency verification'
+            # Actual installation/build ownership must still exclude readers.
+            with pytest.raises(being_seed.SeedError, match='seed_operation_in_progress'):
+                with being_seed._locked(venv.parent):
+                    pytest.fail('a writer crossed active immutable verification')
+            assert onboarding_sdk.runtime_imports(venv, code, code_uid=os.geteuid()) == imports
+        finally:
+            release.set()
+        assert first.result(timeout=10) == imports
+    assert all((venv.parent/path).read_bytes() == data for path, data in before.items())
+    with being_seed._locked(venv.parent):
+        with pytest.raises(being_seed.SeedError, match='seed_operation_in_progress'):
+            onboarding_sdk.runtime_imports(venv, code, code_uid=os.geteuid())
+
+
+def test_changed_preparation_cannot_build_or_issue_a_receipt_under_read_ownership(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from clusterctl import being_seed
+    code, fingerprint, home = fixture(tmp_path)
+    venv = onboarding_sdk.install(home, code, fingerprint, code_uid=os.geteuid())
+    imports = onboarding_sdk.runtime_imports(venv, code, code_uid=os.geteuid())
+    receipt = venv.parent/'runtime-imports.json'
+    original = being_seed._locked
+    @contextmanager
+    def changed(directory, *, shared=False):
+        with original(directory, shared=shared):
+            if directory == venv.parent and shared:
+                receipt.rename(venv.parent/'retained-import-receipt.json')
+            yield
+    monkeypatch.setattr(being_seed, '_locked', changed)
+    with pytest.raises(OnboardingError, match='qualified_runtime_imports_required'):
+        onboarding_sdk.runtime_imports(venv, code, code_uid=os.geteuid())
+    assert not receipt.exists()
+    assert imports.is_dir()
+    assert not list(venv.parent.glob('runtime-imports-*'))
