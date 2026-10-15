@@ -715,7 +715,10 @@ def main(argv: list[str] | None = None) -> int:
         matrix_commit = sdk_parameters.get('matrix_commit', onboarding_sdk.MATRIX_COMMIT)
         if args.action == 'sdk-prepare':
             stage = 'sdk-preparation'
-            onboarding_sdk.install(args.home, runtime, args.runtime_digest or plan['release_digest'], **sdk_parameters)
+            venv = onboarding_sdk.install(args.home, runtime, args.runtime_digest or plan['release_digest'], **sdk_parameters)
+            if sdk_parameters:
+                stage = 'sdk-imports'
+                onboarding_sdk.runtime_imports(venv, runtime, **sdk_parameters)
             print(json.dumps(dict(ready=True, matrix_commit=matrix_commit)))
             return 0
         if args.action == 'sdk-observe':

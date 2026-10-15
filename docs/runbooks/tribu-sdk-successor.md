@@ -104,10 +104,19 @@ to prepare a source test.
 
 The guest-owner module really requires UID1000. CI maps its current disposable
 runner user to kernel UID/GID1000 in a user namespace, retaining the same interpreter,
-SDK and filesystem ownership. The regular test pass deselects that module; its
+SDK and filesystem ownership. Use unprivileged `unshare --map-user=1000
+--map-group=1000`: this maps only the invoking owner, without subordinate-ID
+allocation or a second setgroups call. A privileged multi-range mapping requires
+unrelated subuid grants and is the wrong mechanism. The regular test pass deselects that module; its
 canonical-owner pass runs it once. Do not change the runtime owner guard or fake
 geteuid to make it pass. Slow-daemon tests delay the actual pinned child process;
 a forwarding proxy changes SO_PEERCRED and is not the same native responder.
+Qualified `sdk-prepare` installs and verifies the closed runtime import tree before
+returning ready. Do this dependency preparation before freezing a finite owner
+operation or stopping a receiver; the first import-tree construction must not
+consume the bounded live observation budget. Subsequent calls verify and reuse
+that immutable tree. A failed preparation is not a reason to recreate custody,
+relax file durability or increase the live-control deadline.
 Own a finite synthetic admission producer and its named synthetic native unit in
 the same qualification scope. Stop that unit before retiring the producer; on
 interruption reconcile and close the unit as part of the same cleanup. Leaving

@@ -153,8 +153,8 @@ def test_guest_owner_contract_uses_kernel_uid_mapping_and_is_not_run_twice() -> 
     step = workflow.split('      - name: Test the guest owner under its actual UID contract\n', 1)[1].split('      - name:', 1)[0]
     assert "contains(needs.scope.outputs.pytest_args, 'tests/test_guest_owner_bootstrap.py')" in step
     assert "needs.scope.outputs.profile == 'full'" in step
-    assert 'qualification_uid="$(id -u)"' in step and 'qualification_gid="$(id -g)"' in step
-    assert 'sudo unshare --user --map-users="$qualification_uid,1000,1" --map-groups="$qualification_gid,1000,1"' in step
-    assert '--setuid=1000 --setgid=1000' in step
+    assert 'unshare --user --map-user=1000 --map-group=1000' in step
+    assert 'sudo unshare' not in step and '--setgid' not in step
+    assert 'test "${RUNNER_ENVIRONMENT:-}" = github-hosted' in step
     assert 'tests/test_guest_owner_bootstrap.py' in step and '-W error::ResourceWarning' in step
     assert workflow.count('--deselect=tests/test_guest_owner_bootstrap.py') == 1

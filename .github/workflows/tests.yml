@@ -439,10 +439,13 @@ jobs:
         run: |
           set -eu
           onboarding_python="$(python -c 'import sys; print(sys.executable)')"
-          qualification_uid="$(id -u)"
-          qualification_gid="$(id -g)"
-          sudo unshare --user --map-users="$qualification_uid,1000,1" --map-groups="$qualification_gid,1000,1" \
-            --setuid=1000 --setgid=1000 env LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$onboarding_python" -B -m pytest -q \
+          restriction=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if test -e "$restriction" && test "$(cat "$restriction")" != 0; then
+            test "${RUNNER_ENVIRONMENT:-}" = github-hosted
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-user=1000 --map-group=1000 \
+            "$onboarding_python" -B -m pytest -q \
             tests/test_guest_owner_bootstrap.py \
             -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning --durations=5
       - name: Prove root worker and canonical service owner separation
