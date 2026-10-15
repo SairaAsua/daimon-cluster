@@ -9,6 +9,28 @@
     window.addEventListener('home-style:refresh',()=>channel?.postMessage('changed'));
     return;
   }
+  // Independent apps consume a public author stylesheet. It blocks the first
+  // paint in their head; later replacements apply only after a successful load.
+  const sheet=document.querySelector('link[data-home-style]');
+  if(sheet){
+    const initial=sheet.href;let active=sheet,pending=null,timer;
+    function cancel(){if(pending){clearTimeout(pending.deadline);pending.node.remove();pending=null;}}
+    function refresh(){
+      if(document.visibilityState!=='visible'||pending)return;
+      const node=document.createElement('link'),url=new URL(initial);
+      url.searchParams.set('refresh',String(Date.now()));node.rel='stylesheet';node.href=url.href;
+      const request={node};request.deadline=setTimeout(()=>{if(pending===request)cancel();},10000);pending=request;
+      node.onload=()=>{if(pending!==request)return;clearTimeout(request.deadline);pending=null;active.remove();active=node;window.dispatchEvent(new CustomEvent('home-style:resolved'));};
+      node.onerror=()=>{if(pending===request)cancel();};document.head.append(node);
+    }
+    function foreground(){clearTimeout(timer);if(document.visibilityState!=='visible'){cancel();return;}refresh();timer=setTimeout(foreground,15000);}
+    document.addEventListener('visibilitychange',foreground);
+    window.addEventListener('pageshow',event=>{if(event.persisted)foreground();});
+    window.addEventListener('pagehide',()=>{clearTimeout(timer);cancel();});
+    window.addEventListener('home-style:refresh',refresh);
+    timer=setTimeout(foreground,15000);
+    return;
+  }
   const names={background:['--space','--home-background','--dm-background'],surface:['--panel','--panel2','--home-surface','--dm-surface'],text:['--ink','--muted','--home-text','--dm-text'],accent:['--cyan','--amber','--mauve','--line','--home-accent','--dm-accent'],bodyFont:['--home-font','--dm-body-font'],headingFont:['--home-heading-font','--dm-heading-font'],radius:['--home-radius','--dm-radius'],gap:['--home-gap','--dm-gap']};
   let current=null, request=null, timer;
   const match=location.pathname.match(/^\/view\/([a-f0-9]{32})$/);

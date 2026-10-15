@@ -183,3 +183,37 @@ def test_retired_local_workshop_link_is_not_a_canonical_web_app(system):
     app.designs = SimpleNamespace(owner_application=object())
     publish_owner_link(app, states, app.homes['one']['public_url'] + '/homemaker/miniapp.html')
     assert 'Home Maker' not in {e['title'] for e in catalog(app, 'one', None, False)['apps']}
+
+
+def test_first_response_contains_local_cards_style_and_versioned_public_assets(system):
+    from clusterctl.homes.styles import StyleConsumer
+    from urllib.parse import urlsplit
+    import re
+    app,_=system;populated(app);token,_=approved(app)
+    class PublicStyle:
+        def resolve(self,*args,**kwargs):
+            return {'contract':'homemaker.resolved/v1','appearance':{
+                'background':'#eeeedd','surface':'#ffffff','text':'#243624','accent':'#456745',
+                'bodyFont':'Georgia, serif','headingFont':'Georgia, serif','gap':'24px','radius':'12px','scheme':'light'}}
+    app.styles=StyleConsumer(PublicStyle(),app.authority,app.homes)
+    with serving(handler(app)) as base:
+        headers={'Host':'one.example.test','Cookie':'__Host-home='+token}
+        with urlopen(Request(base+'/apps/',headers=headers)) as response:
+            body=response.read().decode()
+            assert response.headers['Cache-Control']=='no-store'
+        assert '--dm-background:#eeeedd' in body and '>PrivateOwn</span>' in body
+        assert 'initial-apps' in body and 'PublicApp' not in body  # Foreign discovery is incremental.
+        asset=re.search(r'(/apps/launcher.js\?v=[a-f0-9]{16})',body).group(1)
+        with urlopen(Request(base+asset,headers=headers)) as response:
+            assert 'immutable' in response.headers['Cache-Control'];etag=response.headers['ETag']
+        try:
+            urlopen(Request(base+asset,headers={**headers,'If-None-Match':etag}))
+        except HTTPError as response:
+            assert response.code==304;response.close()
+        else:
+            raise AssertionError('public unchanged code was retransmitted')
+        with urlopen(Request(base+'/apps/launcher.js?v=stale',headers=headers)) as response:
+            assert 'immutable' not in response.headers['Cache-Control']
+        app.sessions.revoke(home='one',token=token)
+        with urlopen(Request(base+'/apps/',headers=headers)) as response:
+            assert b'PrivateOwn' not in response.read()

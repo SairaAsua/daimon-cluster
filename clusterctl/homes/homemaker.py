@@ -165,7 +165,7 @@ class Homemaker:
                           {key:value for key,value in payload.items() if key != 'audience'})
 
     def surface(self, home, value):
-        if value in ('default', 'home', 'homemaker', 'apps'):
+        if value in ('default', 'home', 'homemaker', 'apps', 'sessions', 'nexus'):
             return value
         if not isinstance(value, str) or not any(
                 entry['artifact_ref'] == value for entry in self.app.publication(home)['entries']):
@@ -241,7 +241,18 @@ document.addEventListener('homemaker:default-saved',()=>window.dispatchEvent(new
 window.addEventListener('pagehide',event=>{if(!event.persisted)app.destroy();});
 '''
 
-OWNER_BOOTSTRAP = '''import {mountOwnerEntry} from './lib/owner-entry.js';
+APPS_LINK = '<a class="button line-button apps-return" href="https://apps.dmn.homes/">▦ Apps</a>'
+# The source reports local changes through this existing event. Do not replace
+# its internal BackButton, change persistence or intercept unrelated links.
+APPS_NAVIGATION = '''
+let localChanges = false;
+document.addEventListener('homemaker:unsaved', () => { localChanges = true; });
+document.querySelector('.apps-return')?.addEventListener('click', event => {
+  if (localChanges && !window.confirm('Hay cambios locales sin guardar. ¿Volver a Apps igualmente?')) event.preventDefault();
+});
+'''
+
+OWNER_BOOTSTRAP = APPS_NAVIGATION + '''import {mountOwnerEntry} from './lib/owner-entry.js';
 mountOwnerEntry().catch(() => {
   const message = document.createElement('p');
   message.setAttribute('role', 'alert');
@@ -262,8 +273,11 @@ def editor_page(provider, entry='index.html', *, context='pair'):
     # tab-local; shadow DOM is style isolation, not a security boundary. Published
     # artifacts retain the separate gateway's opaque-origin sandbox.
     body = provider.asset(entry).read_bytes()
+    body = body.replace(b'<nav aria-label="El taller">', APPS_LINK.encode() + b'<nav aria-label="El taller">', 1)
     body = body.replace(b'<html ', (b'<html data-style-surface="homemaker" ' +
         (b'data-style-viewer="personal" ' if context == 'personal' else b'')), 1)
+    if getattr(provider, 'owner_application', None):
+        body = body.replace(b'</head>', b'<link rel="modulepreload" href="/homemaker/lib/owner-entry.js"><link rel="modulepreload" href="/homemaker/app.js"></head>')
     return body.replace(b'data-builder-app', b'data-trusted-builder').replace(
         b'</body>', b'<script src="/access-client.js"></script><script src="/home-style.js"></script><script type="module" src="/homemaker/bootstrap.js"></script></body>')
 
@@ -286,6 +300,7 @@ def routes(handler, app, method, data=b''):
             raise ValueError('invalid_design_asset')
         asset = provider.asset('assets/' + name)
         handler.respond(200, asset.read_bytes(), mimetypes.guess_type(asset.name)[0] or 'application/octet-stream',
+                        cache_control='public, max-age=0, must-revalidate',
                         headers=(('Access-Control-Allow-Origin', '*'),));return True
     if not path.startswith('/homemaker/'):
         return False
@@ -314,7 +329,7 @@ def routes(handler, app, method, data=b''):
         auth, script = auth_controls(None, False, bool(app.passkeys), handler.path, bool(app.sso))
         body = ('<!doctype html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
                 '<link rel="stylesheet" href="/home.css"><title>Tu taller · Homemaker</title>'+presentation+script+
-                '<main><h1>Tu taller de estilos</h1><p>Entrá con tu identidad habitual para elegir el estilo de tus espacios.</p>'+
+                '<main>'+APPS_LINK+'<h1>Tu taller de estilos</h1><p>Entrá con tu identidad habitual para elegir el estilo de tus espacios.</p>'+
                 auth+'<p id="passkey-status" role="status" aria-live="polite"></p></main></html>')
         handler.respond(200, body.encode(), 'text/html; charset=utf-8', telegram_sdk=miniapp);return True
     owner_app = getattr(provider, 'owner_application', None)
@@ -378,7 +393,9 @@ def routes(handler, app, method, data=b''):
             handler.respond(200, editor_page(provider, entry, context=context), 'text/html; charset=utf-8',
                             style_inline=True, telegram_sdk=entry == 'miniapp.html');return True
         if path == '/homemaker/bootstrap.js':
-            handler.respond(200, (OWNER_BOOTSTRAP if owner_app else BOOTSTRAP).encode(), 'text/javascript; charset=utf-8');return True
+            handler.respond(200, (OWNER_BOOTSTRAP if owner_app else BOOTSTRAP).encode(), 'text/javascript; charset=utf-8',
+                            cache_control='private, max-age=0, must-revalidate');return True
         asset = provider.asset(unquote(path.removeprefix('/homemaker/')))
-        handler.respond(200, asset.read_bytes(), mimetypes.guess_type(asset.name)[0] or 'application/octet-stream');return True
+        handler.respond(200, asset.read_bytes(), mimetypes.guess_type(asset.name)[0] or 'application/octet-stream',
+                        cache_control='private, max-age=0, must-revalidate');return True
     raise ValueError('unknown_homemaker_operation')

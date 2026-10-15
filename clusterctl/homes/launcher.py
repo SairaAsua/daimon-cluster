@@ -6,6 +6,8 @@ through its current authorized reader. No launch is a permission grant.
 """
 from concurrent.futures import ThreadPoolExecutor
 import json
+import hashlib
+import html
 from pathlib import Path
 import re
 import threading
@@ -46,14 +48,14 @@ def owner_app_url(app):
     return None
 
 
-def catalog(app, home, subject, vpn):
+def catalog(app, home, subject, vpn, *, local_only=False):
     # Aggregate only registered members of this home's already-selected public
     # ring. Do not invent membership from labels or forward its private session.
     origins = {peer['url'].rstrip('/') for peer in app.homes[home]['ring']}
     homes = [home] + [ref for ref, row in app.homes.items()
                      if ref != home and row['public_url'].rstrip('/') in origins]
     # Bound fan-out; larger rings retain an explicit partial result.
-    selected = homes[:16]
+    selected = homes[:1] if local_only else homes[:16]
 
     def read(ref):
         try:
@@ -65,7 +67,7 @@ def catalog(app, home, subject, vpn):
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         results = list(pool.map(read, selected))
-    apps, seen, unavailable = [], set(), len(homes) - len(selected)
+    apps, seen, unavailable = [], set(), 0 if local_only else len(homes) - len(selected)
     owner_url = owner_app_url(app)
     for ref, entries, available in results:
         unavailable += not available
@@ -94,7 +96,48 @@ def catalog(app, home, subject, vpn):
             'partial': bool(unavailable), 'unavailable_sources': unavailable}
 
 
+def page(app, home, subject, vpn):
+    from .styles import appearance_css
+    source = (ASSETS / 'index.html').read_text()
+    value = app.styles.resolved(home, 'apps', subject) if app.styles else {}
+    css = appearance_css(value)
+    fonts = '<link id="homemaker-font-assets" rel="stylesheet" href="/design-assets/styles/fonts.css">' if css and value.get('font_assets') is True else ''
+    source = source.replace('</head>', fonts+'<style>'+css+'</style></head>')
+    # Show the current local publications in the first response. Foreign homes
+    # are reconciled separately, so one slow peer cannot hold the first screen.
+    initial = catalog(app, home, subject, vpn, local_only=True)
+    cards = []
+    esc = html.escape
+    for e in initial['apps']:
+        cards.append('<li class="app"><a class="app-link" href="'+esc(e['url'],quote=True)+'">'
+                     '<span class="app-icon" aria-hidden="true">↗</span>'
+                     '<span class="app-title">'+esc(e['title'])+'</span>'
+                     '<span class="app-summary">'+esc(e['summary'])+'</span>'
+                     '<span class="app-author">'+esc(e['author'])+' ↗</span></a></li>')
+    source = source.replace('<ul id="apps" class="apps" aria-label="Aplicaciones"></ul>',
+                            '<ul id="apps" class="apps" aria-label="Aplicaciones">'+''.join(cards)+'</ul>')
+    source = source.replace('<span id="count" aria-live="polite"></span>',
+                            '<span id="count" aria-live="polite">'+str(len(cards))+'</span>')
+    initial_json = json.dumps(initial).replace('&','\\u0026').replace('<','\\u003c').replace('>','\\u003e')
+    source = source.replace('</body>', '<script id="initial-apps" type="application/json">'+initial_json+'</script></body>')
+    for url, path in (('/apps/launcher.css',ASSETS/'launcher.css'),
+                      ('/apps/launcher.js',ASSETS/'launcher.js'),
+                      ('/home-style.js',ASSETS.parent/'assets/home-style.js')):
+        source = source.replace('"'+url+'"', '"'+url+'?v='+hashlib.sha256(path.read_bytes()).hexdigest()[:16]+'"')
+    return source.encode()
+
+
 def routes(handler, app, path, home, subject, vpn):
+    if path == '/apps/':
+        if not CAPACITY.acquire(blocking=False):
+            handler.respond(503, b'Please retry shortly', 'text/plain', headers=(('Retry-After','1'),))
+            return True
+        try:
+            body = page(app, home, subject, vpn)
+        finally:
+            CAPACITY.release()
+        handler.respond(200,body,'text/html; charset=utf-8',telegram_sdk=True,style_inline=True)
+        return True
     if path == '/apps/catalog.json':
         if not CAPACITY.acquire(blocking=False):
             handler.respond(503, {'error': 'catalog_busy'}, headers=(('Retry-After', '3'),))
@@ -110,6 +153,10 @@ def routes(handler, app, path, home, subject, vpn):
     if path not in files:
         return False
     name, kind = files[path]
-    handler.respond(200, (ASSETS / name).read_bytes(), kind,
-                    telegram_sdk=path == '/apps/', style_inline=path == '/apps/')
+    from urllib.parse import parse_qs
+    body = (ASSETS / name).read_bytes()
+    version = hashlib.sha256(body).hexdigest()[:16]
+    immutable = parse_qs(urlsplit(handler.path).query) == {'v':[version]}
+    handler.respond(200, body, kind,
+                    cache_control='public, max-age=31536000, immutable' if immutable else 'public, max-age=0, must-revalidate')
     return True

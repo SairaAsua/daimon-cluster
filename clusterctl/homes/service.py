@@ -622,13 +622,19 @@ def handler(app, *, owner=False):
             self._headers_sent = True
             super().end_headers()
 
-        def respond(self, status, body, kind="application/json", cookies=(), headers=(), form_action="'self'", style_inline=False, telegram_sdk=False):
+        def respond(self, status, body, kind="application/json", cookies=(), headers=(), form_action="'self'", style_inline=False, telegram_sdk=False, cache_control="no-store"):
             if isinstance(body, dict):
                 body = json.dumps(body).encode()
+            if status == 200 and cache_control != 'no-store':
+                import hashlib
+                etag = '"'+hashlib.sha256(body).hexdigest()+'"'
+                headers = (*headers, ('ETag',etag))
+                if self.headers.get('If-None-Match') == etag:
+                    status, body = 304, b''
             self.send_response(status)
             self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", cache_control)
             self.send_header("X-Content-Type-Options", "nosniff")
             # The single exact-origin login return must preserve its Origin
             # on a cross-host form POST. Only the public origin is disclosed;
@@ -660,7 +666,7 @@ def handler(app, *, owner=False):
             if self.command != "HEAD":
                 self.wfile.write(body)
 
-        def context(self, *, login_callback=False):
+        def context(self, *, login_callback=False, public_style=False):
             home = self.headers.get("X-Daimon-Home", "")
             network = self.headers.get("X-Daimon-Vpn", "")
             if not home:
@@ -678,11 +684,17 @@ def handler(app, *, owner=False):
             ].rstrip("/")
             supplied = self.headers.get("Origin")
             expected = app.sso.origin if login_callback and app.sso else origin
-            if supplied is not None and supplied != expected:
+            if supplied is not None and supplied != expected and not public_style:
                 raise ValueError("cross_origin_home_request")
             host = self.headers.get("Host", "")
             if host != urlsplit(origin).netloc:
                 raise ValueError("home_origin_mismatch")
+            if public_style:
+                if network == '1':
+                    raise ValueError('public_style_requires_public_home')
+                # A public stylesheet never consumes ambient credentials or
+                # exposes viewer preferences, even from a same-site browser.
+                return home, origin, None, False, {}, ''
             cookies = SimpleCookie()
             cookies.load(self.headers.get("Cookie", ""))
             token = cookies.get("__Host-home")
@@ -717,6 +729,26 @@ def handler(app, *, owner=False):
                 }
                 if self.headers.get("Host", "") in content_origins:
                     return self.content(content_origins[self.headers["Host"]])
+                if urlsplit(self.path).path == '/style.css':
+                    from .styles import appearance_css
+                    home, origin, _, _, _, _ = self.context(public_style=True)
+                    query = parse_qs(urlsplit(self.path).query, strict_parsing=True)
+                    if (set(query) - {'surface','refresh'} or len(query.get('surface',['home'])) != 1 or
+                            len(query.get('refresh',['0'])) != 1 or
+                            not re.fullmatch(r'[0-9]{1,16}',query.get('refresh',['0'])[0])):
+                        raise ValueError('invalid_public_style_query')
+                    surface = query.get('surface',['home'])[0]
+                    if surface not in ('home','apps','sessions','nexus'):
+                        raise ValueError('style_surface_denied')
+                    value = app.styles.resolved(home, surface) if app.styles else {}
+                    css = appearance_css(value,fonts_origin=origin)
+                    reset = (isinstance(value,dict) and value.get('contract') == 'homemaker.resolved/v1'
+                             and value.get('mode') == 'default' and value.get('appearance',False) is None)
+                    if not css and not reset:
+                        self.respond(503, b'Appearance temporarily unavailable', 'text/plain; charset=utf-8')
+                        return
+                    self.respond(200, css.encode(), 'text/css; charset=utf-8')
+                    return
                 home, origin, subject, vpn, cookies, parent_token = self.context()
                 path = urlsplit(self.path).path
                 if path.startswith("/apps/"):
@@ -745,7 +777,11 @@ def handler(app, *, owner=False):
                         "text/html; charset=utf-8",
                     )
                 elif path in ("/home-style.js", "/artifact-style.js", "/home-miniapp-login.js"):
-                    self.respond(200, (Path(__file__).parent / "assets" / path[1:]).read_bytes(), "text/javascript; charset=utf-8")
+                    body = (Path(__file__).parent / "assets" / path[1:]).read_bytes()
+                    import hashlib
+                    immutable = parse_qs(urlsplit(self.path).query) == {'v':[hashlib.sha256(body).hexdigest()[:16]]}
+                    self.respond(200, body, "text/javascript; charset=utf-8",
+                                 cache_control='public, max-age=31536000, immutable' if immutable else 'public, max-age=0, must-revalidate')
                 elif path == "/style.json":
                     if not app.styles:
                         self.respond(200, {"contract":"homemaker.resolved/v1","mode":"default","style_ref":"default","style_revision":None,"appearance":None})
@@ -758,7 +794,7 @@ def handler(app, *, owner=False):
                     surface = surface[0]
                     if viewer[0] == 'personal' and (not subject or subject.kind != 'human'):
                         raise ValueError('style_viewer_denied')
-                    if surface not in ("home", "apps") and not (surface == 'homemaker' and app.designs) and not app.selected(home, surface, "current", subject, vpn):
+                    if surface not in ("home", "apps", "sessions", "nexus") and not (surface == 'homemaker' and app.designs) and not app.selected(home, surface, "current", subject, vpn):
                         raise ValueError("style_surface_denied")
                     self.respond(200, app.styles.resolved(home, surface, subject, personal=viewer[0] == 'personal'))
                 elif path == "/access/status":
