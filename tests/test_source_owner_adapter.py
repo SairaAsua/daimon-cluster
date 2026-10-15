@@ -107,6 +107,26 @@ def test_owner_private_control_paths_and_public_stdin_stay_in_owner_cli(adapter)
     )
 
 
+def test_source_lifecycle_is_read_as_owner_and_never_falls_back_to_root(adapter):
+    client, result, calls = adapter
+    with pytest.raises(OnboardingError, match='lifecycle_binding_required'):
+        client.lifecycle_operation('fixture-operation')
+    assert calls == []
+    client.lifecycle_journal = client.root / 'update-journal'
+    result.clear()
+    row = dict(operation_id='fixture-operation', operation='receiving-update')
+    result.update(schema='cluster-receiving-source-lifecycle/v1',
+        source_config_sha256=client.config_sha256, lifecycle=row)
+    assert client.lifecycle_operation('fixture-operation') == row
+    argv, options = calls[-1]
+    assert argv[-4:] == ['--receiving-lifecycle', 'fixture-operation',
+        '--operation-journal', str(client.lifecycle_journal)]
+    assert options['user'] == client.owner_uid and options['extra_groups'] == ()
+    row['operation_id'] = 'another-operation'
+    with pytest.raises(OnboardingError, match='lifecycle_conflict'):
+        client.lifecycle_operation('fixture-operation')
+
+
 @pytest.mark.parametrize("part", ["group", "process", "origin", "loaded"])
 def test_malformed_owner_observation_cannot_be_cohort_readiness(adapter, part):
     client, result, _ = adapter
@@ -184,6 +204,10 @@ def cli(tmp_path, monkeypatch):
         def receiving_observation(self, **options):
             calls.append(("observe", options))
             return {"identity": "fixture"}
+
+        def receiving_lifecycle(self, *args):
+            calls.append(('lifecycle', args))
+            return {'retained': True}
 
         def serve(self, *args, **options):
             pytest.fail("receiving mode started a service")
@@ -306,3 +330,59 @@ def test_source_identity_mode_uses_no_guest_admission(cli, capsys):
         {"expires_at_ms": until, "deadline_ns": int(args[-1])},
     )
     assert json.loads(capsys.readouterr().out) == {"identity": "fixture"}
+
+
+def test_source_lifecycle_cli_queries_without_serving_or_native_observation(cli, capsys):
+    args, calls = cli
+    assert source_cli.main([*args, '--receiving-lifecycle', 'operation',
+        '--operation-journal', '/owner/journal']) == 0
+    assert calls[-1] == ('lifecycle', (Path('/owner/journal'), 'operation'))
+    assert not any(call[0] in {'control', 'observe'} for call in calls)
+    assert json.loads(capsys.readouterr().out) == {'retained': True}
+
+
+@pytest.mark.parametrize('extra', [[], ['--owner-status'], ['--require-loaded']])
+def test_lifecycle_cli_requires_exact_query_mode(cli, capsys, extra):
+    args, calls = cli
+    flags = ['--receiving-lifecycle', 'operation', *extra]
+    if extra:
+        flags.extend(['--operation-journal', '/owner/journal'])
+    assert source_cli.main([*args, *flags]) == 1
+    assert calls == []
+    assert json.loads(capsys.readouterr().out)['error'] == 'native_onboarding_source_refused'
+
+
+def test_source_lifecycle_projection_binds_config_and_omits_unrelated_journal_data(tmp_path):
+    from clusterctl.onboarding_code_successor import plan_update
+    from clusterctl.operation_journal import OperationJournal
+    root = tmp_path / 'runtime'
+    root.mkdir(mode=0o700)
+    settings = dict(schema='cluster-onboarding-source/v1', runtime_root=str(root),
+        password_file=str(tmp_path / 'unused.unlock'), native_visibility=str(tmp_path / 'unused.json'),
+        outputs=str(tmp_path / 'outputs'), applications=[])
+    config = tmp_path / 'source.json'
+    being_seed._write(config, settings)
+    source = source_cli.Source(settings)
+    journal_path = tmp_path / 'owner-journal'
+    journal = OperationJournal(journal_path)
+    row = plan_update(journal, manifest_digest='a' * 64, target='receiving:source',
+        expected_precondition={'source_bootstrap': {'settings_sha256': digest(settings),
+            'predecessor': {'process': {'pid': 42}}, 'private_metadata': 'not-exported'}},
+        intended_transition={'source_bootstrap': {'transaction': '/owner/private-transaction',
+            'qualification': {'code': '/public/code', 'code_uid': 0, 'config': str(config)}}},
+        audit_identity={'actor': 'synthetic-private-audit'})
+    effects = {'quiesced': {'exit_observed': True}, 'controlled_loaded': {'process': {'pid': 43}},
+        'unrelated_private_metadata': 'not-exported'}
+    journal.advance(row['operation_id'], 'runtime-dispatching',
+        runtime_observation={'source_bootstrap': effects})
+    before = journal.get(row['operation_id'])
+    projection = source.receiving_lifecycle(journal_path, row['operation_id'])
+    exported = projection['lifecycle']
+    assert projection['source_config_sha256'] == digest(settings)
+    assert set(exported['runtime_observation']['source_bootstrap']) == {'quiesced', 'controlled_loaded'}
+    assert 'not-exported' not in json.dumps(projection)
+    assert 'synthetic-private-audit' not in json.dumps(projection)
+    assert journal.get(row['operation_id']) == before
+    source.settings = {**settings, 'applications': ['another-source']}
+    with pytest.raises(OnboardingError, match='lifecycle_conflict'):
+        source.receiving_lifecycle(journal_path, row['operation_id'])

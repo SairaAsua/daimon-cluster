@@ -439,6 +439,38 @@ def test_guest_replacement_requires_frozen_authenticated_origin(tmp_path):
     assert all(owner.effects == 1 and owner.gate['phase'] == 'unselected' for owner in owners.values())
 
 
+def test_source_cohort_uses_owner_lifecycle_for_adoption_and_replacement(tmp_path, monkeypatch):
+    controller, owners, journal, identifier = activation_fixture(tmp_path, replacement=True)
+    recipes = journal.get(identifier)['intended_transition']['cohort_activation']['receivers']
+    records = {name: journal.get(recipe['lifecycle_operation_id']) for name, recipe in recipes.items()}
+    calls = []
+    for name, owner in owners.items():
+        def inspect(operation_id, selected=name):
+            calls.append((selected, operation_id))
+            assert operation_id == recipes[selected]['lifecycle_operation_id']
+            return copy.deepcopy(records[selected])
+        owner.lifecycle_operation = inspect
+    local_get = journal.get
+    foreign = {recipe['lifecycle_operation_id'] for recipe in recipes.values()}
+    def root_get(operation_id):
+        assert operation_id not in foreign, 'root coordinator attempted owner journal lookup'
+        return local_get(operation_id)
+    monkeypatch.setattr(journal, 'get', root_get)
+    controller.activate()
+    assert set(name for name, _ in calls) == set(owners)
+    assert all(owner.gate['phase'] == 'select' for owner in owners.values())
+
+
+def test_owner_lifecycle_failure_never_uses_a_stale_local_copy(tmp_path):
+    controller, owners, _, _ = activation_fixture(tmp_path, replacement=True)
+    def unavailable(operation_id):
+        raise OnboardingError('receiving_source_owner_unavailable')
+    owners['eko'].lifecycle_operation = unavailable
+    with pytest.raises(OnboardingError, match='owner_unavailable'):
+        controller.activate()
+    assert all(owner.gate['phase'] == 'unselected' for owner in owners.values())
+
+
 def test_lost_replacement_revoke_reply_reconciles_exact_request(tmp_path,monkeypatch):
     controller,owners,journal,identifier=activation_fixture(tmp_path,replacement=True)
     apply=owners['oliva'].apply_control

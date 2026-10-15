@@ -47,6 +47,18 @@ observer is a preparation refusal, not a transient startup condition to retry.
 Keep the actual observation and its imported SDK distinct from the serving boot
 proof; do not relabel a fixed fixture launcher as a production SDK defect.
 
+Keep lifecycle journals on their actual owners. A root cohort coordinator uses
+`SourceGroupClient(lifecycle_journal=...)` to inspect a Source operation through
+the qualified owner CLI (`--receiving-lifecycle ID --operation-journal DIR`).
+The existing pre-exec UID/GID drop also applies to this read. Its projection binds
+the Source configuration and exact retained operation; it exports predecessor,
+public candidate location and observed quiescence/load only. Cohort adoption and
+replacement checks use that owner result, not a copied row in the root journal.
+An unavailable or conflicting owner read refuses activation without a fallback.
+Guest lifecycle rows remain in their existing host-owned journal. Do not share
+journal permissions, copy custody or fabricate lifecycle observations to assemble
+a mixed Source/guest cohort.
+
 After a dispatched start, observe that same process and retained operation.
 A missing early socket, observation timeout or unavailable status is not proof
 that the service stopped, that adoption failed, or that a new start is permitted.

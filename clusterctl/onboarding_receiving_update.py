@@ -414,12 +414,15 @@ class SourceGroupClient:
 
     def __init__(self, *, config: Path, config_sha256: str, owner_uid: int, owner_gid: int,
                  code: Path, code_digest: str, code_uid: int, venv: Path, imports: Path,
-                 root: Path, socket_path: Path, timeout_seconds: float = 30):
+                 root: Path, socket_path: Path, timeout_seconds: float = 30,
+                 lifecycle_journal: Path | None = None):
         if (os.geteuid() != 0 or any(type(item) is not int or item <= 0 for item in (owner_uid, owner_gid))
                 or type(code_uid) is not int or code_uid < 0
                 or type(timeout_seconds) not in {int, float} or not 0 < timeout_seconds <= 60
                 or any(not isinstance(value, str) or re.fullmatch('[0-9a-f]{64}', value) is None
                        for value in (config_sha256, code_digest))
+                or lifecycle_journal is not None and (
+                    not lifecycle_journal.is_absolute() or '..' in lifecycle_journal.parts)
                 or any(not path.is_absolute() or '..' in path.parts
                        for path in (config, code, venv, imports, root, socket_path))):
             raise OnboardingError('receiving_source_owner_binding_required')
@@ -429,6 +432,7 @@ class SourceGroupClient:
         self.venv, self.imports = venv, imports
         self.root, self.socket = root, socket_path
         self.timeout_seconds = timeout_seconds
+        self.lifecycle_journal = lifecycle_journal
         self.deadline_ns: int | None = None
 
     def _call(self, arguments: list[str], *, command: dict | None = None) -> dict:
@@ -513,6 +517,21 @@ class SourceGroupClient:
 
     def apply_control(self, path: Path) -> dict:
         return self._call(['--apply-control', str(path)])
+
+    def lifecycle_operation(self, operation_id: str) -> dict:
+        """Read the retained owner journal under that owner, never as root."""
+        if self.lifecycle_journal is None:
+            raise OnboardingError('receiving_source_lifecycle_binding_required')
+        value = self._call(['--receiving-lifecycle', operation_id,
+            '--operation-journal', str(self.lifecycle_journal)])
+        row = value.get('lifecycle')
+        if (set(value) != {'schema', 'source_config_sha256', 'lifecycle'}
+                or value['schema'] != 'cluster-receiving-source-lifecycle/v1'
+                or value['source_config_sha256'] != self.config_sha256
+                or not isinstance(row, dict) or row.get('operation_id') != operation_id
+                or row.get('operation') != 'receiving-update'):
+            raise OnboardingError('receiving_source_lifecycle_conflict')
+        return row
 
 
 def owner_control(root: Path, group: dict, observed: dict, action: str, path: Path,
@@ -1961,7 +1980,7 @@ class CohortController:
                 or not isinstance(recipe['selection'], dict)
                 or not isinstance(recipe['lifecycle_operation_id'], str)):
             raise OnboardingError('receiving_cohort_profile_required')
-        lifecycle_row = self.journal.get(recipe['lifecycle_operation_id'])
+        lifecycle_row = self._lifecycle(name, recipe)
         prepared = self._qualified_preflight(name, recipe, plan, manifest, lifecycle_row)
         observed_at_ms = time.time_ns() // 1_000_000
         observed_at_ns = time.monotonic_ns()
@@ -2059,6 +2078,15 @@ class CohortController:
             roster_sha256=roster['roster_sha256'], reader=reader,
             observed_at_ms=observed_at_ms, observed_at_ns=observed_at_ns)
 
+    def _lifecycle(self, name: str, recipe: dict) -> dict | None:
+        owner = self.owners[name]
+        inspect = getattr(owner, 'lifecycle_operation', None)
+        row = (inspect(recipe['lifecycle_operation_id']) if recipe['profile'] == 'source' and inspect is not None
+               else self.journal.get(recipe['lifecycle_operation_id']))
+        if row is not None and row.get('operation_id') != recipe['lifecycle_operation_id']:
+            raise OnboardingError('receiving_cohort_lifecycle_unobserved')
+        return row
+
     def _qualified_preflight(self, name: str, recipe: dict, plan: dict, manifest: dict, lifecycle: dict | None) -> dict:
         """Reuse the maintained isolated reader against this exact release.
 
@@ -2150,7 +2178,9 @@ class CohortController:
                     raise OnboardingError('receiving_sender_barrier_changed')
                 continue
             recipe = plan['receivers'][name]
-            lifecycle = self.journal.get(recipe['lifecycle_operation_id'])
+            lifecycle = self._lifecycle(name, recipe)
+            if lifecycle is None:
+                raise OnboardingError('receiving_cohort_lifecycle_unobserved')
             effects = lifecycle['runtime_observation'] or {}
             if recipe['profile'] == 'source':
                 previous = lifecycle['expected_precondition'].get('source_bootstrap', {}).get('predecessor', {})

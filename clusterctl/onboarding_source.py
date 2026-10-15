@@ -358,6 +358,38 @@ class Source:
         return owner_control(self.root, observed['group'], observed, action, path,
             command=command, deadline_ns=deadline_ns)
 
+    def receiving_lifecycle(self, journal_path: Path, operation_id: str) -> dict:
+        """Project only this Source's retained lifecycle; no service/native RPC."""
+        from .operation_journal import OperationJournal
+        journal = OperationJournal.existing(being_seed._path(journal_path))
+        row = None if journal is None else journal.get(operation_id)
+        if row is None or row['operation'] != 'receiving-update':
+            raise OnboardingError('receiving_source_lifecycle_unobserved')
+        before, after = row['expected_precondition'], row['intended_transition']
+        call = row['intent'].get('runtime_call', {})
+        frozen = before.get('source_bootstrap', {})
+        qualification = after.get('source_bootstrap', {}).get('qualification', {})
+        if (call.get('precondition_digest') != digest(before)
+                or call.get('transition_digest') != digest(after)
+                or frozen.get('settings_sha256') != digest(self.settings)
+                or not isinstance(frozen.get('predecessor'), dict)
+                or not isinstance(qualification.get('code'), str)
+                or type(qualification.get('code_uid')) is not int
+                or qualification.get('config') is None
+                or being_seed._read(Path(qualification['config'])) != self.settings):
+            raise OnboardingError('receiving_source_lifecycle_conflict')
+        effects = (row['runtime_observation'] or {}).get('source_bootstrap', {})
+        # Never export intents, control capabilities, custody or another Source.
+        projected = dict(operation_id=operation_id, operation='receiving-update',
+            expected_precondition={'source_bootstrap': {'predecessor': {
+                key: frozen['predecessor'].get(key) for key in ('process', 'server')}}},
+            intended_transition={'source_bootstrap': {'qualification': {
+                key: qualification[key] for key in ('code', 'code_uid')}}},
+            runtime_observation={'source_bootstrap': {
+                key: effects[key] for key in ('quiesced', 'controlled_loaded') if key in effects}})
+        return dict(schema='cluster-receiving-source-lifecycle/v1',
+            source_config_sha256=digest(self.settings), lifecycle=projected)
+
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -376,6 +408,8 @@ def main(argv=None) -> int:
     parser.add_argument('--identity-expires-at-ms', type=int)
     parser.add_argument('--observation-deadline-ns', type=int)
     parser.add_argument('--expected-config-sha256')
+    parser.add_argument('--receiving-lifecycle')
+    parser.add_argument('--operation-journal', type=Path)
     args = parser.parse_args(argv)
     try:
         from . import onboarding_code_successor, onboarding_sdk
@@ -383,15 +417,18 @@ def main(argv=None) -> int:
         if args.code_owner < 0:
             raise OnboardingError('qualified_source_code_owner_required')
         controlling = args.prepare_control is not None or args.apply_control is not None
-        receiving = args.owner_status or args.qualified_identity or controlling
-        if (sum((args.observe, args.owner_status, args.qualified_identity, controlling)) > 1
+        lifecycle = args.receiving_lifecycle is not None
+        receiving = args.owner_status or args.qualified_identity or controlling or lifecycle
+        if (sum((args.observe, args.owner_status, args.qualified_identity, controlling, lifecycle)) > 1
+                or lifecycle != (args.operation_journal is not None)
+                or lifecycle and (args.ready_fd is not None or args.require_loaded)
                 or args.qualified_identity != (args.identity_expires_at_ms is not None)
                 or args.identity_expires_at_ms is not None and not 0 < args.identity_expires_at_ms < 2**53
                 or (args.owner_status or args.qualified_identity) and (args.ready_fd is not None or args.require_loaded)
                 or args.expected_config_sha256 is not None and not receiving
                 or args.observation_deadline_ns is not None and not receiving):
             raise OnboardingError('invalid_receiving_control_request')
-        if (args.owner_status or args.qualified_identity) and args.observation_deadline_ns is None:
+        if (args.owner_status or args.qualified_identity or lifecycle) and args.observation_deadline_ns is None:
             args.observation_deadline_ns = time.monotonic_ns() + 30_000_000_000
         def accept_deadline():
             if args.observation_deadline_ns is not None and time.monotonic_ns() >= args.observation_deadline_ns:
@@ -426,6 +463,12 @@ def main(argv=None) -> int:
         accept_deadline()
         source = Source(settings, code=code, code_uid=args.code_owner, code_digest=args.code_digest,
                         qualified_startup=startup)
+        if lifecycle:
+            accept_deadline()
+            result = source.receiving_lifecycle(args.operation_journal, args.receiving_lifecycle)
+            accept_deadline()
+            print(json.dumps(result))
+            return 0
         if controlling:
             action = 'receiving-control-prepare' if args.prepare_control is not None else 'receiving-control-apply'
             path = args.prepare_control if args.prepare_control is not None else args.apply_control
