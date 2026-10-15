@@ -756,3 +756,16 @@ def test_reviewed_receiving_helpers_keep_scope_exact_and_qualify_default_callers
     monkeypatch.setattr(ci_scope.subprocess,'run',lambda argv, **_kwargs:
         subprocess.CompletedProcess(argv,0,originals[argv[-1].split(':',1)[1]]+b'\n'))
     assert ci_scope.select(changed, ROOT, base='a'*40) != ('peer', tests)
+
+
+def test_existing_native_attachment_update_composes_complete_receiving_coverage():
+    from tools.ci_scope import LOADED_STARTUP_TESTS, OWNER_CLIENT_TESTS
+    changed = ['clusterctl/onboarding_owner_client.py', 'clusterctl/onboarding_chat_native.py',
+        'clusterctl/onboarding_receiving_update.py', 'tests/test_onboarding_owner_client.py',
+        'support/matrix-agent-chat/TOOLING-PROVENANCE.json', 'docs/runbooks/tribu-sdk-successor.md',
+        'tools/ci_scope.py', 'tests/test_ci_scope.py']
+    profile, tests = select(changed, ROOT)
+    assert profile == 'peer'
+    assert set(LOADED_STARTUP_TESTS) | set(OWNER_CLIENT_TESTS) <= set(tests)
+    for extra in ('clusterctl/onboarding_custody.py', 'requirements-dev.txt', 'unknown.py'):
+        assert select([*changed, extra], ROOT)[0] == 'full'

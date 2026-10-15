@@ -343,7 +343,14 @@ onboarding. Each cohort receiver explicitly selects `tooling`: either
 `{"profile":"matrix-only"}` for a body with no native harness, or a protected
 Codex recipe with `profile`, `attachment`, `codex_home`, `connections`,
 `native_endpoint`, `native_threads` and `tribe_channel`. Paths select existing owner-local
-resources; thread IDs select existing native contexts. Missing selection is an
+resources; thread IDs select existing native contexts. The optional
+`binding_filename` explicitly selects `owner-binding.json` for deployed legacy
+attachments; absence retains `binding.json`. Do not discover a different binding,
+rename it or create another request directory. The existing signed capability,
+connection/config preimages, request journal and filename-bound fingerprint remain
+part of the same resumable tooling adoption. Inventory the actual filename before
+freezing a production recipe; a canonical-layout fixture does not prove legacy
+attachment adoption. Missing selection is an
 error, never implicit Matrix-only acceptance. No first-loaded-thread fallback,
 thread creation/resume or model turn qualifies a recipe.
 

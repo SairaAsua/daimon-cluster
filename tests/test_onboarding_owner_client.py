@@ -73,7 +73,8 @@ def test_tooling_owner_entry_requires_explicit_native_home_after_qualification(t
     assert calls == [(tmp_path/'attachment', 'operation:fixture')]
 
 
-def test_host_tooling_reconciliation_uses_owner_cli_without_private_sdk_reads(tmp_path, monkeypatch):
+@pytest.mark.parametrize("binding_filename", ["binding.json", "owner-binding.json"])
+def test_host_tooling_reconciliation_uses_owner_cli_without_private_sdk_reads(tmp_path, monkeypatch, binding_filename):
     from clusterctl import onboarding_owner_client as owner, onboarding_code_successor
     from clusterctl.onboarding import digest, OnboardingError
     from tests.test_onboarding import plan
@@ -97,12 +98,14 @@ def test_host_tooling_reconciliation_uses_owner_cli_without_private_sdk_reads(tm
     monkeypatch.setattr(Path, 'read_bytes', read)
     client = OwnerClient(host)
     arguments = dict(candidate=(tmp_path/'candidate', 'a'*64),
-        attachment=Path('/home/agent/existing-attachment'), codex_home=Path('/home/agent/.codex'))
+        attachment=Path('/home/agent/existing-attachment'), codex_home=Path('/home/agent/.codex'),
+        binding_filename=binding_filename)
     assert client.reconcile(plan(), operation_id, **arguments) == result
     command = calls[0]
     assert command[:8] == ['exec', 'dm-fixture', '--user', '1000', '--group', '1000', '--env', 'HOME=/home/agent']
     assert 'clusterctl.onboarding_owner_client' in command
     assert command[command.index('--codex-home')+1] == '/home/agent/.codex'
+    assert command[command.index('--binding')+1] == '/home/agent/existing-attachment/'+binding_filename
     result['code_digest'] = 'c'*64
     with pytest.raises(OnboardingError, match='verification_failed'):
         client.reconcile(plan(), operation_id, **arguments)
@@ -570,8 +573,9 @@ def test_acceptance_installation_does_not_assert_human_or_delivery_acceptance(
 
 
 @pytest.mark.parametrize("drift", [False, True])
+@pytest.mark.parametrize("binding_filename", ["binding.json", "owner-binding.json"])
 def test_native_server_version_binds_the_qualified_sdk_code_and_attachment(
-    tmp_path, monkeypatch, drift
+    tmp_path, monkeypatch, drift, binding_filename
 ):
     from clusterctl import onboarding_owner_client as owner
     from daimon_matrix import agent_chat
@@ -590,7 +594,7 @@ def test_native_server_version_binds_the_qualified_sdk_code_and_attachment(
     monkeypatch.setattr(
         owner,
         "_installer",
-        lambda *a: SimpleNamespace(_binding_fingerprint=lambda a: next(snapshots)),
+        lambda *a: SimpleNamespace(_binding_fingerprint=lambda a, **kw: next(snapshots)),
     )
     monkeypatch.setattr(
         agent_chat,
@@ -615,7 +619,7 @@ def test_native_server_version_binds_the_qualified_sdk_code_and_attachment(
         return owner._serve_chat(
             ["mcp"],
             startup=startup,
-            binding=tmp_path / "binding.json",
+            binding=tmp_path / binding_filename,
             code=tmp_path,
             code_uid=os.geteuid(),
         )
@@ -702,7 +706,7 @@ def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
         monkeypatch.setattr(
             owner,
             "_installer",
-            lambda *a: SimpleNamespace(_binding_fingerprint=lambda a: ({}, "e" * 64)),
+            lambda *a: SimpleNamespace(_binding_fingerprint=lambda a, **kw: ({}, "e" * 64)),
         )
         requests = []
         release = threading.Event()
@@ -905,7 +909,7 @@ def test_tooling_observer_requires_selected_sdk_and_unchanged_connections(
         owner,
         "_installer",
         lambda *a: SimpleNamespace(
-            _binding_fingerprint=lambda p: (binding, "e" * 64),
+            _binding_fingerprint=lambda p, **kw: (binding, "e" * 64),
             _tools=lambda: [],
         ),
     )
@@ -986,3 +990,17 @@ def test_guest_tooling_budget_starts_before_qualification(tmp_path, monkeypatch)
 def test_startup_diagnostic_exposes_only_declared_domain_codes(error, expected):
     from clusterctl.onboarding_owner_client import _public_error
     assert _public_error(error) == expected
+
+
+@pytest.mark.parametrize("filename", ["binding.json", "owner-binding.json", "../binding.json", "other.json", None, []])
+def test_tooling_recipe_explicit_binding_filename_never_discovers_another_path(filename):
+    from clusterctl.onboarding_owner_client import validate_tooling_recipe
+    from clusterctl.onboarding import OnboardingError
+    recipe = dict(profile='codex', attachment='/owner/tribe', codex_home='/owner/.codex',
+        connections=[], native_endpoint='/owner/native.sock', native_threads=[],
+        tribe_channel='tribe', binding_filename=filename)
+    if filename in ('binding.json', 'owner-binding.json'):
+        assert validate_tooling_recipe(recipe) is recipe
+    else:
+        with pytest.raises(OnboardingError, match='receiving_native_tooling_recipe_required'):
+            validate_tooling_recipe(recipe)

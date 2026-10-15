@@ -17,7 +17,7 @@ from .onboarding import Observation, OnboardingError, digest, validate_plan
 
 INSTALLER_SHA256 = 'aaef1a28614722a1f52d4c32dbbd3add5f1abfcd6f766cfaf6b7cfa3073a9af9'
 TOOLING_INSTALLER_MODULE = 'onboarding_chat_native.py'
-TOOLING_INSTALLER_SHA256 = '93bb1446b16832a2f50dd0f55b6f83275fe4a3a9969d1232b91e392ba1fedc1d'
+TOOLING_INSTALLER_SHA256 = '4d3f5e26fbd65babffbfd338317e02aab7eb116a818eee96e36c83ac923b608b'
 
 
 # Only these maintained domain codes may cross the CLI boundary. Exception
@@ -65,7 +65,8 @@ def validate_tooling_recipe(recipe: dict) -> dict:
     if recipe == {'profile': 'matrix-only'}:
         return recipe
     fields = {'profile', 'attachment', 'codex_home', 'connections', 'native_endpoint', 'native_threads', 'tribe_channel'}
-    if (not isinstance(recipe, dict) or set(recipe) != fields or recipe.get('profile') != 'codex'
+    if (not isinstance(recipe, dict) or set(recipe) - {'binding_filename'} != fields or recipe.get('profile') != 'codex'
+            or recipe.get('binding_filename', 'binding.json') not in ('binding.json', 'owner-binding.json')
             or not isinstance(recipe['connections'], list) or len(recipe['connections']) > 8
             or not isinstance(recipe['tribe_channel'], str) or not 1 <= len(recipe['tribe_channel']) <= 128
             or not isinstance(recipe['native_threads'], list) or len(recipe['native_threads']) > 128):
@@ -98,17 +99,18 @@ def observe_selected_tooling(payload: dict, *, code: Path, startup: dict,
         raise OnboardingError('receiving_native_tooling_unobserved')
     attachment = Path(recipe['attachment'])
     installer = _installer(code, code_uid)
-    binding, fingerprint = installer._binding_fingerprint(attachment)
+    binding_filename = recipe.get('binding_filename', 'binding.json')
+    binding, fingerprint = installer._binding_fingerprint(attachment, binding_filename=binding_filename)
     import sys
     command = chat_command(Path(sys.prefix), Path(sys.prefix).parent / 'runtime-imports',
-        code, code_digest=startup['code_digest'], binding=attachment / 'binding.json', code_uid=code_uid)
+        code, code_digest=startup['code_digest'], binding=attachment / binding_filename, code_uid=code_uid)
     from daimon_matrix.canonical import canonical_bytes
     from daimon_matrix.agent_chat import MULTI_SCHEMA, bridge
     from daimon_matrix.messaging_config import protected_read
     group = receiving.get('group', {})
     runtime = receiving.get('runtime_status', {}).get('loaded_runtime', {})
     def connections():
-        current_binding, current_fingerprint = installer._binding_fingerprint(attachment)
+        current_binding, current_fingerprint = installer._binding_fingerprint(attachment, binding_filename=binding_filename)
         if (current_fingerprint != fingerprint or fingerprint != accepted.get('binding_sha256')
                 or hashlib.sha256(canonical_bytes(command)).hexdigest() != accepted.get('command_sha256')):
             raise OnboardingError('receiving_native_tooling_changed')
@@ -134,7 +136,8 @@ def observe_selected_tooling(payload: dict, *, code: Path, startup: dict,
     connections()
     result = native_catalog(attachment, code=code, code_uid=code_uid, startup=startup,
         codex_home=Path(recipe['codex_home']), endpoint=Path(recipe['native_endpoint']),
-        threads=tuple(recipe['native_threads']), config_sha256=accepted['config_sha256'], deadline_ns=deadline_ns)
+        threads=tuple(recipe['native_threads']), config_sha256=accepted['config_sha256'], deadline_ns=deadline_ns,
+        binding_filename=binding_filename)
     connections()
     if result.get('binding_sha256') != fingerprint:
         raise OnboardingError('receiving_native_tooling_changed')
@@ -148,9 +151,9 @@ def _serve_chat(arguments: list[str], *, startup: dict, binding: Path, code: Pat
         return agent_chat.main(['--binding', str(binding), *arguments])
     import asyncio
     installed = _installer(code, code_uid)
-    value, fingerprint = installed._binding_fingerprint(binding.parent)
+    value, fingerprint = installed._binding_fingerprint(binding.parent, binding_filename=binding.name)
     server = agent_chat.bridge(value).server()
-    if installed._binding_fingerprint(binding.parent)[1] != fingerprint:
+    if installed._binding_fingerprint(binding.parent, binding_filename=binding.name)[1] != fingerprint:
         raise OnboardingError('receiving_native_tooling_changed')
     server.version = tooling_version(startup, fingerprint)
     asyncio.run(agent_chat._run_stdio(server))
@@ -160,7 +163,7 @@ def _serve_chat(arguments: list[str], *, startup: dict, binding: Path, code: Pat
 def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict,
                    codex_home: Path, endpoint: Path, threads: tuple[str, ...],
                    config_sha256: str, reload: bool = False,
-                   deadline_ns: int | None = None) -> dict:
+                   deadline_ns: int | None = None, binding_filename: str = 'binding.json') -> dict:
     """Observe selected existing native contexts; never create a thread or turn."""
     import asyncio
     import os
@@ -187,7 +190,7 @@ def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict
         if hashlib.sha256(protected_read(codex_home / 'config.toml')).hexdigest() != config_sha256:
             raise OnboardingError('native_tooling_configuration_changed')
     configuration()
-    binding, fingerprint = _installer(code, code_uid)._binding_fingerprint(attachment)
+    binding, fingerprint = _installer(code, code_uid)._binding_fingerprint(attachment, binding_filename=binding_filename)
     version = tooling_version(startup, fingerprint)
     catalog = asyncio.run(bridge(binding).list_tools(None, None))
     expected = {tool.name: tool.input_schema for tool in catalog.tools}
@@ -261,7 +264,7 @@ def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict
             if not set(threads) <= set(await pages('thread/loaded/list', {'limit': 128})):
                 raise OnboardingError('native_tooling_context_unloaded')
             configuration()
-            if _installer(code, code_uid)._binding_fingerprint(attachment)[1] != fingerprint:
+            if _installer(code, code_uid)._binding_fingerprint(attachment, binding_filename=binding_filename)[1] != fingerprint:
                 raise OnboardingError('native_tooling_binding_changed')
             after = target.lstat()
             current_selector = endpoint.lstat()
@@ -299,7 +302,8 @@ def chat_command(venv: Path, imports: Path, code: Path, *, code_digest: str,
 
 def reconcile_chat_tooling(attachment: Path, operation_id: str, *, code: Path,
                           code_digest: str, startup: dict, codex_home: Path, code_uid: int = 0,
-                          connections: tuple[Path, ...] = (), deadline_ns: int | None = None) -> dict:
+                          connections: tuple[Path, ...] = (), deadline_ns: int | None = None,
+                          binding_filename: str = 'binding.json') -> dict:
     """Reconcile the existing owner attachment from this qualified SDK process."""
     import os
     import sys
@@ -309,7 +313,7 @@ def reconcile_chat_tooling(attachment: Path, operation_id: str, *, code: Path,
         raise OnboardingError('qualified_native_peer_tool_required')
     venv = Path(sys.prefix)
     command = chat_command(venv, venv.parent / 'runtime-imports', code,
-        code_digest=code_digest, binding=attachment / 'binding.json', code_uid=code_uid)
+        code_digest=code_digest, binding=attachment / binding_filename, code_uid=code_uid)
     installer = _installer(code, code_uid)
     previous = os.environ.get('CODEX_HOME')
     os.environ['CODEX_HOME'] = str(codex_home)
@@ -370,7 +374,7 @@ def main(argv: list[str] | None = None) -> int:
     startup = onboarding_sdk.qualified_startup(Path(sys.prefix), code,
         code_digest=args.code_digest, code_uid=args.code_owner, **parameters)
     if args.reconcile_tooling:
-        if args.chat_arguments or args.binding.name != 'binding.json' or args.codex_home is None:
+        if args.chat_arguments or args.binding.name not in {'binding.json', 'owner-binding.json'} or args.codex_home is None:
             raise OnboardingError('qualified_native_peer_tool_required')
         if args.observation_deadline_ns is not None:
             import time
@@ -379,13 +383,13 @@ def main(argv: list[str] | None = None) -> int:
         result = reconcile_chat_tooling(args.binding.parent, args.reconcile_tooling,
             code=code, code_digest=args.code_digest, startup=startup,
             codex_home=args.codex_home, code_uid=args.code_owner, connections=tuple(args.connection_mirror),
-            deadline_ns=args.observation_deadline_ns)
+            deadline_ns=args.observation_deadline_ns, binding_filename=args.binding.name)
         if args.native_endpoint is not None and result['status'] == 'configured':
             result['native_catalog'] = native_catalog(args.binding.parent, code=code,
                 code_uid=args.code_owner, startup=startup, codex_home=args.codex_home,
                 endpoint=args.native_endpoint, threads=tuple(args.native_thread),
                 config_sha256=result['config_sha256'], reload=True,
-                deadline_ns=args.observation_deadline_ns)
+                deadline_ns=args.observation_deadline_ns, binding_filename=args.binding.name)
             result['catalog_acceptance'] = result['native_catalog']['acceptance']
         if args.observation_deadline_ns is not None:
             import time
@@ -720,7 +724,8 @@ class OwnerClient:
     def reconcile(self, plan: dict, operation_id: str, *, candidate: tuple[Path, str],
                   attachment: Path, codex_home: Path, connections: tuple[Path, ...] = (),
                   native_endpoint: Path | None = None, native_threads: tuple[str, ...] = (),
-                  timeout_seconds: float = 30, deadline_ns: int | None = None) -> dict:
+                  timeout_seconds: float = 30, deadline_ns: int | None = None,
+                  binding_filename: str = 'binding.json') -> dict:
         """Use the existing owner CLI; never install personalized owner context."""
         import math
         import time
@@ -745,7 +750,7 @@ class OwnerClient:
         venv = Path('/home/agent/.local/share/daimon-matrix/sdk') / digest(sdk) / 'venv'
         argv = onboarding_sdk.runtime_command(venv, venv.parent / 'runtime-imports', guest_code,
             'clusterctl.onboarding_owner_client', ['--code-digest', candidate[1],
-                '--binding', str(attachment / 'binding.json'), '--reconcile-tooling', operation_id,
+                '--binding', str(attachment / binding_filename), '--reconcile-tooling', operation_id,
                 '--codex-home', str(codex_home),
                 '--observation-timeout-seconds', str(remaining()),
                 *[part for path in connections for part in ('--connection-mirror', str(path))],

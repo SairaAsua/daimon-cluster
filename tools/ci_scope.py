@@ -485,8 +485,9 @@ def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list
     if (host_files <= set(changed) and set(changed) <= loaded_files | CI_FILES | host_files
             and all((root/path).is_file() for path in host_tests) and host_observation_only(root,base)):
         return 'peer',list(dict.fromkeys(host_tests))
-    if ({'tests/test_receiving_process_observation.py', 'tests/test_source_bootstrap.py',
+    if (({'tests/test_receiving_process_observation.py', 'tests/test_source_bootstrap.py',
             'tests/test_guest_owner_bootstrap.py'} & set(changed)
+             or owner_delta and 'clusterctl/onboarding_receiving_update.py' in changed)
             and set(changed) <= loaded_files | CI_FILES
             and all((root / path).is_file() for path in loaded_tests)):
         # Actual same-connection/process startup, retained SDK and service paths.
