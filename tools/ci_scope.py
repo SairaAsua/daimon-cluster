@@ -439,27 +439,35 @@ def receiving_support_only(root: Path, base: str, names: set[str]) -> bool:
 
 def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
     host_files={'clusterctl/onboarding_host.py','tests/test_onboarding_host.py'}
-    host_tests=(*LOADED_STARTUP_TESTS,'tests/test_onboarding_host.py',
+    # A receiving release also installs its native owner attachment. Compose
+    # the two existing coverage sets instead of falling through to unrelated
+    # physical/archive/model qualification for this known combined delta.
+    owner_files = OWNER_CLIENT_FILES - host_files
+    owner_delta = bool(set(changed) & (owner_files - {'tools/check_rc_types.py'}))
+    loaded_files = LOADED_STARTUP_FILES | owner_files
+    loaded_tests = (tuple(dict.fromkeys((*LOADED_STARTUP_TESTS, *OWNER_CLIENT_TESTS)))
+                    if owner_delta else LOADED_STARTUP_TESTS)
+    host_tests=(*loaded_tests,'tests/test_onboarding_host.py',
                 'tests/test_onboarding_host_ownership.py','tests/test_onboarding_managed.py',
                 'tests/test_onboarding_peer_host.py')
     support = set(changed) & RECEIVING_SUPPORT_HASHES.keys()
     support_tests = (*host_tests, 'tests/test_being_seed.py')
-    if (support and set(changed) <= LOADED_STARTUP_FILES | CI_FILES | host_files
+    if (support and set(changed) <= loaded_files | CI_FILES | host_files
             | RECEIVING_SUPPORT_HASHES.keys() | {'tests/test_being_seed.py'}
             and all((root/path).is_file() for path in support_tests)
             and receiving_support_only(root, base, support)
             and (not (set(changed) & host_files)
                  or host_files <= set(changed) and host_observation_only(root, base))):
         return 'peer', list(dict.fromkeys(support_tests))
-    if (host_files <= set(changed) and set(changed) <= LOADED_STARTUP_FILES | CI_FILES | host_files
+    if (host_files <= set(changed) and set(changed) <= loaded_files | CI_FILES | host_files
             and all((root/path).is_file() for path in host_tests) and host_observation_only(root,base)):
         return 'peer',list(dict.fromkeys(host_tests))
     if ({'tests/test_receiving_process_observation.py', 'tests/test_source_bootstrap.py'} & set(changed)
-            and set(changed) <= LOADED_STARTUP_FILES | CI_FILES
-            and all((root / path).is_file() for path in LOADED_STARTUP_TESTS)):
+            and set(changed) <= loaded_files | CI_FILES
+            and all((root / path).is_file() for path in loaded_tests)):
         # Actual same-connection/process startup, retained SDK and service paths.
         # No changed archive, physical recovery, authority or native model code.
-        return 'peer', list(LOADED_STARTUP_TESTS)
+        return 'peer', list(loaded_tests)
     if not changed:
         return 'full', ['tests']
     if set(changed) <= RUNBOOK_DOCS:

@@ -6,6 +6,23 @@ from tools.ci_scope import ONBOARDING_CONTRACTS, select
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_owner_attachment_and_receiving_changes_compose_covered_profiles(tmp_path):
+    from tools.ci_scope import (
+        LOADED_STARTUP_FILES, LOADED_STARTUP_TESTS,
+        OWNER_CLIENT_FILES, OWNER_CLIENT_TESTS,
+    )
+    host_files = {'clusterctl/onboarding_host.py', 'tests/test_onboarding_host.py'}
+    changed = sorted(LOADED_STARTUP_FILES | (OWNER_CLIENT_FILES - host_files))
+    profile, tests = select(changed, ROOT)
+    assert profile == 'peer'
+    assert set(LOADED_STARTUP_TESTS) | set(OWNER_CLIENT_TESTS) == set(tests)
+    assert len(tests) == len(set(tests))
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    for extra in ('requirements-weave.txt', 'clusterctl/onboarding_custody.py',
+                  'unknown.py', 'support/matrix-agent-chat/other.py'):
+        assert select([*changed, extra], ROOT) == ('full', ['tests'])
+
+
 def test_receiving_metadata_scope_requires_exact_host_content_and_keeps_all_receiving_tests(monkeypatch):
     import subprocess
     from tools.ci_scope import LOADED_STARTUP_FILES, LOADED_STARTUP_TESTS

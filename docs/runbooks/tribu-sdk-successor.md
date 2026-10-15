@@ -58,6 +58,11 @@ Prepare expiring fixture controls immediately before their use. If an unrelated
 urgent repair intervenes, preserve the scenario and completed effects instead
 of discarding them. Do not extend an expired frozen authorization; recover using
 the supported procedure for the exact retained state, not a new birth ceremony.
+An expired optional receiving controller currently blocks the owner update path
+even when the original roles remain valid. [Matrix #355](https://github.com/AlterMundi/daimon-matrix/issues/355)
+owns the missing grant-lifetime separation and existing-owner recovery. Do not
+treat capability-method upgrades as renewal or run a routine rebirth to hide this
+gap. Retain the stopped receiver and its original lifecycle evidence for recovery.
 Own a finite synthetic admission producer and its named synthetic native unit in
 the same qualification scope. Stop that unit before retiring the producer; on
 interruption reconcile and close the unit as part of the same cleanup. Leaving
