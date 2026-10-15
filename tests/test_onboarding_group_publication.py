@@ -1,6 +1,7 @@
 """Owner publication routes use native SDK effects, preserving exact retries."""
 import copy
 import hashlib
+import json
 import os
 import time
 import uuid
@@ -135,7 +136,8 @@ def test_native_first_publication_signatures_and_selector_recover_exact_lost_rep
     assert (group / 'selection.json').read_bytes() == selected
     snapshot_request = dict(operation_id=identifier, step='snapshot', action='snapshot', params=dict(
         application_step='application', visibility_step='visibility', selection_step='select',
-        owner_context_sha256=digest(being_seed._read(journal / identifier / 'owner/context.json'))))
+        owner_context_sha256=digest(being_seed._read(journal / identifier / 'owner/context.json')),
+        expected_stores={role: json.loads(item.observation) for role, item in base.service.loaded_stores.items()}))
     snapshot_path = journal / identifier / 'publications/snapshot.json'
     def lost_snapshot(path, value, **kwargs):
         write(path, value, **kwargs)
@@ -177,6 +179,31 @@ def test_native_first_publication_signatures_and_selector_recover_exact_lost_rep
             owner.group_publication(snapshot_request, authority_closure={})
     finally:
         installation.write_bytes(previous_visibility)
+    ledger = base.state_root / target.document_bundle()['ledger']
+    saved_ledger = ledger.with_name('retained-snapshot-test-ledger')
+    ledger.rename(saved_ledger)
+    try:
+        with monkeypatch.context() as checks:
+            checks.setattr(owner, '_reader', lambda: pytest.fail('missing/replaced store reached custody'))
+            with pytest.raises(OnboardingError, match='store_binding_changed'):
+                owner.group_publication(snapshot_request, authority_closure={})
+            assert not ledger.exists()
+            ledger.write_bytes(saved_ledger.read_bytes())
+            ledger.chmod(0o600)
+            with pytest.raises(OnboardingError, match='store_binding_changed'):
+                owner.group_publication(snapshot_request, authority_closure={})
+    finally:
+        ledger.unlink(missing_ok=True)
+        saved_ledger.rename(ledger)
+    legacy_request = copy.deepcopy(snapshot_request)
+    legacy_request['step'] = 'legacy-snapshot'
+    del legacy_request['params']['expected_stores']
+    owner.group_publication(legacy_request, authority_closure={})
+    legacy_path = journal / identifier / 'publications/legacy-snapshot.json'
+    legacy = being_seed._read(legacy_path)
+    del legacy['result']['stores']
+    being_seed._write(legacy_path, legacy)
+    assert owner.group_publication(legacy_request, authority_closure={}) == legacy['result']
     wrong_steps = copy.deepcopy(snapshot_request)
     wrong_steps.update(step='wrong-snapshot')
     wrong_steps['params']['visibility_step'] = 'disclosure'
@@ -316,3 +343,7 @@ def test_publication_packets_are_closed_and_cannot_use_online_relationship_route
         changed['params']['application_step'] = step
         with pytest.raises(OnboardingError, match='publication_command_required'):
             publication_command(changed)
+    with pytest.raises(OnboardingError, match='publication_command_required'):
+        publication_command({**snapshot, 'params': {**snapshot['params'], 'expected_stores': {}}})
+    with pytest.raises(OnboardingError, match='publication_command_required'):
+        publication_command({**snapshot, 'params': {**snapshot['params'], 'expected_preservation': {}}})

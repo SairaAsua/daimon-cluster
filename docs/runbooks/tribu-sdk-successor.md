@@ -950,6 +950,43 @@ native codec expected by loaded-runtime evidence. Existing selector schemas and
 their codec are unchanged. Historical frozen values remain evidence; never
 rewrite an old observation to hide a different digest.
 
+### Admission publication within existing-member lifecycle
+
+Freeze `admission_link` in the existing Source/guest lifecycle candidate before
+quiescence. The closed `cluster-admission-lifecycle-link/v1` associates the owning
+being/body with an already retained cohort operation/intent digest, Tribe and
+exact owner snapshot command/context. The snapshot pins `expected_preservation`
+and `expected_stores` from that authenticated predecessor. It cannot be added as
+a caller flag to an ordinary update. Lifecycle child operations refer to the
+already frozen cohort intent; do not create a circular hash of their own intent.
+
+Complete Source `publish()` preservation or guest `preserve()` before native
+relationship/application writes. `retain_admission_group()` then reobserves the
+actual qualified owner's snapshot and retains the derived after-group once in
+the existing lifecycle observations. Original predecessor/candidate and native
+owner requests stay intact. Guests take the approved public authority closure
+through the existing UID1000 request route; Source resolves its exact retained
+owner context locally. The coordinator must still correlate the publication
+command digests with its approved social intent/results.
+
+Snapshot guards verify immutable bundle/custody/client/key/counter bindings and
+the predecessor's physical store identities/schema read-only before runtime
+loading. Missing or replaced stores cannot be initialized by a failed snapshot.
+Legitimate new ledger rows do not require unchanged full database bytes. Old
+unguarded snapshot requests remain readable/retriable with their exact original
+result shape; they do not become admission preservation proof.
+
+Only this protected admission branch substitutes immutable/store preservation
+for the old full-inventory comparison. Ordinary software updates retain their
+original group/inventory checks. Source base visibility remains separately
+pinned; the after-group supplies only its group publication/visibility pins.
+Guest `execute(authority_closure=...)` refreshes the prospective snapshot before
+a first start; a lost-start retry observes the retained execution. Both profiles
+require actual qualified loaded group and original store bindings, with initial
+sender gates disabled. A snapshot alone never qualifies that process or cohort.
+The admission-aware barrier and protected worker caller remain separate unfinished
+integration; these lifecycle helpers do not establish complete portal admission.
+
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry
 rechecks the real SDK publication/CAS even if a result is cached. Preserve a

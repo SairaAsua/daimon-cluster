@@ -64,7 +64,10 @@ def publication_command(value: dict) -> dict:
                 or re.fullmatch(r'[a-z][a-z0-9-]{0,79}', value['step']) is None
                 or not isinstance(value['action'], str) or value['action'] not in PUBLICATIONS
                 or not isinstance(value['params'], dict)
-                or set(value['params']) != PUBLICATIONS[value['action']]):
+                or set(value['params']) != PUBLICATIONS[value['action']] and not (
+                    value['action'] == 'snapshot'
+                    and PUBLICATIONS['snapshot'] <= set(value['params'])
+                    and set(value['params']) - PUBLICATIONS['snapshot'] <= {'expected_stores', 'expected_preservation'})):
             raise ValueError
         params = value['params']
         if value['action'] == 'application':
@@ -84,9 +87,16 @@ def publication_command(value: dict) -> dict:
             raise ValueError
         if value['action'] == 'snapshot' and (any(not isinstance(step, str)
                 or re.fullmatch(r'[a-z][a-z0-9-]{0,79}', step) is None
-                for key, step in params.items() if key != 'owner_context_sha256')
+                for key, step in params.items() if key not in {
+                    'owner_context_sha256', 'expected_stores', 'expected_preservation'})
                 or not isinstance(params['owner_context_sha256'], str)
                 or re.fullmatch('[0-9a-f]{64}', params['owner_context_sha256']) is None):
+            raise ValueError
+        if 'expected_stores' in params and (not isinstance(params['expected_stores'], dict)
+                or 'ledger' not in params['expected_stores']):
+            raise ValueError
+        if 'expected_preservation' in params and (not isinstance(params['expected_preservation'], dict)
+                or 'expected_stores' not in params):
             raise ValueError
         digest(value)
     except (KeyError, TypeError, ValueError, AttributeError):
@@ -101,6 +111,18 @@ def check_snapshot_context(journal: Path, value: dict) -> None:
                                   limit=being_seed.MAX_SELECTION)
         if digest(context) != value['params']['owner_context_sha256']:
             raise OnboardingError('onboarding_group_owner_context_conflict')
+        if 'expected_stores' in value['params']:
+            from .onboarding_receiving_update import admission_store_bindings, preserved_admission_stores
+            identity = context['identity']
+            root = Path(identity['runtime_root'])
+            bundle = being_seed._read(root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+            if digest(bundle) != identity['runtime_bundle_sha256']:
+                raise OnboardingError('onboarding_group_owner_context_conflict')
+            if 'expected_preservation' in value['params']:
+                preserved_admission_stores(root, bundle, value['params']['expected_preservation'],
+                                          value['params']['expected_stores'])
+            else:
+                admission_store_bindings(root, bundle, value['params']['expected_stores'])
 
 
 def public_authorities(bundle: dict, closure: dict) -> dict:
@@ -333,7 +355,9 @@ def _publication_snapshot(hosted, group_root: Path, operation: Path, value: dict
             or digest(selected) != selection.get('selection_sha256')):
         raise OnboardingError('onboarding_group_snapshot_publication_changed')
     return dict(group=group, selection_sha256=digest(selected), publications=receipts,
-                owner_context_sha256=digest(context))
+                owner_context_sha256=digest(context),
+                stores={role: json.loads(binding.observation)
+                        for role, binding in hosted.service.loaded_stores.items()})
 
 
 def _publication_effect(hosted, group_root: Path, value: dict, closure: dict, *,
@@ -411,6 +435,11 @@ def publication_request(hosted, group_root: Path, journal: Path, value: dict, *,
         check_deadline()
         observed = _publication_effect(hosted, group_root, selected, context['authority_closure'],
             operation=operation, context=context, snapshot=snapshot)
+        if (selected['action'] == 'snapshot' and retained['result'] is not None
+                and 'stores' not in retained['result'] and 'expected_stores' not in selected['params']):
+            # Preserve an older completed observation's exact result shape.
+            # It remains fresh-validated but cannot become admission store proof.
+            observed.pop('stores', None)
         result = dict(schema='cluster-group-publication-result/v1', operation_id=selected['operation_id'],
             step=selected['step'], action=selected['action'], status='recorded',
             receiving_readiness='unobserved', **observed)

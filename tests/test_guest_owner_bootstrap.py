@@ -649,6 +649,57 @@ def test_existing_controller_is_preserved_without_native_publication(preserved_f
         owner.execute('publish', deadline_ns=deadline(), ready_sha256='a' * 64)
 
 
+def test_admission_preserves_actual_owner_and_store_identity_across_ledger_writes(preserved_fixture):
+    from clusterctl.onboarding_group_admission import check_snapshot_context
+    from clusterctl.onboarding_peer import loaded
+    from clusterctl.onboarding_receiving_update import preserved_admission_stores
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    target, request, _, _ = preserved_fixture
+    root = target.package / 'runtime'
+    hosted = loaded(target)
+    stores = {role: json.loads(binding.observation) for role, binding in hosted.service.loaded_stores.items()}
+    before = upgrade.inventory_digest(root)
+    hosted.service.ledger.append_local(kind='experience.observed', subject='synthetic admission preservation',
+        payload={'summary': 'authorized new ledger content'}, signer=hosted.service.signer,
+        sensitivity='shareable', occurred_at_ms=time.time_ns() // 1_000_000)
+    assert upgrade.inventory_digest(root) != before
+    assert preserved_admission_stores(root, target.document_bundle(), request['preservation'], stores) == stores
+    operation = str(uuid.uuid4())
+    journal = target.root / 'snapshot-guard'
+    context_directory = journal / operation / 'owner'
+    context_directory.mkdir(mode=0o700, parents=True)
+    context = dict(identity=dict(runtime_root=str(root), runtime_bundle_sha256=digest(target.document_bundle())))
+    being_seed._write(context_directory / 'context.json', context)
+    snapshot = dict(action='snapshot', operation_id=operation, params=dict(owner_context_sha256=digest(context),
+        expected_stores=stores, expected_preservation=request['preservation']))
+    check_snapshot_context(journal, snapshot)
+    for name in ('custody.json', 'host-clients/receiving-controller/client.json'):
+        path = root / name
+        original = path.read_bytes()
+        path.write_bytes(original + b' ')
+        try:
+            with pytest.raises(OnboardingError, match='preservation_changed'):
+                preserved_admission_stores(root, target.document_bundle(), request['preservation'], stores)
+            with pytest.raises(OnboardingError, match='preservation_changed'):
+                check_snapshot_context(journal, snapshot)
+        finally:
+            path.write_bytes(original)
+    ledger = root / target.document_bundle()['ledger']
+    retained = ledger.with_name('retained-original-ledger')
+    ledger.rename(retained)
+    ledger.write_bytes(retained.read_bytes())
+    ledger.chmod(0o600)
+    try:
+        with pytest.raises(OnboardingError, match='store_binding_changed'):
+            preserved_admission_stores(root, target.document_bundle(), request['preservation'], stores)
+        with pytest.raises(OnboardingError, match='store_binding_changed'):
+            check_snapshot_context(journal, snapshot)
+    finally:
+        ledger.unlink()
+        retained.rename(ledger)
+    assert preserved_admission_stores(root, target.document_bundle(), request['preservation'], stores) == stores
+
+
 def test_lost_preservation_reply_reconciles_exact_durable_record(preserved_fixture, monkeypatch):
     target, request, _, _ = preserved_fixture
     owner = GuestOwnerBootstrap(target, request)

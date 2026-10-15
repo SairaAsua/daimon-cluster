@@ -608,3 +608,130 @@ def test_source_preservation_expiry_distinguishes_new_stop_from_retained_quiesce
         with pytest.raises(OnboardingError, match='authorization_expired'):
             controller.quiesce()
         assert manager.live is True and manager.stops == 0
+
+
+def admission_start_fixture(fixture, monkeypatch):
+    """Explicit owner/manager seams; native publication has separate coverage."""
+    import time
+    import uuid
+    from clusterctl import onboarding_receiving_update as updates
+    from clusterctl.onboarding import digest
+    old, manager, actual = prepared_start_fixture(fixture, monkeypatch)
+    row = old.journal.get(old.operation_id)
+    frozen = copy.deepcopy(row['expected_precondition']['source_bootstrap'])
+    candidate = copy.deepcopy(row['intended_transition']['source_bootstrap'])
+    now = time.time_ns() // 1_000_000
+    pins = dict(runtime_sha256=frozen['bundle_sha256'], origin=frozen['predecessor']['server'],
+        active=True, not_before_ms=now - 1000, not_after_ms=now + 7200000)
+    frozen.update(mode='preserve', preservation=pins)
+    stores = {'ledger': {'synthetic': 'original physical store observation'}}
+    frozen['predecessor']['runtime_status']['loaded_runtime'] = {'stores': stores}
+    previous = candidate['qualification']['group']
+    previous['selected']['tribe_ref'] = 'tribe:fixture'
+    after = {**copy.deepcopy(previous), 'application_sha256': 'a' * 64,
+        'publication_sha256': 'b' * 64, 'installation_sha256': 'c' * 64}
+    current = [copy.deepcopy(after)]
+    source = old.source
+    source.outputs = source.root.parent / 'source-outputs'
+    context = {'authority_closure': {}}
+    operation = str(uuid.uuid4())
+    directory = source.outputs / 'group-admission' / operation / 'owner'
+    directory.mkdir(mode=0o700, parents=True)
+    being_seed._write(directory / 'context.json', context)
+    request = dict(operation_id=operation, step='lifecycle-snapshot', action='snapshot', params=dict(
+        application_step='application', visibility_step='visibility', selection_step='selection',
+        owner_context_sha256=digest(context), expected_stores=stores, expected_preservation=pins))
+    link = dict(schema='cluster-admission-lifecycle-link/v1', cohort_operation_id='operation:cohort',
+        cohort_intent_sha256='d' * 64, tribe_ref='tribe:fixture', owner=dict(
+            being_ref='fixture-being', embodiment_id='fixture-body'), snapshot_request=request)
+    candidate.update(admission_link=link, expires_at_ms=now + 60000)
+    planned = plan_update(old.journal, manifest_digest='a' * 64, target='source:admission-fixture',
+        expected_precondition={'source_bootstrap': frozen}, intended_transition={'source_bootstrap': candidate},
+        audit_identity={'actor': 'fixture'})
+    controller = SourceBootstrapController(old.journal, planned['operation_id'], source, manager)
+    checked = old._qualify_candidate(row, row['intended_transition']['source_bootstrap'])
+    monkeypatch.setattr(controller, '_qualify_candidate', lambda *_args, **_kwargs: checked)
+    monkeypatch.setattr(controller, '_admission_preserved', lambda *_: copy.deepcopy(stores))
+    monkeypatch.setattr(updates, 'controller_preservation', lambda *_: pins)
+    monkeypatch.setattr(updates, 'source_bootstrap_group', lambda *_: copy.deepcopy(current[0]))
+    controller._record('quiesced', {'exit_observed': True})
+    controller._record('unit_selected', dict(selected=True, selected_sha256=hashlib.sha256(manager.unit.read_bytes()).hexdigest()))
+    controller._record('owner_preserved', dict(runtime_bytes_sha256=actual['base_runtime_status']['loaded_runtime']['runtime_bundle_sha256'],
+        visibility_sha256=hashlib.sha256(source.visibility.read_bytes()).hexdigest(), inventory_sha256='obsolete inventory'))
+    snapshots = []
+    def observe(command, **kwargs):
+        assert command == request and kwargs['authority_closure'] == {}
+        assert 'owner_preserved' in controller._row()[0]['runtime_observation']['source_bootstrap']
+        snapshots.append(True)
+        return dict(schema='cluster-group-publication-result/v1', **{key: request[key] for key in ('operation_id', 'step', 'action')},
+            status='recorded', receiving_readiness='unobserved', group=copy.deepcopy(current[0]),
+            owner_context_sha256=digest(context), stores=copy.deepcopy(stores), publications={})
+    source.group_publication = observe
+    actual['group'] = copy.deepcopy(after['selected'])
+    actual['base_runtime_status']['loaded_runtime']['stores'] = copy.deepcopy(stores)
+    actual['runtime_status']['loaded_application'].update(application_sha256=after['application_sha256'],
+        publication_sha256=after['publication_sha256'], visibility={'installation_sha256': after['installation_sha256']})
+    return controller, manager, actual, current, snapshots
+
+
+def test_admission_requires_retained_after_group_then_starts_the_same_approved_body(fixture, monkeypatch):
+    controller, manager, _, _, snapshots = admission_start_fixture(fixture, monkeypatch)
+    before = controller._row()[0]
+    with pytest.raises(OnboardingError, match='group_unobserved'):
+        controller.start()
+    assert manager.starts == 0
+    derived = controller.retain_admission_group()
+    assert controller.retain_admission_group() == derived and len(snapshots) == 2
+    assert controller._row()[0]['intent'] == before['intent']
+    assert controller._row()[0]['intended_transition'] == before['intended_transition']
+    result = controller.start()
+    assert result['receiving_readiness'] == 'unobserved'
+    assert controller.start() == result and manager.starts == 1
+    with pytest.raises(OnboardingError, match='preservation_required'):
+        controller.retain_admission_group()
+    assert manager.starts == 1
+
+
+def test_admission_does_not_start_a_changed_group_or_rewrite_its_original_derivation(fixture, monkeypatch):
+    controller, manager, _, current, _ = admission_start_fixture(fixture, monkeypatch)
+    derived = controller.retain_admission_group()
+    current[0]['application_sha256'] = 'f' * 64
+    with pytest.raises(OnboardingError, match='observation_conflict'):
+        controller.retain_admission_group()
+    assert controller._row()[0]['runtime_observation']['source_bootstrap']['admission_group'] == derived
+    with pytest.raises(OnboardingError, match='publication_changed'):
+        controller.start()
+    assert manager.starts == 0
+
+
+def test_ordinary_source_update_cannot_adopt_an_admission_snapshot(fixture, monkeypatch):
+    controller, manager, _ = prepared_start_fixture(fixture, monkeypatch)
+    with pytest.raises(OnboardingError, match='lifecycle_link_required'):
+        controller.retain_admission_group()
+    assert manager.starts == 0
+
+
+def test_admission_loaded_replacement_must_keep_the_original_store_bindings(fixture, monkeypatch):
+    controller, manager, actual, _, _ = admission_start_fixture(fixture, monkeypatch)
+    controller.retain_admission_group()
+    actual['base_runtime_status']['loaded_runtime']['stores'] = {'ledger': {'synthetic': 'another physical store'}}
+    with pytest.raises(OnboardingError, match='loaded_store_conflict'):
+        controller.start()
+    with pytest.raises(OnboardingError, match='loaded_store_conflict'):
+        controller.start()
+    assert manager.starts == 1
+    assert 'controlled_loaded' not in controller._row()[0]['runtime_observation']['source_bootstrap']
+
+
+def test_wrong_admission_tribe_refuses_before_source_quiescence(fixture, monkeypatch):
+    controller, manager, _, _, _ = admission_start_fixture(fixture, monkeypatch)
+    original = controller._row()[0]
+    after = copy.deepcopy(original['intended_transition'])
+    after['source_bootstrap']['admission_link']['tribe_ref'] = 'tribe:other'
+    row = plan_update(controller.journal, manifest_digest='a' * 64, target='source:wrong-admission-tribe',
+        expected_precondition=original['expected_precondition'], intended_transition=after,
+        audit_identity={'actor': 'fixture'})
+    manager.live = True
+    with pytest.raises(OnboardingError, match='admission_tribe_changed'):
+        SourceBootstrapController(controller.journal, row['operation_id'], controller.source, manager).quiesce()
+    assert manager.live and manager.stops == 0

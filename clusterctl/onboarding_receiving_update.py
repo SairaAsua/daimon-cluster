@@ -824,6 +824,103 @@ def bootstrap_effects(observations: dict, *, source: bool, mode: str) -> tuple[s
     return published['runtime_sha256'], None
 
 
+def admission_lifecycle_link(value: dict, *, being_ref: str, embodiment_id: str) -> dict:
+    """Validate the protected association frozen before any lifecycle effect."""
+    from .onboarding_group_admission import publication_command
+    try:
+        if (not isinstance(value, dict) or set(value) != {'schema', 'cohort_operation_id',
+                'cohort_intent_sha256', 'tribe_ref', 'owner', 'snapshot_request'}
+                or value['schema'] != 'cluster-admission-lifecycle-link/v1'
+                or not isinstance(value['cohort_operation_id'], str) or not value['cohort_operation_id']
+                or len(value['cohort_operation_id']) > 240
+                or not isinstance(value['cohort_intent_sha256'], str)
+                or re.fullmatch('[0-9a-f]{64}', value['cohort_intent_sha256']) is None
+                or not isinstance(value['tribe_ref'], str) or not value['tribe_ref']
+                or value['owner'] != dict(being_ref=being_ref, embodiment_id=embodiment_id)):
+            raise ValueError
+        command = publication_command(value['snapshot_request'])
+        if (command['action'] != 'snapshot' or not isinstance(command['params'].get('expected_preservation'), dict)
+                or not isinstance(command['params'].get('expected_stores'), dict)
+                or 'ledger' not in command['params']['expected_stores']):
+            raise ValueError
+    except (ValueError, TypeError, KeyError):
+        raise OnboardingError('receiving_admission_lifecycle_link_required') from None
+    return json.loads(json.dumps(value))
+
+
+def admission_group_derivation(link: dict, snapshot: dict, *, previous: dict, stores: dict) -> dict:
+    """Bind the owner's observed after-group to the original admission intent.
+
+    Call only with the actual qualified owner's snapshot result. The native
+    route authenticates publications; this layer preserves the frozen physical
+    association and original store identities, never a replacement host pin.
+    """
+    command = link['snapshot_request']
+    if (not isinstance(snapshot, dict) or snapshot.get('schema') != 'cluster-group-publication-result/v1'
+            or any(snapshot.get(key) != command[key] for key in ('operation_id', 'step', 'action'))
+            or snapshot.get('status') != 'recorded' or snapshot.get('receiving_readiness') != 'unobserved'
+            or snapshot.get('owner_context_sha256') != command['params']['owner_context_sha256']
+            or not isinstance(stores, dict) or 'ledger' not in stores or not stores
+            or snapshot.get('stores') != stores
+            or not isinstance(snapshot.get('group'), dict)
+            or snapshot['group'].get('selected') != previous['selected']
+            or snapshot['group']['selected'].get('tribe_ref') != link['tribe_ref']):
+        raise OnboardingError('receiving_admission_group_changed')
+    return dict(schema='cluster-admission-group-derivation/v1', link_sha256=digest(link),
+        cohort_operation_id=link['cohort_operation_id'], cohort_intent_sha256=link['cohort_intent_sha256'],
+        snapshot=snapshot, receiving_readiness='unobserved')
+
+
+def derived_lifecycle_group(candidate: dict, effects: dict, previous: dict, *, required: bool = False) -> dict:
+    """Ordinary updates keep the original group; admissions need retained proof."""
+    link = candidate.get('admission_link')
+    retained = effects.get('admission_group')
+    if link is None:
+        if retained is not None:
+            raise OnboardingError('receiving_admission_lifecycle_link_required')
+        return previous
+    if retained is None:
+        if required:
+            raise OnboardingError('receiving_admission_group_unobserved')
+        return previous
+    if (retained.get('schema') != 'cluster-admission-group-derivation/v1'
+            or retained.get('link_sha256') != digest(link)
+            or retained.get('cohort_operation_id') != link['cohort_operation_id']
+            or retained.get('cohort_intent_sha256') != link['cohort_intent_sha256']
+            or retained.get('receiving_readiness') != 'unobserved'):
+        raise OnboardingError('receiving_admission_group_changed')
+    return retained['snapshot']['group']
+
+
+def admission_store_bindings(root: Path, bundle: dict, original: dict | None) -> dict:
+    """Verify original physical stores read-only, before any runtime can open them."""
+    from daimon_matrix.service import LoadedStoreBinding
+    if not isinstance(original, dict) or 'ledger' not in original or set(original) - {'ledger', 'relationships'}:
+        raise OnboardingError('receiving_admission_store_binding_required')
+    current = {}
+    for role in original:
+        name = bundle['ledger'] if role == 'ledger' else bundle['relationships']['store_filename']
+        if not isinstance(name, str) or name in {'', '.', '..'} or Path(name).name != name:
+            raise OnboardingError('receiving_admission_store_binding_changed')
+        metadata = ({'ledger': 'metadata', 'communication': 'communication_meta'} if role == 'ledger'
+                    else {'relationships': 'metadata'})
+        try:
+            binding = LoadedStoreBinding.capture(root / name, metadata=metadata)
+            binding.verify()
+        except (ValueError, OSError):
+            raise OnboardingError('receiving_admission_store_binding_changed') from None
+        current[role] = json.loads(binding.observation)
+    if current != original:
+        raise OnboardingError('receiving_admission_store_binding_changed')
+    return current
+
+
+def preserved_admission_stores(root: Path, bundle: dict, preservation: dict, original: dict | None) -> dict:
+    if controller_preservation(root, bundle) != preservation:
+        raise OnboardingError('receiving_controller_preservation_changed')
+    return admission_store_bindings(root, bundle, original)
+
+
 def freeze_source_bootstrap(source, manager) -> dict:
     """Freeze the Source's existing identity and actual Matrix manager scope."""
     with OwnerGroupClient(source.root, source.root / 'matrix.sock') as owner:
@@ -849,7 +946,7 @@ def freeze_source_bootstrap(source, manager) -> dict:
 def prepare_source_bootstrap(source, *, home: Path, code: Path, code_digest: str,
                              config: Path, manifest_path: Path, manifest_digest: str,
                              transaction: Path, expires_at_ms: int, code_uid: int = 0,
-                             manifest_uid: int = 0) -> dict:
+                             manifest_uid: int = 0, admission_link: dict | None = None) -> dict:
     """Prepare the exact supported Source command before managed interruption.
 
     Only owner-protected release/configuration inputs select executable code.
@@ -874,7 +971,10 @@ def prepare_source_bootstrap(source, *, home: Path, code: Path, code_digest: str
     imports = onboarding_sdk.runtime_imports(venv, code, code_uid=code_uid, **parameters)
     argv = onboarding_sdk.runtime_command(venv, imports, code, 'clusterctl.onboarding_source',
         ['--config', str(config), '--code-digest', code_digest, '--code-owner', str(code_uid)])
-    return dict(transaction=str(transaction), expires_at_ms=expires_at_ms, argv=argv,
+    association = ({} if admission_link is None else dict(admission_link=admission_lifecycle_link(
+        admission_link, being_ref=bundle['manifest']['being_ref'],
+        embodiment_id=bundle['local_origin']['embodiment_id'])))
+    return dict(transaction=str(transaction), expires_at_ms=expires_at_ms, argv=argv, **association,
         qualification=dict(home=str(home), code=str(code), code_digest=code_digest, code_uid=code_uid, group=group,
             config=str(config), manifest_path=str(manifest_path), manifest_uid=manifest_uid, prepared=checked))
 
@@ -1047,6 +1147,7 @@ def freeze_guest_bootstrap(target, *, deadline_ns: int, initial: bool = False,
         code_digest=target.code_digest, runtime_sha256=digest(bundle), group_sha256=digest(group),
         mode=mode, preservation=preservation, **renewal,
         being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'], group=group,
+        store_bindings=(observed['runtime_status'].get('loaded_runtime') or {}).get('stores'),
         observer_startup=target.qualified_startup,
         predecessor=dict(process=observed['process'], admission_parent=observed['admission_parent']))
 
@@ -1295,16 +1396,29 @@ class SourceBootstrapController:
                     'qualification' not in candidate
                     or frozen['preservation'].get('runtime_sha256') != frozen.get('bundle_sha256')
                     or frozen['preservation'].get('origin') != frozen['predecessor'].get('server'))
-                or set(candidate) not in ({'transaction', 'expires_at_ms', 'argv'},
+                or set(candidate) - {'admission_link'} not in ({'transaction', 'expires_at_ms', 'argv'},
                     {'transaction', 'expires_at_ms', 'argv', 'qualification'})):
             raise OnboardingError('receiving_bootstrap_binding_conflict')
+        if 'admission_link' in candidate:
+            if frozen.get('mode') != 'preserve' or 'qualification' not in candidate:
+                raise OnboardingError('receiving_admission_prepared_controller_required')
+            being_ref, embodiment_id = _owner_identity(frozen['predecessor'])
+            link = admission_lifecycle_link(candidate['admission_link'], being_ref=being_ref, embodiment_id=embodiment_id)
+            group = candidate['qualification'].get('group') if isinstance(candidate['qualification'], dict) else None
+            if (not isinstance(group, dict) or not isinstance(group.get('selected'), dict)
+                    or link['tribe_ref'] != group['selected'].get('tribe_ref')):
+                raise OnboardingError('receiving_admission_tribe_changed')
+            stores = (frozen['predecessor']['runtime_status'].get('loaded_runtime') or {}).get('stores')
+            if (not isinstance(stores, dict) or stores != link['snapshot_request']['params']['expected_stores']
+                    or frozen['preservation'] != link['snapshot_request']['params']['expected_preservation']):
+                raise OnboardingError('receiving_admission_store_binding_required')
         transaction = Path(candidate['transaction'])
         if (not transaction.is_absolute() or '..' in transaction.parts
                 or transaction.parent != self.source.root.parent or transaction == self.source.root):
             raise OnboardingError('receiving_bootstrap_binding_conflict')
         return row, frozen, candidate
 
-    def _qualify_candidate(self, row: dict, candidate: dict) -> dict:
+    def _qualify_candidate(self, row: dict, candidate: dict, *, check_group: bool = True) -> dict:
         from .onboarding_code_successor import sdk_parameters
         qualification = candidate['qualification']
         if (not isinstance(qualification, dict) or set(qualification) != {
@@ -1319,7 +1433,9 @@ class SourceBootstrapController:
         code = Path(qualification['code'])
         onboarding_release.regular(code / 'clusterctl/onboarding_source.py', uid=qualification['code_uid'])
         bundle = being_seed._read(self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
-        if source_bootstrap_group(self.source, bundle) != qualification['group']:
+        effects = (row['runtime_observation'] or {}).get('source_bootstrap', {})
+        if check_group and source_bootstrap_group(self.source, bundle) != derived_lifecycle_group(
+                candidate, effects, qualification['group']):
             raise OnboardingError('receiving_bootstrap_group_changed')
         prepared = qualification['prepared']
         predecessor = row['expected_precondition']['source_bootstrap']['predecessor']
@@ -1357,6 +1473,58 @@ class SourceBootstrapController:
         observations['source_bootstrap'] = bootstrap
         self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
                              expected_runtime_observation=row['runtime_observation'])
+
+    def _admission_preserved(self, frozen: dict) -> dict:
+        """Check immutable owner/store bindings under the native writer.
+
+        The original loaded store observations bind physical identity and
+        schema, not mutable ledger contents. Only the frozen admission branch
+        uses this instead of ordinary full-inventory equality.
+        """
+        bundle = being_seed._read(self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+        original = (frozen['predecessor']['runtime_status'].get('loaded_runtime') or {}).get('stores')
+        return preserved_admission_stores(self.source.root, bundle, frozen['preservation'], original)
+
+    def retain_admission_group(self, *, timeout_seconds: float = 30) -> dict:
+        """Derive the after-group only from this pre-approved owner's effects."""
+        from .onboarding_service import selection_lock
+        from .owner_process import observe_process_exit
+        if type(timeout_seconds) not in {int, float} or not 0 < timeout_seconds <= 60:
+            raise OnboardingError('receiving_bootstrap_invalid_wait')
+        with self.journal.mutation_lock(self.operation_id), selection_lock(self.manager.unit):
+            row, frozen, candidate = self._row()
+            link = candidate.get('admission_link')
+            if link is None:
+                raise OnboardingError('receiving_admission_lifecycle_link_required')
+            self._qualify_candidate(row, candidate, check_group=False)
+            effects = (row['runtime_observation'] or {}).get('source_bootstrap', {})
+            if ('owner_preserved' not in effects or 'controlled_loaded' in effects
+                    or effects.get('quiesced', {}).get('exit_observed') is not True
+                    or not observe_process_exit(frozen['predecessor']['process'])):
+                raise OnboardingError('receiving_admission_preservation_required')
+            self._stopped(frozen, candidate)
+            with self.source.writer():
+                stores = self._admission_preserved(frozen)
+            request = link['snapshot_request']
+            context = being_seed._read(self.source.outputs / 'group-admission' /
+                request['operation_id'] / 'owner/context.json', limit=being_seed.MAX_SELECTION)
+            if digest(context) != request['params']['owner_context_sha256']:
+                raise OnboardingError('receiving_admission_group_changed')
+            snapshot = self.source.group_publication(request, authority_closure=context['authority_closure'],
+                deadline_ns=time.monotonic_ns() + int(timeout_seconds * 1_000_000_000))
+            derived = admission_group_derivation(link, snapshot,
+                previous=candidate['qualification']['group'], stores=stores)
+            self._stopped(frozen, candidate)
+            with self.source.writer():
+                if self._admission_preserved(frozen) != stores:
+                    raise OnboardingError('receiving_admission_store_binding_changed')
+                if source_bootstrap_group(self.source, being_seed._read(
+                        self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)) != snapshot['group']:
+                    raise OnboardingError('receiving_admission_group_changed')
+                if hashlib.sha256(self._visibility_current(frozen, {})).hexdigest() != frozen['visibility_sha256']:
+                    raise OnboardingError('receiving_bootstrap_visibility_changed')
+            self._record('admission_group', derived)
+            return derived
 
     def _stopped(self, frozen: dict, candidate: dict, *, deadline_ns: int | None = None):
         from .onboarding_service import entrypoint
@@ -1450,7 +1618,12 @@ class SourceBootstrapController:
         with self.journal.mutation_lock(self.operation_id), selection_lock(self.manager.unit):
             row, frozen, candidate = self._row()
             if 'qualification' in candidate:
-                self._qualify_candidate(row, candidate)
+                effects = (row['runtime_observation'] or {}).get('source_bootstrap', {})
+                if ('admission_link' in candidate and 'owner_preserved' in effects
+                        and effects.get('quiesced', {}).get('exit_observed') is True):
+                    self._qualify_candidate(row, candidate, check_group=False)
+                else:
+                    self._qualify_candidate(row, candidate)
             if row['state'] == 'planned':
                 self.journal.advance(self.operation_id, 'runtime-dispatching')
             if frozen.get('mode', 'issue') in {'preserve', 'renew'}:
@@ -1564,12 +1737,17 @@ class SourceBootstrapController:
                     current_visibility = self._visibility_current(frozen, {})
                     if hashlib.sha256(current_visibility).hexdigest() != frozen['visibility_sha256']:
                         raise OnboardingError('receiving_bootstrap_visibility_changed')
-                    result = preservation_result(upgrade, self.source.root, frozen['preservation'],
-                        password=self.source._reader(), operation_id=self.operation_id,
-                        request_sha256=digest(dict(frozen=frozen, candidate=candidate)),
-                        expires_at_ms=candidate['expires_at_ms'], retained=observations.get('owner_preserved'))
+                    if 'admission_link' in candidate and 'owner_preserved' in observations:
+                        self._admission_preserved(frozen)
+                        result = observations['owner_preserved']
+                    else:
+                        result = preservation_result(upgrade, self.source.root, frozen['preservation'],
+                            password=self.source._reader(), operation_id=self.operation_id,
+                            request_sha256=digest(dict(frozen=frozen, candidate=candidate)),
+                            expires_at_ms=candidate['expires_at_ms'], retained=observations.get('owner_preserved'))
                     if source_bootstrap_group(self.source, being_seed._read(
-                            self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)) != candidate['qualification']['group']:
+                            self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)) != derived_lifecycle_group(
+                                candidate, observations, candidate['qualification']['group']):
                         raise OnboardingError('receiving_bootstrap_group_changed')
                     if hashlib.sha256(self._visibility_current(frozen, {})).hexdigest() != frozen['visibility_sha256']:
                         raise OnboardingError('receiving_bootstrap_visibility_changed')
@@ -1678,6 +1856,8 @@ class SourceBootstrapController:
                 raise OnboardingError('qualified_bootstrap_candidate_required')
             checked = self._qualify_candidate(row, candidate)
             observations = (row['runtime_observation'] or {}).get('source_bootstrap', {})
+            expected_group = derived_lifecycle_group(candidate, observations, candidate['qualification']['group'],
+                required='admission_link' in candidate)
             selected = observations.get('unit_selected')
             if not isinstance(selected, dict) or selected.get('selected') is not True:
                 raise OnboardingError('receiving_bootstrap_publication_required')
@@ -1702,8 +1882,10 @@ class SourceBootstrapController:
                             from daimon_matrix import operator_runtime_upgrade as upgrade
                             preservation_authorization(frozen['preservation'], candidate['expires_at_ms'])
                             bundle = being_seed._read(self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
-                            if (controller_preservation(self.source.root, bundle) != frozen['preservation']
-                                    or upgrade.inventory_digest(self.source.root) != observations['owner_preserved']['inventory_sha256']):
+                            if 'admission_link' in candidate:
+                                self._admission_preserved(frozen)
+                            elif (controller_preservation(self.source.root, bundle) != frozen['preservation']
+                                      or upgrade.inventory_digest(self.source.root) != observations['owner_preserved']['inventory_sha256']):
                                 raise OnboardingError('receiving_controller_preservation_changed')
                         actual_bundle = hashlib.sha256(onboarding_release.regular(
                             self.source.root / 'runtime.json', uid=os.geteuid())).hexdigest()
@@ -1713,7 +1895,7 @@ class SourceBootstrapController:
                                 or actual_visibility != expected_visibility
                                 or source_bootstrap_group(self.source, being_seed._read(
                                     self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION))
-                                   != candidate['qualification']['group']):
+                                   != expected_group):
                             raise OnboardingError('receiving_bootstrap_publication_changed')
                     # Named-unit scope, including recovery after lost dispatch
                     # confirmation. An active candidate is only observed.
@@ -1745,7 +1927,7 @@ class SourceBootstrapController:
                         expected = dict(code_digest=checked['code_digest'], matrix_commit=checked['matrix_revision'],
                             sdk_digest=checked['sdk_digest'], matrix_wheel_sha256=checked['matrix_wheel_sha256'],
                             reader=checked['reader'])
-                        group = candidate['qualification']['group']
+                        group = expected_group
                         if (any(startup.get(key) != value for key, value in expected.items())
                                 or startup.get('process_id') != actual['process']['pid']
                                 or base.get('runtime_bundle_sha256') != expected_runtime
@@ -1753,6 +1935,9 @@ class SourceBootstrapController:
                                 or not isinstance(gate, dict) or gate.get('controlled') is not True
                                 or gate.get('process_id') != actual['process']['pid']):
                             raise OnboardingError('receiving_bootstrap_loaded_candidate_conflict')
+                        if ('admission_link' in candidate and base.get('stores') !=
+                                (frozen['predecessor']['runtime_status'].get('loaded_runtime') or {}).get('stores')):
+                            raise OnboardingError('receiving_bootstrap_loaded_store_conflict')
                         if (actual.get('group') != group['selected']
                                 or any(application.get(key) != group[key]
                                        for key in ('application_sha256', 'publication_sha256'))
@@ -1779,7 +1964,8 @@ class SourceBootstrapController:
 
 def prepare_guest_bootstrap(backend, plan: dict, *, candidate: tuple[Path, str],
                             manifest_path: Path, manifest_digest: str, expires_at_ms: int,
-                            timeout_seconds: float = 30, manifest_uid: int = 0) -> tuple[dict, dict]:
+                            timeout_seconds: float = 30, manifest_uid: int = 0,
+                            admission_link: dict | None = None) -> tuple[dict, dict]:
     """Prepare one guest without selecting code or interrupting its service.
 
     A receiving operation freezes these vectors before any lifecycle effect.
@@ -1829,10 +2015,12 @@ def prepare_guest_bootstrap(backend, plan: dict, *, candidate: tuple[Path, str],
     # subsequently validates against its actual preserved disk unit too.
     from .onboarding_service import entrypoint
     entrypoint(b'[Service]\nExecStart=/prepared\n', argv)
+    association = ({} if admission_link is None else dict(admission_link=admission_lifecycle_link(
+        admission_link, being_ref=owner['being_ref'], embodiment_id=owner['origin']['embodiment_id'])))
     return dict(plan=plan, owner=owner, root=root), dict(
         runtime_code=str(candidate[0]), runtime_digest=candidate[1], manifest_path=str(manifest_path),
         manifest_uid=manifest_uid, code_uid=os.geteuid(), prepared=checked,
-        argv=argv, expires_at_ms=expires_at_ms)
+        argv=argv, expires_at_ms=expires_at_ms, **association)
 
 
 def guest_bootstrap_operation_id(operation_id: str) -> str:
@@ -1894,6 +2082,17 @@ class GuestBootstrapController:
                 visibility=Path(frozen['owner']['group']['selected']['visibility']),
                 runtime_code=selected, runtime_digest=candidate['runtime_digest']):
             raise OnboardingError('receiving_guest_bootstrap_binding_conflict')
+        if 'admission_link' in candidate:
+            owner = frozen['owner']
+            if owner.get('mode') != 'preserve':
+                raise OnboardingError('receiving_admission_prepared_controller_required')
+            link = admission_lifecycle_link(candidate['admission_link'], being_ref=owner['being_ref'],
+                embodiment_id=owner['origin']['embodiment_id'])
+            if link['tribe_ref'] != owner['group']['selected']['tribe_ref']:
+                raise OnboardingError('receiving_admission_tribe_changed')
+            if (owner.get('store_bindings') != link['snapshot_request']['params']['expected_stores']
+                    or owner['preservation'] != link['snapshot_request']['params']['expected_preservation']):
+                raise OnboardingError('receiving_admission_store_binding_required')
         return row, frozen, candidate
 
     def _record(self, name: str, value: dict) -> None:
@@ -1910,9 +2109,9 @@ class GuestBootstrapController:
         self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
             expected_runtime_observation=row['runtime_observation'])
 
-    def execute(self, *, timeout_seconds: float = 30) -> dict:
+    def execute(self, *, timeout_seconds: float = 30, authority_closure: dict | None = None) -> dict:
         """Resume exact local effects; never blindly stop a replacement process."""
-        return self._advance(timeout_seconds=timeout_seconds, quiesce_only=False)
+        return self._advance(timeout_seconds=timeout_seconds, phase='load', authority_closure=authority_closure)
 
     def quiesce(self, *, timeout_seconds: float = 30) -> dict:
         """Retain and recheck predecessor exit without publishing or starting.
@@ -1921,9 +2120,17 @@ class GuestBootstrapController:
         is stopped. This is the same bounded lifecycle operation as execute,
         not permission to stop a replacement or report receiving readiness.
         """
-        return self._advance(timeout_seconds=timeout_seconds, quiesce_only=True)
+        return self._advance(timeout_seconds=timeout_seconds, phase='quiesce')
 
-    def _advance(self, *, timeout_seconds: float, quiesce_only: bool) -> dict:
+    def preserve(self, *, timeout_seconds: float = 30) -> dict:
+        """Finish existing-owner preservation before admission writes."""
+        return self._advance(timeout_seconds=timeout_seconds, phase='preserve')
+
+    def retain_admission_group(self, *, authority_closure: dict, timeout_seconds: float = 30) -> dict:
+        return self._advance(timeout_seconds=timeout_seconds, phase='derive', authority_closure=authority_closure)
+
+    def _advance(self, *, timeout_seconds: float, phase: str,
+                 authority_closure: dict | None = None) -> dict:
         from .onboarding_host import HostConfig
         with ExitStack() as locks:
             locks.enter_context(self.journal.mutation_lock(self.operation_id))
@@ -1936,6 +2143,10 @@ class GuestBootstrapController:
             row, frozen, candidate = self._row()
             if self.backend.config != HostConfig.load(Path(row['expected_precondition']['host_config'])):
                 raise OnboardingError('receiving_guest_bootstrap_binding_conflict')
+            if phase not in {'load', 'quiesce', 'preserve', 'derive'}:
+                raise OnboardingError('receiving_guest_bootstrap_phase_required')
+            if phase == 'preserve' and frozen['owner'].get('mode') != 'preserve':
+                raise OnboardingError('receiving_admission_prepared_controller_required')
             vector = (Path(candidate['runtime_code']), candidate['runtime_digest'])
             checked = preflight(vector[0], vector[1], Path(candidate['manifest_path']),
                 row['intent']['runtime_call']['manifest_digest'], being_ref=frozen['owner']['being_ref'],
@@ -1958,7 +2169,12 @@ class GuestBootstrapController:
             if 'mode' in frozen['owner']:
                 owner_request.update(mode=frozen['owner']['mode'], preservation=frozen['owner']['preservation'])
             effects = (row['runtime_observation'] or {}).get('guest_bootstraps', {}).get(self.name, {})
-            if quiesce_only and ('started' in effects or 'controlled_loaded' in effects):
+            link = candidate.get('admission_link')
+            if phase == 'derive' and (link is None or 'owner_preserved' not in effects or 'quiesced' not in effects):
+                raise OnboardingError('receiving_admission_preservation_required')
+            if phase == 'load' and link is not None:
+                derived_lifecycle_group(candidate, effects, frozen['owner']['group'], required=True)
+            if phase != 'load' and ('started' in effects or 'controlled_loaded' in effects):
                 raise OnboardingError('receiving_guest_bootstrap_already_started')
             if row['state'] == 'planned':
                 self.journal.advance(self.operation_id, 'runtime-dispatching')
@@ -2001,7 +2217,7 @@ class GuestBootstrapController:
                     if candidate['expires_at_ms'] <= time.time_ns() // 1_000_000:
                         raise OnboardingError('receiving_guest_bootstrap_authorization_expired')
                 self._record('quiesced', root_call('bootstrap-quiesce'))
-            if quiesce_only:
+            if phase == 'quiesce':
                 # A retained exit is historical evidence. The owning root
                 # route rechecks the current unit and exact predecessor exits
                 # before returning, and refuses to stop a replacement.
@@ -2015,7 +2231,8 @@ class GuestBootstrapController:
             if owner_request.get('mode', 'issue') == 'preserve':
                 current = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
                     timeout_seconds=timeout_seconds)
-                if 'owner_preserved' not in effects or current['service']['manager']['ActiveState'] == 'inactive':
+                if ('owner_preserved' not in effects or link is None
+                        and current['service']['manager']['ActiveState'] == 'inactive'):
                     root_call('bootstrap-quiesce')
                     preserved = owner_call('receiving-bootstrap-stage')
                     if (preserved.get('mode') != 'preserve'
@@ -2034,6 +2251,23 @@ class GuestBootstrapController:
                     root_call('bootstrap-quiesce')
                     published = owner_call('receiving-bootstrap-publish', bootstrap_ready_sha256=ready['ready_sha256'])
                     self._record('owner_published', published)
+            if phase == 'preserve':
+                root_call('bootstrap-quiesce')
+                return self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]['owner_preserved']
+            if phase == 'derive' and current['service']['manager']['ActiveState'] != 'inactive':
+                raise OnboardingError('receiving_guest_bootstrap_quiescence_required')
+            if link is not None and current['service']['manager']['ActiveState'] == 'inactive':
+                if not isinstance(authority_closure, dict):
+                    raise OnboardingError('receiving_admission_owner_context_required')
+                root_call('bootstrap-quiesce')
+                snapshot = self.backend._target_call(frozen['plan'], 'group-publication', candidate=vector,
+                    observation_timeout_seconds=timeout_seconds, group_request=dict(
+                        command=link['snapshot_request'], offline=True, authority_closure=authority_closure))
+                derived = admission_group_derivation(link, snapshot,
+                    previous=frozen['owner']['group'], stores=frozen['owner']['store_bindings'])
+                self._record('admission_group', derived)
+                if phase == 'derive':
+                    return derived
             if 'unit_selected' not in effects:
                 if owner_request.get('mode') == 'preserve' and current['service']['unit_sha256'] == frozen['root']['service']['unit_sha256']:
                     preservation_authorization(owner_request['preservation'], candidate['expires_at_ms'])
@@ -2055,8 +2289,14 @@ class GuestBootstrapController:
                 for key in ('process', 'admission_parent')})
         effects = self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]
         expected_runtime, _ = bootstrap_effects(effects, source=False, mode=frozen['owner'].get('mode', 'issue'))
+        owner = frozen['owner']
+        if 'admission_link' in candidate:
+            group = derived_lifecycle_group(candidate, effects, owner['group'], required=True)
+            if observed['runtime_status']['loaded_runtime'].get('stores') != owner['store_bindings']:
+                raise OnboardingError('receiving_bootstrap_loaded_store_conflict')
+            owner = {**owner, 'group': group, 'group_sha256': digest(group)}
         result = dict(schema='cluster-guest-bootstrap-loaded/v1', **guest_loaded_observation(
-            observed, root, frozen['owner'], candidate, expected_runtime=expected_runtime,
+            observed, root, owner, candidate, expected_runtime=expected_runtime,
             unit_sha256=effects['unit_selected']['selected_sha256'],
             manager=effects['started']['manager'], dropins=frozen['root']['service'].get('dropins', {}),
             initial_observation='controlled_loaded' not in effects))

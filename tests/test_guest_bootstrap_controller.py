@@ -498,6 +498,19 @@ def test_fresh_observer_pid_nonce_may_change_without_changing_guest_interpreter(
 
 @pytest.mark.parametrize('lost_phase', [None, 'stage', 'start'])
 def test_controlled_guest_software_adoption_preserves_authority_and_recovers_lost_reply(fixture, lost_phase):
+    controller, backend, calls, _ = controlled_guest_fixture(fixture)
+    backend.fail = lost_phase
+    if lost_phase is not None:
+        with pytest.raises(OSError):
+            controller.execute()
+    result = controller.execute()
+    assert controller.execute() == result
+    assert backend.stages == backend.starts == backend.stops == 1 and backend.publications == 0
+    effects = controller.journal.get(controller.operation_id)['runtime_observation']['guest_bootstraps']['eko']
+    assert 'owner_preserved' in effects and not {'owner_ready', 'owner_published'} & effects.keys()
+
+
+def controlled_guest_fixture(fixture):
     controller, backend, calls, _ = fixture
     original = controller.journal.get(controller.operation_id)
     before = copy.deepcopy(original['expected_precondition'])
@@ -528,12 +541,107 @@ def test_controlled_guest_software_adoption_preserves_authority_and_recovers_los
             result['runtime_status']['loaded_runtime']['runtime_bundle_sha256'] = owner['runtime_sha256']
         return result
     backend._target_call = controlled
-    backend.fail = lost_phase
-    if lost_phase is not None:
-        with pytest.raises(OSError):
-            controller.execute()
-    result = controller.execute()
-    assert controller.execute() == result
-    assert backend.stages == backend.starts == backend.stops == 1 and backend.publications == 0
-    effects = controller.journal.get(row['operation_id'])['runtime_observation']['guest_bootstraps']['eko']
-    assert 'owner_preserved' in effects and not {'owner_ready', 'owner_published'} & effects.keys()
+    return controller, backend, calls, owner
+
+
+def admission_guest_fixture(fixture):
+    controller, backend, calls, owner = controlled_guest_fixture(fixture)
+    row = controller._row()[0]
+    owner['store_bindings'] = {'ledger': {'synthetic': 'original physical store'}}
+    before = copy.deepcopy(row['expected_precondition'])
+    before['guest_bootstraps']['eko']['owner'] = copy.deepcopy(owner)
+    candidate = copy.deepcopy(row['intended_transition']['guest_bootstraps']['eko'])
+    request = dict(operation_id=str(uuid.uuid4()), step='lifecycle-snapshot', action='snapshot', params=dict(
+        application_step='application', visibility_step='visibility', selection_step='selection',
+        owner_context_sha256='1' * 64, expected_stores=owner['store_bindings'],
+        expected_preservation=owner['preservation']))
+    candidate['admission_link'] = dict(schema='cluster-admission-lifecycle-link/v1',
+        cohort_operation_id='operation:cohort', cohort_intent_sha256='2' * 64,
+        tribe_ref=owner['group']['selected']['tribe_ref'], owner=dict(being_ref=owner['being_ref'],
+            embodiment_id=owner['origin']['embodiment_id']), snapshot_request=request)
+    linked = plan_update(controller.journal, manifest_digest='a' * 64, target='guest:admission-fixture',
+        expected_precondition=before, intended_transition={'guest_bootstraps': {'eko': candidate}},
+        audit_identity={'actor': 'fixture'})
+    controller = GuestBootstrapController(controller.journal, linked['operation_id'], backend, 'eko')
+    current = [copy.deepcopy(owner['group'])]
+    snapshots = []
+    previous = backend._target_call
+    def target(plan, action, **options):
+        if action == 'group-publication':
+            assert not backend.active
+            assert options['group_request'] == dict(command=request, offline=True, authority_closure={})
+            assert backend.stages == 1 and backend.publications == 0
+            snapshots.append(True)
+            return dict(schema='cluster-group-publication-result/v1',
+                **{key: request[key] for key in ('operation_id', 'step', 'action')},
+                status='recorded', receiving_readiness='unobserved', owner_context_sha256='1' * 64,
+                group=copy.deepcopy(current[0]), stores=owner['store_bindings'], publications={})
+        result = previous(plan, action, **options)
+        if action == 'admitted-running':
+            result['group'] = copy.deepcopy(current[0]['selected'])
+            result['group_runtime_status']['loaded_application'] = dict(
+                application_sha256=current[0]['application_sha256'], publication_sha256=current[0]['publication_sha256'],
+                visibility={'installation_sha256': current[0]['installation_sha256']})
+            result['runtime_status']['loaded_runtime']['stores'] = copy.deepcopy(owner['store_bindings'])
+        return result
+    backend._target_call = target
+    return controller, backend, calls, current, snapshots
+
+
+def test_guest_admission_preserves_then_derives_and_loads_without_rewriting_the_predecessor(fixture):
+    controller, backend, _, current, snapshots = admission_guest_fixture(fixture)
+    original = controller._row()[0]
+    with pytest.raises(OnboardingError, match='group_unobserved'):
+        controller.execute(authority_closure={})
+    with pytest.raises(OnboardingError, match='preservation_required'):
+        controller.retain_admission_group(authority_closure={})
+    assert backend.stops == 0
+    preserved = controller.preserve()
+    assert controller.preserve() == preserved
+    assert backend.stops == backend.stages == 1 and backend.starts == backend.publications == 0
+    current[0].update(application_sha256='a' * 64, publication_sha256='b' * 64, installation_sha256='c' * 64)
+    derived = controller.retain_admission_group(authority_closure={})
+    assert controller.retain_admission_group(authority_closure={}) == derived
+    assert controller._row()[0]['intent'] == original['intent']
+    assert controller._row()[0]['intended_transition'] == original['intended_transition']
+    with pytest.raises(OnboardingError, match='owner_context_required'):
+        controller.execute()
+    result = controller.execute(authority_closure={})
+    assert controller.execute() == result and result['receiving_readiness'] == 'unobserved'
+    assert len(snapshots) == 3 and backend.stops == backend.stages == backend.starts == 1
+    assert backend.publications == 0
+    for operation in (controller.preserve, lambda: controller.retain_admission_group(authority_closure={})):
+        with pytest.raises(OnboardingError, match='already_started'):
+            operation()
+    assert backend.starts == backend.stops == 1
+
+
+def test_guest_admission_cannot_start_a_later_group_or_replace_its_retained_derivation(fixture):
+    controller, backend, _, current, _ = admission_guest_fixture(fixture)
+    controller.preserve()
+    derived = controller.retain_admission_group(authority_closure={})
+    current[0]['application_sha256'] = 'f' * 64
+    with pytest.raises(JournalConflict, match='guest effect changed'):
+        controller.execute(authority_closure={})
+    assert controller._row()[0]['runtime_observation']['guest_bootstraps']['eko']['admission_group'] == derived
+    assert backend.starts == 0
+
+
+def test_legacy_guest_without_a_prepared_controller_cannot_use_preserve_phase(fixture):
+    controller, backend, calls, _ = fixture
+    with pytest.raises(OnboardingError, match='prepared_controller_required'):
+        controller.preserve()
+    assert not calls and backend.stops == backend.stages == 0
+
+
+def test_wrong_admission_tribe_refuses_before_guest_quiescence(fixture):
+    controller, backend, calls, _, _ = admission_guest_fixture(fixture)
+    original = controller._row()[0]
+    after = copy.deepcopy(original['intended_transition'])
+    after['guest_bootstraps']['eko']['admission_link']['tribe_ref'] = 'tribe:other'
+    row = plan_update(controller.journal, manifest_digest='a' * 64, target='guest:wrong-admission-tribe',
+        expected_precondition=original['expected_precondition'], intended_transition=after,
+        audit_identity={'actor': 'fixture'})
+    with pytest.raises(OnboardingError, match='admission_tribe_changed'):
+        GuestBootstrapController(controller.journal, row['operation_id'], backend, 'eko').preserve()
+    assert not calls and backend.active and backend.stops == 0
