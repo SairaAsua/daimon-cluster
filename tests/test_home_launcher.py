@@ -99,3 +99,22 @@ def test_actual_http_routes_preserve_origin_and_current_reader_boundaries(system
         for path in ('/apps/private.json','/apps/../registry.py','/apps/%2e%2e/registry.py'):
             with pytest.raises(HTTPError) as denied:get(path)
             assert denied.value.code==404
+
+
+def test_launcher_appearance_has_its_own_canonical_surface_without_new_store(system):
+    from clusterctl.homes.homemaker import Homemaker
+    from clusterctl.homes.styles import StyleConsumer
+    app,_=system
+    calls=[]
+    class Provider:
+        def resolve(self, subject, **context):
+            calls.append((subject,context))
+            return {'contract':'homemaker.resolved/v1','appearance':None}
+    app.styles=StyleConsumer(Provider(),app.authority,app.homes)
+    with serving(handler(app)) as base:
+        with urlopen(Request(base+'/style.json?surface=apps',headers={'Host':'one.example.test'})) as response:
+            assert json.load(response)['contract']=='homemaker.resolved/v1'
+    assert calls==[(None,{'author':{'kind':'being','ref':'owner'},'surface':'apps','viewer_scope':None})]
+    # Existing authorized owner selection can target this built-in surface;
+    # no launcher-specific preference database or selection write is added.
+    assert Homemaker.surface(None,'apps')=='apps'
