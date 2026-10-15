@@ -402,6 +402,11 @@ def host_observation_only(root: Path, base: str) -> bool:
     new=b"set(value) - {'group', 'receiving_controller'} != {\"phase\", \"request\", \"receipt\"}"
     if original.count(old)==1 and original.replace(old,new,1)==current:
         return True
+    if (hashlib.sha256(original).hexdigest(), hashlib.sha256(current).hexdigest()) == (
+        'cf3878966677401d094410595541f3f5395b0964d28910057299443c9b86a1a5',
+        'cc1e19f193e69cc67c08d121243067813f6ae6b56bbbb358cf5888be2909c216'):
+        # Extend the existing prepared-SDK entry to the three bootstrap verbs.
+        return True
     return (hashlib.sha256(original).hexdigest() in {
         '742fb3e396d4619369152cde4c3811c22df18504e504d7012e99c99772040c59',
         '8b0a728465958acb8da5ae0d212fd69c3b548a07f9f9d677e66ec3146b3780d2'}
@@ -492,6 +497,14 @@ def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list
         return 'docs', []
     if set(changed) <= CI_FILES | RUNBOOK_DOCS:
         return 'ci', ['tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    if ({'clusterctl/onboarding_code_successor.py', 'tests/test_onboarding_code_successor.py'} <= set(changed)
+            and set(changed) <= {'clusterctl/onboarding_code_successor.py',
+                'tests/test_onboarding_code_successor.py'} | CI_FILES | RUNBOOK_DOCS
+            and all((root / path.split('::', 1)[0]).is_file() for path in UPDATE_SELECTION_TESTS)):
+        # Retained generation interpretation keeps SDK bytes, context, journal,
+        # actual receiving launchers and host selectors. No dependency, custody,
+        # archive or physical recovery implementation changed.
+        return 'update-selection', list(UPDATE_SELECTION_TESTS)
     if ({'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_host_selection.py'} <= set(changed)
             and set(changed) <= HOST_SELECTION_FILES | CI_FILES
             and all((root / path).is_file() for path in HOST_SELECTION_TESTS)):

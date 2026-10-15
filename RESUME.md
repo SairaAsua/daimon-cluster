@@ -8,9 +8,10 @@ Current selections below supersede the explicitly historical qualification.
 
 Matrix [milestone6 / #336](https://github.com/AlterMundi/daimon-matrix/issues/336)
 is active. Cluster [PR242](https://github.com/nicoechaniz/daimon-cluster/pull/242)
-contains the maintained Source/guest/cohort update controllers and their current
+merged the maintained Source/guest/cohort update controllers and their current
 qualification record; Matrix [PR352](https://github.com/AlterMundi/daimon-matrix/pull/352)
-contains the corresponding SDK candidate. Neither draft is a live-selection receipt.
+contains the corresponding SDK candidate and remains draft. The Cluster merge
+and isolated forward/compatible rollback qualification are not live-selection receipts.
 The existing three-body production group below stays selected.
 The candidate SDK pin is `0dc0b555939b16a1150a220a366a6911a5ae9c28`, including owner-local #355
 recovery without rebirth; it is not the selected production SDK. Qualification

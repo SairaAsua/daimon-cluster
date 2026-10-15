@@ -144,7 +144,8 @@ a forwarding proxy changes SO_PEERCRED and is not the same native responder.
 Changes to the already-covered code-successor test module keep receiving coverage;
 they must not select unrelated physical/archive qualification. The receiving SDK
 suite previously took804 seconds before the newly enabled canonical-owner pass;
-its combined job has a20-minute ceiling rather than an impossible15-minute bound.
+budget the selected suite and setup from actual job duration. The current full
+job has a30-minute cap; this does not alter runtime observation deadlines.
 Qualified `sdk-prepare` installs and verifies the closed runtime import tree before
 returning ready. Do this dependency preparation before freezing a finite owner
 operation or stopping a receiver; the first import-tree construction must not
@@ -162,6 +163,17 @@ Before a real communication-interrupting operation, prepare its exact candidate,
 required receiver readiness and recovery, and obtain scoped human authorization.
 Every global Stop independently requires fresh explicit human consent. These
 requirements remain; they are not permission for repeated approval rounds.
+
+Inspect the Source's effective systemd configuration during preparation. The
+maintained Source selector owns one unit; historical ExecStart override stacks
+must not hide a selected command. If such overrides exist, prepare a consolidation
+of the exact effective entrypoint and every retained non-entrypoint directive
+into that unit. Preserve the original unit and override bytes, bind their hashes
+and the live invocation, and validate the candidate with systemd before applying.
+Apply that normalization only within the authorized rollout and shared selection
+lock, then freeze the actual normalized manager state through the ordinary
+controller. Never fake an inspection, ignore a live override or add another
+override to out-sort the previous ones. Subsequent updates use the single unit.
 
 ## Preserve the receiving context
 

@@ -102,7 +102,27 @@ def verify(code: Path, fingerprint: str, base: Path, base_fingerprint: str, *, u
         from . import onboarding_sdk
         previous = onboarding_sdk.verify(base, uid=uid,
             matrix_commit=onboarding_sdk.PREVIOUS_MATRIX_COMMIT)
-        current = onboarding_sdk.verify(code, uid=uid, **sdk_parameters(code, uid=uid))
+        parameters = sdk_parameters(code, uid=uid)
+        if not qualified_sdk:
+            # An approved V2/V3 generation pins its complete SDK manifest.
+            # Reading that retained selection must not substitute today's SDK
+            # default. This is public-code verification, not promotion of a
+            # legacy process into qualified V4 startup or a relaxed install pin.
+            value = json.loads(onboarding_release.regular(code / 'sdk/sdk.json', uid=uid))
+            if not isinstance(value, dict) or digest(value) != marker.get('sdk_digest'):
+                raise OnboardingError('onboarding_sdk_digest_mismatch')
+            wheels = value.get('wheels')
+            matrix = ([row for row in wheels if isinstance(row, dict)
+                and row.get('distribution') == 'daimon-matrix'] if isinstance(wheels, list) else [])
+            if (len(matrix) != 1
+                    or not isinstance(value.get('matrix_commit'), str)
+                    or not re.fullmatch(r'[0-9a-f]{40}', value['matrix_commit'])
+                    or not isinstance(matrix[0].get('sha256'), str)
+                    or not re.fullmatch(r'[0-9a-f]{64}', matrix[0]['sha256'])):
+                raise OnboardingError('invalid_onboarding_sdk')
+            parameters = dict(matrix_commit=value.get('matrix_commit'),
+                matrix_wheel_sha256=matrix[0].get('sha256'))
+        current = onboarding_sdk.verify(code, uid=uid, **parameters)
         expected = dict(schema=SDK_SCHEMA, base_release_digest=base_fingerprint,
             previous_sdk_digest=digest(previous), sdk_digest=digest(current))
         if qualified_sdk:

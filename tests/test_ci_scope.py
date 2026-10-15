@@ -78,6 +78,36 @@ def test_loaded_startup_covers_actual_processes_and_preserves_broader_boundaries
         assert select([*changed, other], ROOT) != ('peer', list(LOADED_STARTUP_TESTS))
 
 
+def test_prepared_bootstrap_host_delta_keeps_receiving_and_host_contracts(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    from tools import ci_scope
+    previous, current = b'retained pre-bootstrap SDK entry', b'qualified bootstrap SDK entry'
+    sha256 = ci_scope.hashlib.sha256
+    monkeypatch.setattr(ci_scope.hashlib, 'sha256', lambda raw:
+        SimpleNamespace(hexdigest=lambda: 'cf3878966677401d094410595541f3f5395b0964d28910057299443c9b86a1a5')
+        if raw == previous else SimpleNamespace(hexdigest=lambda: 'cc1e19f193e69cc67c08d121243067813f6ae6b56bbbb358cf5888be2909c216')
+        if raw == current else sha256(raw))
+    read = Path.read_bytes
+    monkeypatch.setattr(Path, 'read_bytes', lambda path:
+        current if path == ROOT/'clusterctl/onboarding_host.py' else read(path))
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *a, **k:
+        subprocess.CompletedProcess(a, 0, previous))
+    changed = ['clusterctl/onboarding_host.py', 'tests/test_onboarding_host.py',
+        'clusterctl/onboarding_code_successor.py', 'tests/test_onboarding_code_successor.py',
+        'tools/ci_scope.py', 'tests/test_ci_scope.py', 'RESUME.md',
+        'docs/runbooks/tribu-sdk-successor.md']
+    profile, tests = select(changed, ROOT, base='a'*40)
+    assert profile == 'peer'
+    assert {'tests/test_onboarding_host.py', 'tests/test_source_bootstrap.py',
+        'tests/test_onboarding_sdk.py', 'tests/test_guest_bootstrap_controller.py'} <= set(tests)
+    assert select([*changed, 'clusterctl/onboarding_custody.py'], ROOT)[0] == 'full'
+    monkeypatch.setattr(Path, 'read_bytes', lambda path:
+        current+b' future change' if path == ROOT/'clusterctl/onboarding_host.py' else read(path))
+    assert select(changed, ROOT, base='a'*40)[0] == 'full'
+
+
+
 def test_launcher_keeps_the_existing_home_authority_and_browser_boundary():
     from tools.ci_scope import HOME_TESTS
     changed=['clusterctl/homes/service.py','clusterctl/homes/homemaker.py',
@@ -120,6 +150,18 @@ def test_receiving_selection_keeps_actual_native_startup_and_unit_recovery(tmp_p
     for other in ('clusterctl/onboarding_admission.py', 'clusterctl/onboarding_custody.py',
                   'clusterctl/operation_journal.py', 'clusterctl/onboarding_enrollment.py',
                   'requirements-weave.txt', 'unknown.py'):
+        assert select([*changed, other], ROOT)[0] != 'update-selection'
+
+
+def test_retained_generation_changes_keep_receiving_coverage_without_physical_jobs(tmp_path):
+    from tools.ci_scope import UPDATE_SELECTION_TESTS
+    changed = ['clusterctl/onboarding_code_successor.py',
+        'tests/test_onboarding_code_successor.py', 'RESUME.md',
+        'tools/ci_scope.py', 'tests/test_ci_scope.py']
+    assert select(changed, ROOT) == ('update-selection', list(UPDATE_SELECTION_TESTS))
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    for other in ('clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_custody.py',
+                  'requirements-weave.txt', 'clusterctl/production_fences.py', 'unknown.py'):
         assert select([*changed, other], ROOT)[0] != 'update-selection'
 
 

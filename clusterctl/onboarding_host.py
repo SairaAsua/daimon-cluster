@@ -1071,8 +1071,8 @@ class HostBackend:
                 raise OnboardingError('invalid_receiving_bootstrap_request')
             arguments += ['--bootstrap-ready-sha256', bootstrap_ready_sha256]
         prepared_venv = None
-        if candidate is not None and action in {'running', 'admitted-running', 'receiving-identity',
-                'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}:
+        if candidate is not None and (bootstrapping or action in {'running', 'admitted-running', 'receiving-identity',
+                'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}):
             # _runtime_paths verified the entire public candidate and its SDK.
             # Enter the already prepared owner generation directly; Target still
             # checks the installed SDK, startup context and actual receiving state.
