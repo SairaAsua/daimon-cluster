@@ -970,18 +970,37 @@ def recover_capability_stage(upgrade, *, runtime_root: Path, transaction: Path,
         raise OnboardingError('receiving_bootstrap_attempt_limit')
 
 
-def freeze_guest_bootstrap(target, *, deadline_ns: int, initial: bool = False) -> dict:
-    """Freeze either a running predecessor or an unstarted, unselected body."""
+def freeze_guest_bootstrap(target, *, deadline_ns: int, initial: bool = False,
+                           initial_service: bool = False) -> dict:
+    """Freeze a predecessor, initial controller or first selected group load."""
     from .onboarding_service import GuestServiceBootstrap
+    if (type(initial) is not bool or type(initial_service) is not bool
+            or initial and initial_service):
+        raise OnboardingError('invalid_receiving_bootstrap_request')
     GuestServiceBootstrap._budget(deadline_ns)
-    if initial:
+    if initial or initial_service:
         with being_seed._locked(target.root), target._runtime_writer():
             prepared = target.observe()
-            if prepared['phase'] != 'v8' or prepared.get('group') is not None:
+            if (prepared['phase'] != 'v8'
+                    or (prepared.get('group') is not None) != initial_service):
                 raise OnboardingError('receiving_guest_bootstrap_initial_required')
             bundle = target.document_bundle()
             preservation = controller_preservation(target.package / 'runtime', bundle)
             mode = controller_bootstrap_mode(bundle, preservation)
+            group = None
+            if initial_service:
+                # First service start uses the already published optional
+                # controller and signed group. It must not issue/renew authority
+                # after the group's owner context has been frozen.
+                if preservation is None or mode != 'preserve':
+                    raise OnboardingError('receiving_initial_controller_required')
+                now = time.time_ns() // 1_000_000
+                if (not preservation['active']
+                        or not preservation['not_before_ms'] <= now < preservation['not_after_ms']):
+                    raise OnboardingError('receiving_initial_controller_required')
+                group = bootstrap_group(target, bundle)
+                if group['selected'] != prepared['group']:
+                    raise OnboardingError('receiving_guest_bootstrap_group_changed')
             renewal = {}
             if mode == 'renew':
                 from daimon_matrix import operator_runtime_upgrade as upgrade
@@ -989,9 +1008,10 @@ def freeze_guest_bootstrap(target, *, deadline_ns: int, initial: bool = False) -
                     bundle, time.time_ns() // 1_000_000)
             GuestServiceBootstrap._budget(deadline_ns)
             return dict(plan_digest=digest(target.plan), genesis_digest=digest(target.genesis),
-                code_digest=target.code_digest, runtime_sha256=digest(bundle), group_sha256=digest({'group': None}),
+                code_digest=target.code_digest, runtime_sha256=digest(bundle),
+                group_sha256=digest({'group': None} if group is None else group),
                 mode=mode, preservation=preservation, **renewal,
-                being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'], group=None,
+                being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'], group=group,
                 observer_startup=target.qualified_startup, predecessor=None)
     observed = target.running(admitted=True, deadline_ns=deadline_ns, bootstrap_base_only=True)
     bundle = target.document_bundle()

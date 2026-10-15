@@ -96,7 +96,7 @@ def test_group_owner_routes_take_target_lock_before_native_writer(tmp_path, monk
 
 def test_initial_controller_publication_uses_native_writer_without_fake_predecessor(fixture, monkeypatch):
     from daimon_matrix import operator_runtime_upgrade as upgrade
-    target, request, _, _ = fixture
+    target, request, group, _ = fixture
     def no_predecessor(*_args, **_kwargs):
         raise AssertionError('An initial body must not invent a running/exited predecessor')
     monkeypatch.setattr(target, 'running', no_predecessor)
@@ -131,6 +131,32 @@ def test_initial_controller_publication_uses_native_writer_without_fake_predeces
     assert (owner.runtime / 'client.key').read_bytes() == key and files(target.credential) == history
     assert not any(name.endswith('_exited') for name in owner._observations())
     assert result['receiving_readiness'] == 'unobserved'
+    with pytest.raises(OnboardingError, match='initial_required'):
+        receiving_update.freeze_guest_bootstrap(target, deadline_ns=deadline(), initial_service=True)
+    # Native controller/custody are genuine; the selected group/publication is
+    # an explicit seam here, qualified independently by the group selector tests.
+    monkeypatch.setattr('clusterctl.onboarding_peer.observed_group',
+        lambda *_args, **_kwargs: copy.deepcopy(group['selected']))
+    frozen = receiving_update.freeze_guest_bootstrap(target, deadline_ns=deadline(), initial_service=True)
+    assert frozen['predecessor'] is None and frozen['group'] == group
+    assert frozen['group_sha256'] == digest(group) and frozen['runtime_sha256'] == result['runtime_sha256']
+    assert frozen['mode'] == 'preserve' and frozen['preservation']['active'] is True
+    assert (owner.runtime / 'custody.json').read_bytes() == ciphertext
+    with target._runtime_writer():
+        with pytest.raises(BlockingIOError):
+            receiving_update.freeze_guest_bootstrap(target, deadline_ns=deadline(), initial_service=True)
+    with pytest.raises(OnboardingError, match='invalid_receiving_bootstrap_request'):
+        receiving_update.freeze_guest_bootstrap(target, deadline_ns=deadline(), initial=True, initial_service=True)
+
+
+def test_first_service_freeze_requires_a_prepared_native_controller(fixture, monkeypatch):
+    target, _, group, _ = fixture
+    monkeypatch.setattr('clusterctl.onboarding_peer.observed_group',
+        lambda *_args, **_kwargs: copy.deepcopy(group['selected']))
+    before = files(target.package / 'runtime')
+    with pytest.raises(OnboardingError, match='initial_controller_required'):
+        receiving_update.freeze_guest_bootstrap(target, deadline_ns=deadline(), initial_service=True)
+    assert files(target.package / 'runtime') == before
 
 
 def test_initial_controller_refuses_an_existing_writer_or_group(fixture, monkeypatch):

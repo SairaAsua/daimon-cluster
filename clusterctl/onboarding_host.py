@@ -956,6 +956,7 @@ class HostBackend:
                      bootstrap_ready_sha256: str | None = None,
                      bootstrap_timeout_seconds: float | None = None,
                      bootstrap_initial: bool = False,
+                     bootstrap_initial_service: bool = False,
                      control_file: Path | None = None, control_command: Path | None = None,
                      control_value: dict | None = None, identity_expires_at_ms: int | None = None,
                      native_tooling: dict | None = None, group_request: dict | None = None) -> dict:
@@ -967,7 +968,9 @@ class HostBackend:
         """
         deadline_ns = None
         bootstrapping = action in {'receiving-bootstrap-freeze', 'receiving-bootstrap-stage', 'receiving-bootstrap-publish'}
-        if type(bootstrap_initial) is not bool or bootstrap_initial and action != 'receiving-bootstrap-freeze':
+        if (type(bootstrap_initial) is not bool or type(bootstrap_initial_service) is not bool
+                or bootstrap_initial and bootstrap_initial_service
+                or (bootstrap_initial or bootstrap_initial_service) and action != 'receiving-bootstrap-freeze'):
             raise OnboardingError('invalid_receiving_bootstrap_request')
         controlling = action in {'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
         if (action in {'group-relationship', 'group-publication'}) != (group_request is not None):
@@ -1088,6 +1091,8 @@ class HostBackend:
             arguments += ['--bootstrap-ready-sha256', bootstrap_ready_sha256]
         if bootstrap_initial:
             arguments += ['--bootstrap-initial']
+        if bootstrap_initial_service:
+            arguments += ['--bootstrap-initial-service']
         prepared_venv = None
         if candidate is not None and (bootstrapping or action in {'running', 'admitted-running', 'receiving-identity',
                 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship', 'group-publication'}):

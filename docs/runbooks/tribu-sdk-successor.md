@@ -664,6 +664,21 @@ readiness. All requests still use the qualified public candidate, existing
 owner UID/CLI and one finite budget. The initial flag is valid only for freeze;
 the explicit request schema carries the distinction through stage and publish.
 
+After publishing the group, the same `receiving-bootstrap-freeze` route accepts
+`--bootstrap-initial-service` to capture the first service's owner context.
+This is mutually exclusive with `--bootstrap-initial` and valid only for freeze.
+Under the same target-root/native writer exclusion, it requires a verified V8
+body, a selected signed group and an already prepared active receiving controller.
+It captures the exact native runtime, group/publication hashes and preserved
+controller without querying a running predecessor or issuing/renewing authority.
+The qualified host route retains the guest owner, prepared SDK and finite budget.
+
+This snapshot has no process predecessor and does not authorize a start or enable
+delivery. The ManagedRuntime first-start caller and cohort consumer must still
+retain/revalidate this exact context, independently bind the actual manager/native
+child and verify the loaded application and default-disabled sending gate. Those
+consumers remain unfinished; the after-only lifecycle refusal stays in effect.
+
 ### First guest service publication and start
 
 The existing root `GuestServiceBootstrap` accepts an explicit

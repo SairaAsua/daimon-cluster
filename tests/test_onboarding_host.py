@@ -461,14 +461,18 @@ def test_slow_candidate_mount_inspection_never_starts_owner_command(tmp_path, mo
     assert inspections == [5] and not calls
 
 
-@pytest.mark.parametrize('phase', ['freeze', 'stage', 'publish', 'initial-freeze'])
+@pytest.mark.parametrize('phase', ['freeze', 'stage', 'publish', 'initial-freeze', 'initial-service-freeze'])
 def test_host_forwards_owner_bootstrap_only_as_guest_owner(tmp_path, monkeypatch, phase):
     backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
     options = dict(candidate=candidate, bootstrap_timeout_seconds=5)
     initial = phase == 'initial-freeze'
+    initial_service = phase == 'initial-service-freeze'
     if initial:
         phase = 'freeze'
         options['bootstrap_initial'] = True
+    if initial_service:
+        phase = 'freeze'
+        options['bootstrap_initial_service'] = True
     if phase != 'freeze':
         options['bootstrap_request'] = {'operation_id': 'synthetic', 'plan_digest': digest(value)}
     if phase == 'publish':
@@ -480,6 +484,7 @@ def test_host_forwards_owner_bootstrap_only_as_guest_owner(tmp_path, monkeypatch
     assert 0 < bounds['timeout_seconds'] <= 5
     assert '--bootstrap-timeout-seconds' in argv and '--observation-timeout-seconds' not in argv
     assert ('--bootstrap-initial' in argv) is initial
+    assert ('--bootstrap-initial-service' in argv) is initial_service
     if phase != 'freeze':
         assert json.loads(argv[argv.index('--bootstrap-request-json') + 1]) == options['bootstrap_request']
     if phase == 'publish':
@@ -515,10 +520,18 @@ def test_host_bootstrap_rejects_unqualified_or_incomplete_parameters_before_disp
 
 
 @pytest.mark.parametrize('action', ['observe', 'receiving-bootstrap-stage'])
-def test_initial_freeze_flag_cannot_change_other_owner_actions(action):
+@pytest.mark.parametrize('flag', ['bootstrap_initial', 'bootstrap_initial_service'])
+def test_initial_freeze_flag_cannot_change_other_owner_actions(action, flag):
     backend = object.__new__(HostBackend)
     with pytest.raises(OnboardingError, match='invalid_receiving_bootstrap_request'):
-        backend._target_call({}, action, bootstrap_initial=True)
+        backend._target_call({}, action, **{flag: True})
+
+
+def test_initial_freeze_variants_cannot_be_combined():
+    backend = object.__new__(HostBackend)
+    with pytest.raises(OnboardingError, match='invalid_receiving_bootstrap_request'):
+        backend._target_call({}, 'receiving-bootstrap-freeze', bootstrap_initial=True,
+            bootstrap_initial_service=True)
 
 
 def test_host_forwards_control_paths_without_fabricating_a_native_request(tmp_path, monkeypatch):
