@@ -117,4 +117,4 @@ def test_launcher_appearance_has_its_own_canonical_surface_without_new_store(sys
     assert calls==[(None,{'author':{'kind':'being','ref':'owner'},'surface':'apps','viewer_scope':None})]
     # Existing authorized owner selection can target this built-in surface;
     # no launcher-specific preference database or selection write is added.
-    assert Homemaker.surface(None,'apps')=='apps'
+    assert Homemaker.surface(None,'one','apps')=='apps'
