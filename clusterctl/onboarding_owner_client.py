@@ -17,7 +17,7 @@ from .onboarding import Observation, OnboardingError, digest, validate_plan
 
 INSTALLER_SHA256 = 'aaef1a28614722a1f52d4c32dbbd3add5f1abfcd6f766cfaf6b7cfa3073a9af9'
 TOOLING_INSTALLER_MODULE = 'onboarding_chat_native.py'
-TOOLING_INSTALLER_SHA256 = '4d3f5e26fbd65babffbfd338317e02aab7eb116a818eee96e36c83ac923b608b'
+TOOLING_INSTALLER_SHA256 = '75bd210889cae7f68ec365b635d57d107db99b4991391a3831040012e8dd103b'
 
 
 # Only these maintained domain codes may cross the CLI boundary. Exception
