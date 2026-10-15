@@ -152,6 +152,45 @@ def test_full_dual_route_effects_and_exact_retry_never_repeat_stop_or_keys(fixtu
     assert controller.execute() == result
 
 
+def test_journal_reference_becomes_one_stable_uuid_for_both_native_routes(fixture):
+    controller, backend, _, _ = fixture
+    assert controller.operation_id.startswith('operation:')
+    root_call, owner_call = backend._guest_service_call, backend._target_call
+    requests = []
+    def root(*args, **options):
+        if options.get('request') is not None:
+            value = options['request']['operation_id']
+            assert str(uuid.UUID(value)) == value  # Actual root/owner CLI contract.
+            requests.append(('root', value))
+        return root_call(*args, **options)
+    def owner(*args, **options):
+        if options.get('bootstrap_request') is not None:
+            value = options['bootstrap_request']['operation_id']
+            assert str(uuid.UUID(value)) == value
+            requests.append(('owner', value))
+        return owner_call(*args, **options)
+    backend._guest_service_call, backend._target_call = root, owner
+    first = controller.execute()
+    assert controller.execute() == first
+    assert {route for route, _ in requests} == {'root', 'owner'}
+    assert {value for _, value in requests} == {str(uuid.uuid5(uuid.NAMESPACE_URL,
+        'cluster-guest-bootstrap:' + controller.operation_id))}
+    assert backend.stops == backend.starts == backend.stages == backend.publications == 1
+
+
+def test_noncanonical_journal_ids_do_not_alias_canonical_native_requests():
+    controller = object.__new__(GuestBootstrapController)
+    canonical = 'a1234567-89ab-4cde-8fab-0123456789ab'
+    labels = [canonical, canonical.upper(), canonical.replace('-', ''),
+        'urn:uuid:' + canonical, 'operation:' + canonical]
+    mapped = []
+    for label in labels:
+        controller.operation_id = label
+        mapped.append(controller._native_operation_id())
+    assert mapped[0] == canonical and len(set(mapped)) == len(labels)
+    assert all(str(uuid.UUID(value)) == value for value in mapped)
+
+
 def test_loaded_proof_preserves_the_frozen_root_dropin_vector(fixture):
     controller, backend, _, _ = fixture
     controller.execute()

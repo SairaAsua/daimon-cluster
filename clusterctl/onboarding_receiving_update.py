@@ -1633,6 +1633,16 @@ class GuestBootstrapController:
     def __init__(self, journal, operation_id: str, backend, name: str):
         self.journal, self.operation_id, self.backend, self.name = journal, operation_id, backend, name
 
+    def _native_operation_id(self) -> str:
+        # Preserve every previously accepted canonical UUID. Other journal
+        # labels must not alias a differently spelled canonical operation.
+        try:
+            if str(uuid.UUID(self.operation_id)) == self.operation_id:
+                return self.operation_id
+        except ValueError:
+            pass
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, 'cluster-guest-bootstrap:' + self.operation_id))
+
     def _row(self) -> tuple[dict, dict, dict]:
         row = self.journal.get(self.operation_id)
         if (row is None or row['operation'] != 'receiving-update'
@@ -1707,11 +1717,15 @@ class GuestBootstrapController:
                 raise OnboardingError('receiving_guest_bootstrap_candidate_changed')
             root_previous = {**frozen['owner']['predecessor'],
                 'service': frozen['root']['service'], 'scope': frozen['root']['scope']}
-            root_request = dict(schema='cluster-guest-service-bootstrap/v1', operation_id=self.operation_id,
+            # OperationJournal normally uses operation:UUID identifiers, while
+            # both receiving CLIs require canonical UUIDs. Preserve previously
+            # accepted UUID requests; derive one stable UUID for journal refs.
+            request_id = self._native_operation_id()
+            root_request = dict(schema='cluster-guest-service-bootstrap/v1', operation_id=request_id,
                 plan_digest=digest(frozen['plan']), predecessor=root_previous, argv=candidate['argv'])
             owner_request = {key: frozen['owner'][key] for key in (
                 'plan_digest', 'genesis_digest', 'code_digest', 'runtime_sha256', 'group_sha256', 'predecessor')}
-            owner_request.update(schema='cluster-guest-owner-bootstrap/v1', operation_id=self.operation_id,
+            owner_request.update(schema='cluster-guest-owner-bootstrap/v1', operation_id=request_id,
                 expires_at_ms=candidate['expires_at_ms'])
             if 'mode' in frozen['owner']:
                 owner_request.update(mode=frozen['owner']['mode'], preservation=frozen['owner']['preservation'])
