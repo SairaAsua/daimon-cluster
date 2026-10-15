@@ -243,11 +243,24 @@ def test_guest_reexec_does_not_refund_slow_import_preparation(tmp_path, monkeypa
     monkeypatch.setattr(module.being_seed, '_read', lambda *_: (reads.append(True), plan())[1])
     monkeypatch.setattr(module.onboarding_code_successor, 'selection', lambda *_args, **_kw: tmp_path)
     monkeypatch.setattr(module.onboarding_code_successor, 'sdk_parameters', lambda *_: {'matrix_commit': 'a'*40})
-    monkeypatch.setattr(module.onboarding_sdk, 'observe', lambda *_args, **_kw: tmp_path / 'venv')
+    # This clock/dispatch seam consumes a prepared V4 path. SDK closure has
+    # separate real-wheel coverage; the old observe mock no longer selects it.
+    sdk_path = tmp_path / 'sdk/sdk.json'
+    sdk_path.parent.mkdir()
+    sdk_path.write_text('{}')
+    sdk_path.chmod(0o644)
+    generation = tmp_path / '.local/share/daimon-matrix/sdk' / module.digest({})
+    imports = generation / 'runtime-imports'
+    imports.mkdir(parents=True, mode=0o700)
+    generation.chmod(0o700)
+    module.being_seed._write(generation / 'runtime-imports.json', {})
+    regular = module.onboarding_release.regular
+    monkeypatch.setattr(module.onboarding_release, 'regular', lambda path, **kw:
+        regular(path, **{**kw, 'uid': os.geteuid()}) if path == sdk_path else regular(path, **kw))
     monkeypatch.setattr(module.onboarding_sdk, 'startup_context', lambda *_: False)
     def slow(*_args, **_kw):
         clock[0] += 10_000_000_000
-        return tmp_path / 'imports'
+        return imports
     monkeypatch.setattr(module.onboarding_sdk, 'runtime_imports', slow)
     monkeypatch.setattr(module.onboarding_sdk, 'runtime_command',
         lambda _venv, _imports, _code, _module, arguments: ['python', *arguments])
