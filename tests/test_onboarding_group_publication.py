@@ -18,6 +18,13 @@ from tests.test_onboarding_group_admission import closure, invitation
 group_source = group_fixtures.group_source
 
 
+@pytest.fixture
+def unicode_group_source(tmp_path):
+    root = tmp_path / 'mémoire'
+    root.mkdir(mode=0o700)
+    return group_source.__wrapped__(root)
+
+
 def initial_publication(group_source, profile):
     from daimon_matrix.messaging_config import read_publication
     source, target, _peer, _peer_bundle, _old = group_source
@@ -45,9 +52,10 @@ def initial_publication(group_source, profile):
 
 
 @pytest.mark.parametrize('profile', ['source', 'target'])
-def test_native_first_publication_signatures_and_selector_recover_exact_lost_replies(group_source, monkeypatch, profile):
+def test_native_first_publication_signatures_and_selector_recover_exact_lost_replies(unicode_group_source, monkeypatch, profile):
     from daimon_matrix import operator_messaging
     from daimon_matrix.messaging_config import read_publication, verify_binding
+    group_source = unicode_group_source
     source, target, *_ = group_source
     owner, group, journal, request, base = initial_publication(group_source, profile)
     identifier = request['operation_id']
@@ -89,6 +97,26 @@ def test_native_first_publication_signatures_and_selector_recover_exact_lost_rep
     assert binding['body']['being_ref'] == target.document_bundle()['manifest']['being_ref']
     assert owner.group_publication(signing, authority_closure={}) == accepted
 
+    visibility = group / 'visibility'
+    visibility.mkdir(mode=0o700)
+    token, proof = b'1:SYNTHETIC_NOT_A_TOKEN', os.urandom(32)
+    for name, raw in (('telegram.token', token), ('proof.key', proof)):
+        path = visibility / name
+        path.write_bytes(raw)
+        path.chmod(0o600)
+    # Explicit synthetic qualification data exercises native publication only;
+    # it is not an observed Telegram probe or a real communication receipt.
+    configuration = dict(destination=destination,
+        secrets=dict(telegram_token_file='telegram.token', telegram_token_sha256=hashlib.sha256(token).hexdigest(),
+            proof_key_file='proof.key'),
+        telegram_qualification=dict(schema='dm.messaging.telegram-qualification/v1',
+            qualified_at_ms=disclosure['issued_at_ms'], token_sha256=hashlib.sha256(token).hexdigest(),
+            get_me_bot_id=1, probe_chat_id=-123, probe_topic_id=None, probe_message_id=1,
+            probe_text_sha256='b' * 64))
+    published_visibility = owner.group_publication(dict(operation_id=identifier, step='visibility',
+        action='visibility-publish', params=dict(disclosure=disclosure, bindings=[binding],
+            expected_installation_sha256=None, initial_configuration=configuration)), authority_closure={})
+
     selection = dict(operation_id=identifier, step='select', action='selection',
                      params=dict(expected_selection_sha256=None))
     write = being_seed._write
@@ -105,8 +133,63 @@ def test_native_first_publication_signatures_and_selector_recover_exact_lost_rep
     assert result['selection_sha256'] == digest(being_seed._read(group / 'selection.json'))
     assert result['receiving_readiness'] == 'unobserved'
     assert (group / 'selection.json').read_bytes() == selected
+    snapshot_request = dict(operation_id=identifier, step='snapshot', action='snapshot', params=dict(
+        application_step='application', visibility_step='visibility', selection_step='select',
+        owner_context_sha256=digest(being_seed._read(journal / identifier / 'owner/context.json'))))
+    snapshot_path = journal / identifier / 'publications/snapshot.json'
+    def lost_snapshot(path, value, **kwargs):
+        write(path, value, **kwargs)
+        if path == snapshot_path and value.get('result') is not None:
+            raise OSError('synthetic lost snapshot result reply')
+    monkeypatch.setattr(being_seed, '_write', lost_snapshot)
+    with pytest.raises(OSError, match='lost snapshot'):
+        owner.group_publication(snapshot_request, authority_closure={})
+    retained_snapshot = snapshot_path.read_bytes()
+    monkeypatch.setattr(being_seed, '_write', write)
+    snapshot = owner.group_publication(snapshot_request, authority_closure={})
+    assert snapshot_path.read_bytes() == retained_snapshot
+    assert snapshot['group']['application_sha256'] == prepared['application_sha256']
+    assert snapshot['group']['publication_sha256'] == prepared['publication_sha256']
+    assert snapshot['group']['installation_sha256'] == published_visibility['installation_sha256']
+    assert snapshot['selection_sha256'] == result['selection_sha256']
+    assert set(snapshot['publications']) == {'application', 'visibility-publish', 'selection'}
+    from daimon_matrix.messaging_config import config_digest
+    application = read_publication(base, group / 'application')[0]
+    assert config_digest(application) != digest(application)
+    assert owner.group_publication(snapshot_request, authority_closure={}) == snapshot
+    wrong_context = copy.deepcopy(snapshot_request)
+    wrong_context['params']['owner_context_sha256'] = '0' * 64
+    with monkeypatch.context() as checks:
+        checks.setattr(owner, '_reader', lambda: pytest.fail('wrong snapshot context reached custody'))
+        with pytest.raises(OnboardingError, match='owner_context_conflict'):
+            owner.group_publication(wrong_context, authority_closure={})
+        missing_context = {**snapshot_request, 'operation_id': str(uuid.uuid4())}
+        with pytest.raises(FileNotFoundError):
+            owner.group_publication(missing_context, authority_closure={})
+        assert not (journal / missing_context['operation_id']).exists()
+    installation = visibility / 'installation.json'
+    previous_visibility = installation.read_bytes()
+    tampered = being_seed._read(installation)
+    tampered['document']['generation'] += 1
+    being_seed._write(installation, tampered)
+    try:
+        with pytest.raises(ValueError):
+            owner.group_publication(snapshot_request, authority_closure={})
+    finally:
+        installation.write_bytes(previous_visibility)
+    wrong_steps = copy.deepcopy(snapshot_request)
+    wrong_steps.update(step='wrong-snapshot')
+    wrong_steps['params']['visibility_step'] = 'disclosure'
+    with pytest.raises(OnboardingError, match='snapshot_publication_required'):
+        owner.group_publication(wrong_steps, authority_closure={})
     assert {name: (source.root / name).read_bytes() for name in native} == native
     assert not (source.root / 'tribe.sock').exists()
+    with owner.writer() if profile == 'source' else owner._runtime_writer():
+        operator_messaging.renew(base, group / 'application', expected_application_sha256=config_digest(application))
+    winner = (group / 'application/publication.json').read_bytes()
+    with pytest.raises(ValueError):
+        owner.group_publication(snapshot_request, authority_closure={})
+    assert (group / 'application/publication.json').read_bytes() == winner
 
 
 def test_pending_initial_publication_preserves_a_later_native_client_renewal(group_source, monkeypatch):
@@ -224,3 +307,12 @@ def test_publication_packets_are_closed_and_cannot_use_online_relationship_route
         admitted_being_refs=[], secret_sources={})}
     with pytest.raises(OnboardingError, match='publication_command_required'):
         publication_command(initial)
+    snapshot = dict(operation_id=value['operation_id'], step='snapshot', action='snapshot', params=dict(
+        application_step='application', visibility_step='visibility', selection_step='selection',
+        owner_context_sha256='1' * 64))
+    assert publication_command(snapshot) == snapshot
+    for step in ('../outside', '/other-owner', '', 1):
+        changed = copy.deepcopy(snapshot)
+        changed['params']['application_step'] = step
+        with pytest.raises(OnboardingError, match='publication_command_required'):
+            publication_command(changed)

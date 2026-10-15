@@ -156,20 +156,23 @@ class Target:
 
     def group_publication(self, value: dict, *, authority_closure: dict,
                           deadline_ns: int | None = None) -> dict:
+        from .onboarding_receiving_update import bootstrap_group
         from .onboarding_group_admission import (
-            load_owner_runtime, owner_authorities, publication_command, publication_request,
+            check_snapshot_context, load_owner_runtime, owner_authorities, publication_command, publication_request,
         )
         value = publication_command(value)
         root = self.package / 'runtime'
         group = self.root / 'tribe'
         journal = self.root / 'group-admission'
         with being_seed._locked(self.root), self._runtime_writer():
+            check_snapshot_context(journal, value)
             if self._observe_receiving()['phase'] != 'v8':
                 raise OnboardingError('current_onboarding_target_required')
             authorities = owner_authorities(root, group, journal, value['operation_id'], authority_closure)
             hosted = load_owner_runtime(root, self._reader, authorities=authorities,
                                         qualified_startup=self.qualified_startup)
-            return publication_request(hosted, group, journal, value, deadline_ns=deadline_ns)
+            return publication_request(hosted, group, journal, value, deadline_ns=deadline_ns,
+                snapshot=lambda: bootstrap_group(self, self.document_bundle()))
 
     def prepare(self) -> dict:
         from daimon_matrix import canonical, keystore, operator_first_embodiment as first

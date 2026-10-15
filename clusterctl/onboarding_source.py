@@ -111,17 +111,21 @@ class Source:
 
     def group_publication(self, value: dict, *, authority_closure: dict,
                           deadline_ns: int | None = None) -> dict:
+        from .onboarding_receiving_update import source_bootstrap_group
         from .onboarding_group_admission import (
-            load_owner_runtime, owner_authorities, publication_command, publication_request,
+            check_snapshot_context, load_owner_runtime, owner_authorities, publication_command, publication_request,
         )
         value = publication_command(value)
         journal = self.outputs / 'group-admission'
         group = self.outputs / 'tribe'
         with self.writer():
+            check_snapshot_context(journal, value)
             authorities = owner_authorities(self.root, group, journal, value['operation_id'], authority_closure)
             hosted = load_owner_runtime(self.root, self._reader, authorities=authorities,
                                         qualified_startup=self.qualified_startup)
-            return publication_request(hosted, group, journal, value, deadline_ns=deadline_ns)
+            return publication_request(hosted, group, journal, value, deadline_ns=deadline_ns,
+                snapshot=lambda: source_bootstrap_group(self, being_seed._read(
+                    self.root / 'runtime.json', limit=being_seed.MAX_SELECTION)))
 
     def offer(self, plan_digest: str, peer: dict, endpoints: list[str]) -> dict:
         self.tool.verify_identity(peer)

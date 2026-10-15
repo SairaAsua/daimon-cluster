@@ -891,7 +891,7 @@ def bootstrap_group(target, bundle: dict, *, socket_root: Path | None = None) ->
     from .onboarding_peer import observed_group
     from daimon_matrix.canonical import unb64url
     from daimon_matrix.operator_rebirth import authority_from_runtime_bundle
-    from daimon_matrix.messaging_config import _public_identity, verify_public_binding, _read_verified_publication
+    from daimon_matrix.messaging_config import config_digest, _public_identity, verify_public_binding, _read_verified_publication
     group = observed_group(target, bundle, socket_root=socket_root)
     if group is None:
         raise OnboardingError('qualified_onboarding_group_required')
@@ -905,8 +905,8 @@ def bootstrap_group(target, bundle: dict, *, socket_root: Path | None = None) ->
         publication=Path(group['application']) / 'publication.json',
         application=metadata / 'application.json', binding=metadata / 'binding.json', visibility=Path(group['visibility']))
     visibility = being_seed._read(Path(group['visibility']), limit=being_seed.MAX_SELECTION)
-    return dict(selected=group, application_sha256=digest(application), publication_sha256=digest(publication),
-        installation_sha256=digest(visibility['document']),
+    return dict(selected=group, application_sha256=config_digest(application), publication_sha256=config_digest(publication),
+        installation_sha256=config_digest(visibility['document']),
         hashes={key: hashlib.sha256(onboarding_release.regular(
         path, uid=os.geteuid())).hexdigest() for key, path in paths.items()})
 

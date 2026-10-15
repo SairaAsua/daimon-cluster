@@ -930,6 +930,25 @@ are limited to:
   references and qualification remain local; no probe is started here.
 - `selection`: publish the same owner-signed group selector using its expected
   predecessor and the operation's retained public histories.
+- `snapshot`: observe the current prospective group against this operation's
+  completed application, visibility-publication and selection steps. Supply only
+  those three closed step names and the expected retained owner-context digest;
+  a missing/different context refuses before custody access. The owner reuses
+  native group-membership and visibility signature/secret validation and its
+  profile-specific signed group reader. The result includes current group pins,
+  selector digest and command/result correlations. It records observation in
+  the existing owner journal; it changes no social authority, publication or
+  service. A cached result never bypasses fresh validation or adopts a later
+  winner. The coordinator must compare command digests with its approved
+  retained commands before deriving an after-group lifecycle selection.
+
+Native application/publication/visibility hashes use Matrix `config_digest`.
+The Cluster group selector and operation/context digests retain Cluster `digest`.
+These codecs differ for non-ASCII documents; compute each in its owning domain,
+and keep raw-file SHA256 separate. Bootstrap group semantic pins now use the
+native codec expected by loaded-runtime evidence. Existing selector schemas and
+their codec are unchanged. Historical frozen values remain evidence; never
+rewrite an old observation to hide a different digest.
 
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry

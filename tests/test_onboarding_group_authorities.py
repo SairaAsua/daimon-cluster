@@ -9,6 +9,7 @@ import uuid
 import pytest
 
 from clusterctl import being_seed
+from clusterctl.onboarding import digest
 from clusterctl.onboarding_source import Source
 from tests.test_onboarding_target import receiving
 
@@ -18,7 +19,7 @@ def group_source(tmp_path):
     from daimon_matrix import native_egress, operator_messaging, runtime
     from daimon_matrix.canonical import b64url
     from daimon_matrix.messaging_config import (
-        APPLICATION_SCHEMA_V3, GROUP_STORE_NAMES, config_digest, create_binding,
+        APPLICATION_SCHEMA_V3, GROUP_STORE_NAMES, create_binding,
         read_publication,
     )
     from daimon_matrix.operator_rebirth import AUTHORITY_SCHEMA, authority_from_runtime_bundle
@@ -88,7 +89,7 @@ def group_source(tmp_path):
     document, _ = read_publication(base, app)
     selection = dict(schema='cluster-onboarding-group-selection/v1', tribe_ref=reference,
         directory=str(app), visibility=str(tribe / 'visibility/installation.json'),
-        socket='tribe.sock', application_sha256=config_digest(document))
+        socket='tribe.sock', application_sha256=digest(document))
     being_seed._write(tribe / 'selection.json', dict(document=selection, binding=create_binding(base, selection)))
     source = Source(dict(schema='cluster-onboarding-source/v1', runtime_root=str(base.state_root),
         password_file=str(target.root / 'body.unlock'), native_visibility=str(outputs / 'unused-visibility.json'),

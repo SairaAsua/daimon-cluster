@@ -13,6 +13,7 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 
 from . import being_seed
@@ -26,6 +27,7 @@ PUBLICATIONS = {
     'visibility-accept': {'approved_destination', 'disclosures'},
     'visibility-publish': {'disclosure', 'bindings', 'expected_installation_sha256', 'initial_configuration'},
     'selection': {'expected_selection_sha256'},
+    'snapshot': {'application_step', 'visibility_step', 'selection_step', 'owner_context_sha256'},
 }
 
 
@@ -80,10 +82,25 @@ def publication_command(value: dict) -> dict:
         if value['action'] == 'visibility-accept' and (not isinstance(params['disclosures'], list)
                 or not 1 <= len(params['disclosures']) <= 256):
             raise ValueError
+        if value['action'] == 'snapshot' and (any(not isinstance(step, str)
+                or re.fullmatch(r'[a-z][a-z0-9-]{0,79}', step) is None
+                for key, step in params.items() if key != 'owner_context_sha256')
+                or not isinstance(params['owner_context_sha256'], str)
+                or re.fullmatch('[0-9a-f]{64}', params['owner_context_sha256']) is None):
+            raise ValueError
         digest(value)
     except (KeyError, TypeError, ValueError, AttributeError):
         raise OnboardingError('onboarding_group_publication_command_required') from None
     return copy.deepcopy(value)
+
+
+def check_snapshot_context(journal: Path, value: dict) -> None:
+    """A snapshot never creates/reconstructs its approved owner context."""
+    if value['action'] == 'snapshot':
+        context = being_seed._read(journal / value['operation_id'] / 'owner/context.json',
+                                  limit=being_seed.MAX_SELECTION)
+        if digest(context) != value['params']['owner_context_sha256']:
+            raise OnboardingError('onboarding_group_owner_context_conflict')
 
 
 def public_authorities(bundle: dict, closure: dict) -> dict:
@@ -259,12 +276,76 @@ def _publish_application(hosted, directory: Path, params: dict) -> dict:
                 publication_sha256=config_digest(read_document(directory / 'publication.json')))
 
 
-def _publication_effect(hosted, group_root: Path, value: dict, closure: dict) -> dict:
+def _publication_snapshot(hosted, group_root: Path, operation: Path, value: dict,
+                          context: dict, snapshot: Callable[[], dict] | None) -> dict:
+    """Correlate a fresh signed group view with this owner's actual effects.
+
+    The owner supplies the profile-specific authenticated group reader while
+    retaining its native writer. Step references identify existing records;
+    they never supply hashes, paths or a substitute candidate group.
+    """
+    if snapshot is None:
+        raise OnboardingError('onboarding_group_snapshot_reader_required')
+    if digest(context) != value['params']['owner_context_sha256']:
+        raise OnboardingError('onboarding_group_owner_context_conflict')
+    receipts: dict[str, dict] = {}
+    for action, key in (('application', 'application_step'), ('visibility-publish', 'visibility_step'),
+                        ('selection', 'selection_step')):
+        step = value['params'][key]
+        retained = being_seed._read(operation / 'publications' / (step + '.json'),
+                                   limit=being_seed.MAX_SELECTION)
+        command = retained.get('command')
+        result = retained.get('result')
+        if (retained.get('schema') != 'cluster-group-publication-operation/v1'
+                or retained.get('owner_context_sha256') != digest(context)
+                or not isinstance(command, dict) or command.get('operation_id') != value['operation_id']
+                or command.get('step') != step or command.get('action') != action
+                or not isinstance(result, dict) or result.get('schema') != 'cluster-group-publication-result/v1'
+                or result.get('operation_id') != value['operation_id'] or result.get('step') != step
+                or result.get('action') != action or result.get('status') != 'recorded'
+                or result.get('receiving_readiness') != 'unobserved'):
+            raise OnboardingError('onboarding_group_snapshot_publication_required')
+        publication_command(command)
+        receipts[action] = dict(command_sha256=digest(command), result=result)
+    from daimon_matrix import operator_messaging
+    from daimon_matrix.messaging_config import config_digest
+    application_value, _members = operator_messaging._group_visibility_context(hosted, group_root / 'application')
+    authorities = operator_messaging._application_authorities(application_value)
+    controller = operator_messaging._owner_visibility_controller(authorities=authorities,
+        application_sha256=config_digest(application_value),
+        installation_path=group_root / 'visibility/installation.json',
+        authority=operator_messaging._runtime_authority(hosted), origin=hosted.service.origin,
+        runtime_id=hosted.service.runtime_id, runtime_label=hosted.service.runtime_label,
+        signer_public_key=hosted.service.signer.public_key, clock=hosted.service.clock,
+        catalog_mode='validate')
+    group = snapshot()
+    selected = being_seed._read(group_root / 'selection.json', limit=being_seed.MAX_SELECTION)
+    application = receipts['application']['result']
+    visibility = receipts['visibility-publish']['result']
+    selection = receipts['selection']['result']
+    if (any(group.get(key) != application.get(key) for key in ('application_sha256', 'publication_sha256'))
+            or group.get('installation_sha256') != visibility.get('installation_sha256')
+            or group.get('installation_sha256') != controller.installation_digest
+            or group.get('application_sha256') != config_digest(application_value)
+            # The receiving selector retains Cluster's document codec. Native
+            # application/visibility receipts use Matrix's canonical codec.
+            or digest(application_value) != selection.get('application_sha256')
+            or digest(selected) != selection.get('selection_sha256')):
+        raise OnboardingError('onboarding_group_snapshot_publication_changed')
+    return dict(group=group, selection_sha256=digest(selected), publications=receipts,
+                owner_context_sha256=digest(context))
+
+
+def _publication_effect(hosted, group_root: Path, value: dict, closure: dict, *,
+                        operation: Path, context: dict,
+                        snapshot: Callable[[], dict] | None) -> dict:
     from daimon_matrix import operator_messaging
     from daimon_matrix.messaging_config import config_digest
     params = value['params']
     directory = group_root / 'application'
     action = value['action']
+    if action == 'snapshot':
+        return _publication_snapshot(hosted, group_root, operation, value, context, snapshot)
     if action == 'application':
         return _publish_application(hosted, directory, params)
     if action == 'visibility-disclosure':
@@ -286,7 +367,8 @@ def _publication_effect(hosted, group_root: Path, value: dict, closure: dict) ->
 
 
 def publication_request(hosted, group_root: Path, journal: Path, value: dict, *,
-                        deadline_ns: int | None = None) -> dict:
+                        deadline_ns: int | None = None,
+                        snapshot: Callable[[], dict] | None = None) -> dict:
     """Resume one exact owner publication through supported Matrix operations.
 
     The caller holds the runtime writer and has retained owner_authorities.
@@ -327,7 +409,8 @@ def publication_request(hosted, group_root: Path, journal: Path, value: dict, *,
         for parent in (directory, operation, journal, journal.parent):
             _sync(parent)
         check_deadline()
-        observed = _publication_effect(hosted, group_root, selected, context['authority_closure'])
+        observed = _publication_effect(hosted, group_root, selected, context['authority_closure'],
+            operation=operation, context=context, snapshot=snapshot)
         result = dict(schema='cluster-group-publication-result/v1', operation_id=selected['operation_id'],
             step=selected['step'], action=selected['action'], status='recorded',
             receiving_readiness='unobserved', **observed)
