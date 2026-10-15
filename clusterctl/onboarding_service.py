@@ -258,7 +258,7 @@ class GuestServiceBootstrap:
         if time.monotonic_ns() >= deadline_ns:
             raise OnboardingError('receiving_matrix_deadline_expired')
 
-    def _request(self, request: dict) -> tuple[Path, dict, bytes]:
+    def _request(self, request: dict, *, existing: bool = False) -> tuple[Path, dict, bytes]:
         from .owner_process import validate_process
         if (set(request) != {'schema', 'operation_id', 'plan_digest', 'predecessor', 'argv'}
                 or request['schema'] != 'cluster-guest-service-bootstrap/v1'
@@ -302,9 +302,16 @@ class GuestServiceBootstrap:
         if current not in (original, candidate):
             raise OnboardingError('receiving_guest_service_request_conflict')
         directory = private_directory(self.manager.unit.parent / ('.'+self.manager.unit.name+'.selection'))
-        operations = private_directory(directory/'operations', create=True)
-        root = private_directory(operations/request['operation_id'], create=True)
-        self._record(root/'request.json', request)
+        try:
+            operations = private_directory(directory/'operations', create=not existing)
+            root = private_directory(operations/request['operation_id'], create=not existing)
+        except FileNotFoundError:
+            raise OnboardingError('receiving_guest_service_quiescence_required') from None
+        if existing:
+            if self._retained(root, 'request') != request:
+                raise OnboardingError('receiving_guest_service_request_conflict')
+        else:
+            self._record(root/'request.json', request)
         return root, previous, candidate
 
     @staticmethod
@@ -387,7 +394,7 @@ class GuestServiceBootstrap:
                 or request['schema'] != 'cluster-guest-service-initial/v1'
                 or 'not_after_ms' in request and (type(request['not_after_ms']) is not int
                     or not 0 < request['not_after_ms'] < 2**53)
-                or request['predecessor'] is not None or action == 'quiesce'
+                or request['predecessor'] is not None or action in {'quiesce', 'quiescence'}
                 or str(uuid.UUID(request['operation_id'])) != request['operation_id']
                 or re.fullmatch('[0-9a-f]{64}', request['plan_digest']) is None):
             raise OnboardingError('receiving_guest_service_request_required')
@@ -612,7 +619,7 @@ class GuestServiceBootstrap:
     def execute(self, action: str, request: dict, *, deadline_ns: int) -> dict:
         from .owner_process import PresenceError, ProcessPresence, observe_process_exit
         from contextlib import ExitStack
-        if action not in {'validate', 'quiesce', 'select', 'start', 'steady'}:
+        if action not in {'validate', 'quiesce', 'quiescence', 'select', 'start', 'steady'}:
             raise OnboardingError('receiving_guest_service_request_required')
         self._budget(deadline_ns)
         with selection_lock(self.manager.unit):
@@ -620,8 +627,23 @@ class GuestServiceBootstrap:
                 return self._steady(request, deadline_ns=deadline_ns)
             if request.get('schema') == 'cluster-guest-service-initial/v1':
                 return self._initial(action, request, deadline_ns=deadline_ns)
-            root, previous, candidate = self._request(request)
+            root, previous, candidate = self._request(request, existing=action == 'quiescence')
             self._budget(deadline_ns)
+            if action == 'quiescence':
+                retained = self._retained(root, 'quiesced')
+                if (not isinstance(retained, dict)
+                        or retained.get('schema') != 'cluster-guest-service-quiescence/v1'
+                        or retained.get('process') != previous['process']
+                        or retained.get('admission_parent') != previous['admission_parent']
+                        or retained.get('exits') != {'process': True, 'admission_parent': True}
+                        or not all(observe_process_exit(previous[key]) for key in ('process', 'admission_parent'))):
+                    raise OnboardingError('receiving_guest_service_quiescence_required')
+                inspected = self._stopped(previous, candidate, deadline_ns=deadline_ns)
+                self._budget(deadline_ns)
+                return dict(schema='cluster-guest-service-quiescence-observation/v1',
+                    request_sha256=digest(request), exit_sha256=digest(retained), service=inspected,
+                    process=previous['process'], admission_parent=previous['admission_parent'],
+                    observed_at_ns=time.monotonic_ns(), receiving_readiness='unobserved')
             if action == 'validate':
                 current = self.manager.inspect(deadline_ns=deadline_ns)
                 if (current != previous['service'] or self.manager.bind_admitted_process(previous, current)
@@ -992,7 +1014,7 @@ def main(argv=None) -> int:
     parser.add_argument('--runtime-code', type=Path)
     parser.add_argument('--runtime-digest')
     parser.add_argument('--messaging-application', type=Path)
-    parser.add_argument('--action', choices=('install', 'bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce',
+    parser.add_argument('--action', choices=('install', 'bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce', 'bootstrap-quiescence',
         'bootstrap-select', 'bootstrap-start', 'bootstrap-steady'), default='install')
     parser.add_argument('--bootstrap-request-json')
     parser.add_argument('--owner-observation-json')

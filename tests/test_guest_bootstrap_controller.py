@@ -89,6 +89,12 @@ def fixture(tmp_path, monkeypatch):
                     self.active = False
                     self.stops += 1
                 return self.lose('quiesce', {'exits': {'process': True, 'admission_parent': True}})
+            if action == 'bootstrap-quiescence':
+                if self.active:
+                    raise OnboardingError('receiving_guest_service_quiescence_required')
+                return dict(schema='cluster-guest-service-quiescence-observation/v1',
+                    request_sha256=digest(options['request']),
+                    exit_sha256=digest({'exits': {'process': True, 'admission_parent': True}}))
             if action == 'bootstrap-select':
                 assert not self.active
                 self.done.add('select')
@@ -165,6 +171,25 @@ def test_quiesce_retains_the_same_lifecycle_without_publishing_or_starting(fixtu
     assert set(effects) == {'candidate_validated', 'quiesced'}
     assert controller.execute()['receiving_readiness'] == 'unobserved'
     assert backend.stops == backend.starts == backend.stages == backend.publications == 1
+
+
+def test_quiescence_query_works_inside_existing_managed_job_locks(fixture):
+    from contextlib import ExitStack
+    controller, backend, calls, _ = fixture
+    controller.quiesce()
+    before = controller._row()[0]
+    frozen = before['expected_precondition']['guest_bootstraps']['eko']
+    store = JobStore(backend.config.jobs)
+    store.submit(frozen['plan'], FixtureBackend())
+    with ExitStack() as locks:
+        locks.enter_context(being_seed._locked(backend.config.jobs))
+        for name in store.names():
+            locks.enter_context(being_seed._locked(store.directory(name)))
+        observed = controller.observe_quiescence()
+    assert observed['exit_sha256'] == digest(before['runtime_observation']['guest_bootstraps']['eko']['quiesced'])
+    assert controller._row()[0] == before
+    assert backend.stops == 1 and backend.starts == backend.stages == backend.publications == 0
+    assert calls[-1] == 'bootstrap-quiescence'
 
 
 def test_quiesce_lost_reply_resumes_the_same_root_operation(fixture):

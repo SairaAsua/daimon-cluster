@@ -437,6 +437,44 @@ class Source:
         return dict(schema='cluster-receiving-source-lifecycle/v1',
             source_config_sha256=digest(self.settings), lifecycle=projected)
 
+    def receiving_lifecycle_action(self, journal_path: Path, operation_id: str, action: str, *, deadline_ns: int) -> dict:
+        """Execute only the protected operation through the existing user unit."""
+        from .operation_journal import OperationJournal
+        from .onboarding_service import MatrixUserService
+        from .onboarding_receiving_update import SourceBootstrapController
+        if action not in {'quiesce', 'preserve', 'derive', 'start', 'quiescence'}:
+            raise OnboardingError('receiving_source_lifecycle_conflict')
+        journal = OperationJournal.existing(being_seed._path(journal_path))
+        row = None if journal is None else journal.get(operation_id)
+        if row is None or row['operation'] != 'receiving-update':
+            raise OnboardingError('receiving_source_lifecycle_unobserved')
+        frozen = row['expected_precondition'].get('source_bootstrap', {})
+        if frozen.get('settings_sha256') != digest(self.settings) or not isinstance(frozen.get('unit'), str):
+            raise OnboardingError('receiving_source_lifecycle_conflict')
+        controller = SourceBootstrapController(journal, operation_id, self, MatrixUserService(Path(frozen['unit'])))
+        if action != 'quiescence' and (frozen.get('mode') != 'preserve'
+                or 'admission_link' not in row['intended_transition'].get('source_bootstrap', {})):
+            raise OnboardingError('receiving_admission_prepared_controller_required')
+        # Resolve no caller-supplied argv, unit or candidate: the controller
+        # consumes the original journal and revalidates its exact qualification.
+        remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+        if not 0 < remaining <= 60:
+            raise OnboardingError('onboarding_observation_deadline_expired')
+        if action == 'preserve':
+            result = controller.publish(deadline_ns=deadline_ns)
+        elif action == 'derive':
+            result = controller.retain_admission_group(timeout_seconds=remaining, deadline_ns=deadline_ns)
+        elif action == 'quiesce':
+            result = controller.quiesce(timeout_seconds=remaining, deadline_ns=deadline_ns)
+        elif action == 'start':
+            result = controller.start(timeout_seconds=remaining, deadline_ns=deadline_ns)
+        else:
+            result = controller.observe_quiescence(timeout_seconds=remaining, deadline_ns=deadline_ns)
+        if time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('onboarding_observation_deadline_expired')
+        return dict(schema='cluster-receiving-source-lifecycle-effect/v1', source_config_sha256=digest(self.settings),
+            operation_id=operation_id, action=action, result=result)
+
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -458,6 +496,7 @@ def main(argv=None) -> int:
     parser.add_argument('--observation-deadline-ns', type=int)
     parser.add_argument('--expected-config-sha256')
     parser.add_argument('--receiving-lifecycle')
+    parser.add_argument('--lifecycle-action', choices=('quiesce', 'preserve', 'derive', 'start', 'quiescence'))
     parser.add_argument('--operation-journal', type=Path)
     parser.add_argument('--group-request', type=Path)
     args = parser.parse_args(argv)
@@ -475,6 +514,7 @@ def main(argv=None) -> int:
         receiving = args.owner_status or args.qualified_identity or controlling or lifecycle or grouping
         if (sum((args.observe, args.owner_status, args.qualified_identity, controlling, lifecycle, grouping)) > 1
                 or lifecycle != (args.operation_journal is not None)
+                or args.lifecycle_action is not None and not lifecycle
                 or lifecycle and (args.ready_fd is not None or args.require_loaded)
                 or args.qualified_identity != (args.identity_expires_at_ms is not None)
                 or args.identity_expires_at_ms is not None and not 0 < args.identity_expires_at_ms < 2**53
@@ -537,7 +577,10 @@ def main(argv=None) -> int:
             return 0
         if lifecycle:
             accept_deadline()
-            result = source.receiving_lifecycle(args.operation_journal, args.receiving_lifecycle)
+            result = (source.receiving_lifecycle(args.operation_journal, args.receiving_lifecycle)
+                if args.lifecycle_action is None else source.receiving_lifecycle_action(
+                    args.operation_journal, args.receiving_lifecycle, args.lifecycle_action,
+                    deadline_ns=args.observation_deadline_ns))
             accept_deadline()
             print(json.dumps(result))
             return 0

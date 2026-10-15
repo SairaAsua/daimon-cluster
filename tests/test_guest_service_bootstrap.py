@@ -734,9 +734,36 @@ def test_expired_budget_creates_no_effect_or_operation_state(fixture):
     )
 
 
+def test_quiescence_query_does_not_create_an_operation_or_stop_a_replacement(fixture):
+    from clusterctl.onboarding import digest
+    controller, manager, request = fixture
+    with pytest.raises(OnboardingError):
+        controller.execute('quiescence', request, deadline_ns=deadline())
+    assert not root_for(manager, request).exists() and manager.stops == 0
+    exited = controller.execute('quiesce', request, deadline_ns=deadline())
+    observed = controller.execute('quiescence', request, deadline_ns=deadline())
+    assert observed['exit_sha256'] == digest(exited)
+    assert observed['request_sha256'] == digest(request) and manager.stops == 1
+    manager.exited[123] = False
+    with pytest.raises(OnboardingError, match='quiescence_required'):
+        controller.execute('quiescence', request, deadline_ns=deadline())
+    manager.exited[123] = True
+    manager.state, manager.invocation = 'active', 'unrelated-replacement'
+    with pytest.raises(OnboardingError, match='quiescence_required'):
+        controller.execute('quiescence', request, deadline_ns=deadline())
+    assert manager.stops == 1 and manager.starts == 0
+
+
+def test_initial_service_cannot_treat_quiescence_query_as_start(initial):
+    controller, manager, request = initial
+    with pytest.raises(OnboardingError, match='request_required'):
+        controller.execute('quiescence', request, deadline_ns=deadline())
+    assert not manager.unit.exists() and manager.starts == manager.enables == 0
+
+
 @pytest.mark.parametrize(
     "action",
-    ["bootstrap-inspect", "bootstrap-quiesce", "bootstrap-select", "bootstrap-start"],
+    ["bootstrap-inspect", "bootstrap-quiesce", "bootstrap-quiescence", "bootstrap-select", "bootstrap-start"],
 )
 def test_closed_root_cli_never_calls_install_or_owner_sdk(monkeypatch, capsys, action):
     import json

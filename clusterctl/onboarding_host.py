@@ -1135,7 +1135,7 @@ class HostBackend:
         The caller holds the host operation/job locks and records uncertainty.
         This method does not create mounts or authorize a live interruption.
         """
-        if (action not in {'bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce',
+        if (action not in {'bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce', 'bootstrap-quiescence',
                           'bootstrap-select', 'bootstrap-start', 'bootstrap-steady'}
                 or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 60
                 or (action == 'bootstrap-inspect') != (request is None)

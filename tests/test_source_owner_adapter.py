@@ -145,6 +145,23 @@ def test_source_lifecycle_is_read_as_owner_and_never_falls_back_to_root(adapter)
         client.lifecycle_operation('fixture-operation')
 
 
+def test_source_lifecycle_action_uses_the_same_closed_owner_route(adapter):
+    client, response, calls = adapter
+    client.lifecycle_journal = client.root / 'update-journal'
+    response.clear()
+    response.update(schema='cluster-receiving-source-lifecycle-effect/v1',
+        source_config_sha256=client.config_sha256, operation_id='fixture-operation',
+        action='quiescence', result={'retained': 'query'})
+    assert client.lifecycle_action('fixture-operation', 'quiescence') == {'retained': 'query'}
+    argv, options = calls[-1]
+    assert argv[-6:] == ['--receiving-lifecycle', 'fixture-operation', '--operation-journal',
+        str(client.lifecycle_journal), '--lifecycle-action', 'quiescence']
+    assert options['user'] == client.owner_uid and options['extra_groups'] == ()
+    response['operation_id'] = 'another-operation'
+    with pytest.raises(OnboardingError, match='lifecycle_conflict'):
+        client.lifecycle_action('fixture-operation', 'quiescence')
+
+
 @pytest.mark.parametrize("part", ["group", "process", "origin", "loaded"])
 def test_malformed_owner_observation_cannot_be_cohort_readiness(adapter, part):
     client, result, _ = adapter
@@ -225,6 +242,10 @@ def cli(tmp_path, monkeypatch):
 
         def receiving_lifecycle(self, *args):
             calls.append(('lifecycle', args))
+            return {'retained': True}
+
+        def receiving_lifecycle_action(self, *args, **options):
+            calls.append(('lifecycle-action', args, options))
             return {'retained': True}
 
         def group_relationship(self, *args, **options):
@@ -387,6 +408,23 @@ def test_source_lifecycle_cli_queries_without_serving_or_native_observation(cli,
     assert calls[-1] == ('lifecycle', (Path('/owner/journal'), 'operation'))
     assert not any(call[0] in {'control', 'observe'} for call in calls)
     assert json.loads(capsys.readouterr().out) == {'retained': True}
+
+
+@pytest.mark.parametrize('action', ['quiesce', 'preserve', 'derive', 'start', 'quiescence'])
+def test_source_lifecycle_effect_cli_keeps_the_original_owner_deadline(cli, capsys, action):
+    args, calls = cli
+    assert source_cli.main([*args, '--receiving-lifecycle', 'operation',
+        '--operation-journal', '/owner/journal', '--lifecycle-action', action]) == 0
+    assert calls[-1] == ('lifecycle-action', (Path('/owner/journal'), 'operation', action),
+        {'deadline_ns': int(args[-1])})
+    assert json.loads(capsys.readouterr().out) == {'retained': True}
+
+
+def test_source_lifecycle_effect_needs_its_original_operation(cli, capsys):
+    args, calls = cli
+    assert source_cli.main([*args, '--lifecycle-action', 'start']) == 1
+    assert calls == []
+    assert json.loads(capsys.readouterr().out)['error'] == 'native_onboarding_source_refused'
 
 
 @pytest.mark.parametrize('extra', [[], ['--owner-status'], ['--require-loaded']])

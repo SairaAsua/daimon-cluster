@@ -362,7 +362,7 @@ def admission_activation_fixture(tmp_path, initial):
     records. Native/group/manager/identity/registry seams remain explicit fakes;
     this does not claim installed or genuine three-being receiving acceptance.
     """
-    from clusterctl.onboarding_code_successor import plan_update
+    from tests.test_receiving_cohort_control import admission_child_fixture
     managed, plan, cohort, manager, observed, _, _, _ = initial_managed_fixture(
         tmp_path, initial, complete_origins=True)
     row = cohort._row()
@@ -411,23 +411,28 @@ def admission_activation_fixture(tmp_path, initial):
                 'verified_identity': dict(identity=self.identity, runtime_bundle_sha256=self.loaded['runtime_bundle_sha256'],
                     authority_control_head='control:fixture', expires_at_ms=expires_at_ms)}
         owner.qualified_identity = MethodType(qualified, owner)
-        lifecycle_id = cohort.operation_id
-        if name != 'newcomer':
-            life = plan_update(cohort.journal, manifest_digest=row['intent']['runtime_call']['manifest_digest'],
-                target='lifecycle:' + name, expected_precondition={},
-                intended_transition={'guest_bootstraps': {name: dict(
-                    runtime_code=admission['receivers'][name]['candidate']['code'],
-                    code_uid=admission['receivers'][name]['candidate']['code_uid'])}}, audit_identity={'actor': 'fixture'})
-            lifecycle_id = life['operation_id']
-            cohort.journal.advance(lifecycle_id, 'runtime-dispatching', runtime_observation={'guest_bootstraps': {
-                name: {'controlled_loaded': dict(process=owner.process, admission_parent=owner.parent,
-                    loaded_runtime=owner.loaded, loaded_application=owner.application)}}})
         startup = owner.loaded['qualified_startup']
-        recipes[name] = {**admission['receivers'][name]['recipe'], 'lifecycle_operation_id': lifecycle_id,
+        recipes[name] = {**admission['receivers'][name]['recipe'], 'lifecycle_operation_id': cohort.operation_id,
             'selection': dict(receiving_code=startup['code_digest'], matrix_sdk=startup['matrix_wheel_sha256'],
                 runtime_bundle_sha256=owner.loaded['runtime_bundle_sha256'],
                 application_sha256=application['application_sha256'], publication_sha256=application['publication_sha256'],
                 visibility_installation_sha256=application['visibility']['installation_sha256'])}
+        if name != 'newcomer':
+            # Retain a real child association before the simulated old exit;
+            # these process/native seams are not operational load evidence.
+            _, _, _, _, child_recipe, _, effects = admission_child_fixture(tmp_path,
+                profile='guest', with_group=False, with_exit=False, name=name,
+                setup=(cohort, cohort.owners, cohort.journal, row, {'receivers': recipes}))
+            cohort.bind_admission_lifecycle(name, child_recipe['lifecycle_operation_id'])
+            owner.process = {**owner.process, 'start_ticks': owner.process['start_ticks'] + 1}
+            owner.parent = {**owner.parent, 'start_ticks': owner.parent['start_ticks'] + 1}
+            owner.gate = {**owner.gate, 'process_instance_id': name + ':replacement', 'phase': 'unselected',
+                'request_sha256': None, 'operation_id': None, 'release_digest': None}
+            effects['controlled_loaded'] = dict(process=owner.process, admission_parent=owner.parent,
+                loaded_runtime=owner.loaded, loaded_application=owner.application)
+            cohort.journal.advance(child_recipe['lifecycle_operation_id'], 'runtime-dispatching',
+                runtime_observation={'guest_bootstraps': {name: effects}})
+            recipes[name] = child_recipe
     cohort.retain_admission_activation({**admission['activation'], 'roster_sha256': '5' * 64, 'receivers': recipes})
     return cohort, manager, managed, plan
 

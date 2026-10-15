@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from clusterctl import being_seed
-from clusterctl.onboarding import OnboardingError
+from clusterctl.onboarding import OnboardingError, digest
 from clusterctl.onboarding_code_successor import plan_update
 from clusterctl.onboarding_receiving_update import SourceBootstrapController, freeze_source_bootstrap
 from clusterctl.onboarding_service import MatrixUserService, selection_lock
@@ -36,7 +36,7 @@ class FakeManager:
         assert process['pid'] == int(inspected['manager']['MainPID'])
         return dict(process=process, control_group='fixture-scope', invocation_id=self.invocation)
 
-    def stop(self):
+    def stop(self, **_):
         self.stops += 1
         self.live = False
 
@@ -62,7 +62,7 @@ def fixture(tmp_path, monkeypatch):
     source = SimpleNamespace(root=root, visibility=visibility, settings={'fixture': 'source'}, writer=writer)
     process = dict(pid=123, uid=1, start_ticks=2, boot_id='fixture')
     class FakeOwner:
-        def __init__(self, *_):
+        def __init__(self, *_, **__):
             pass
         def __enter__(self):
             return self
@@ -98,7 +98,61 @@ def test_quiescence_retains_actual_journal_stage_and_exact_retry(fixture):
     assert result['graceful_delivery'] == 'unobserved'
     assert controller.quiesce() == result and manager.stops == 1
     assert len(locked) == 2
+
+
+def test_quiescence_observation_requires_original_exit_and_never_stops_or_loads(fixture):
+    source, manager, journal, identifier, _ = fixture
+    controller = SourceBootstrapController(journal, identifier, source, manager)
+    with pytest.raises(OnboardingError, match='exit_unobserved'):
+        controller.observe_quiescence()
+    assert manager.stops == 0
+    exited = controller.quiesce()
+    before = journal.get(identifier)
+    observed = controller.observe_quiescence()
+    assert observed['exit_sha256'] == digest(exited)
+    assert observed['service']['manager']['ActiveState'] == 'inactive'
+    assert journal.get(identifier) == before and manager.stops == 1
+    manager.live = True
+    with pytest.raises(OnboardingError, match='exit_unobserved|quiescence_required'):
+        controller.observe_quiescence()
+    assert manager.stops == 1
+
+
+def test_source_lifecycle_effect_entry_uses_only_the_original_owner_journal_unit(fixture, monkeypatch):
+    from clusterctl.onboarding_source import Source
+    from clusterctl import onboarding_service
+    import time
+    source, manager, journal, identifier, _ = fixture
+    SourceBootstrapController(journal, identifier, source, manager).quiesce()
+    def selected(unit):
+        assert unit == manager.unit
+        return manager
+    monkeypatch.setattr(onboarding_service, 'MatrixUserService', selected)
+    result = Source.receiving_lifecycle_action(source, journal.path.parent, identifier, 'quiescence',
+        deadline_ns=time.monotonic_ns() + 1_000_000_000)
+    assert result['operation_id'] == identifier and result['action'] == 'quiescence'
+    assert result['result']['exit_sha256'] == digest(journal.get(identifier)['runtime_observation']['source_bootstrap']['quiesced'])
+    assert manager.stops == 1
     assert set(journal.get(identifier)['runtime_observation']['source_bootstrap']) == {'stop_intent', 'quiesced'}
+
+
+def test_source_deadline_expiring_during_intent_durability_prevents_stop(fixture, monkeypatch):
+    from clusterctl import onboarding_receiving_update as updates
+    source, manager, journal, identifier, _ = fixture
+    controller = SourceBootstrapController(journal, identifier, source, manager)
+    clock = [100]
+    monkeypatch.setattr(updates.time, 'monotonic_ns', lambda: clock[0])
+    record = controller._record
+    def persisted(key, value):
+        result = record(key, value)
+        if key == 'stop_intent':
+            clock[0] = 1001
+        return result
+    monkeypatch.setattr(controller, '_record', persisted)
+    with pytest.raises(OnboardingError, match='deadline_expired'):
+        controller.quiesce(deadline_ns=1000)
+    assert manager.stops == 0 and manager.live
+    assert 'stop_intent' in journal.get(identifier)['runtime_observation']['source_bootstrap']
 
 
 @pytest.mark.parametrize('late_at', ['after-exit', 'status', 'active-stop-intent'])
@@ -690,6 +744,25 @@ def test_admission_requires_retained_after_group_then_starts_the_same_approved_b
     with pytest.raises(OnboardingError, match='preservation_required'):
         controller.retain_admission_group()
     assert manager.starts == 1
+
+
+@pytest.mark.parametrize('action', ['quiesce', 'publish', 'retain_admission_group', 'start'])
+def test_source_admission_actions_keep_deadline_across_qualification(fixture, monkeypatch, action):
+    from clusterctl import onboarding_receiving_update as updates
+    controller, manager, _, _, snapshots = admission_start_fixture(fixture, monkeypatch)
+    before = controller._row()[0]
+    clock = [100]
+    qualify = controller._qualify_candidate
+    def late(*args, **kwargs):
+        result = qualify(*args, **kwargs)
+        clock[0] = 1001
+        return result
+    monkeypatch.setattr(controller, '_qualify_candidate', late)
+    monkeypatch.setattr(updates.time, 'monotonic_ns', lambda: clock[0])
+    with pytest.raises(OnboardingError, match='deadline_expired'):
+        getattr(controller, action)(deadline_ns=1000)
+    assert controller._row()[0] == before
+    assert manager.stops == manager.starts == 0 and snapshots == []
 
 
 def test_admission_does_not_start_a_changed_group_or_rewrite_its_original_derivation(fixture, monkeypatch):

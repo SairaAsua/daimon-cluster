@@ -405,12 +405,13 @@ def test_initial_marker_cannot_borrow_same_operation_replacement_proof(tmp_path)
         controller._lifecycle('newcomer', recipe)
 
 
-def admission_child_fixture(tmp_path, *, profile, with_group=True):
+def admission_child_fixture(tmp_path, *, profile, with_group=True, with_exit=True, setup=None, name='eko'):
     """Actual owner projection/journals; synthetic publication/process evidence."""
     from clusterctl.onboarding_source import Source
     from clusterctl.onboarding_receiving_update import admission_group_derivation
-    controller, owners, journal, parent, plan = admission_fixture(tmp_path, existing_profile=profile)
-    name, owner = 'eko', owners['eko']
+    controller, owners, journal, parent, plan = (admission_fixture(tmp_path, existing_profile=profile)
+        if setup is None else setup)
+    owner = owners[name]
     recipe = copy.deepcopy(plan['receivers'][name])
     request = dict(operation_id=str(uuid.uuid4()), step='snapshot', action='snapshot', params=dict(
         application_step='application', visibility_step='visibility', selection_step='selection',
@@ -419,10 +420,14 @@ def admission_child_fixture(tmp_path, *, profile, with_group=True):
     link = dict(schema='cluster-admission-lifecycle-link/v1', cohort_operation_id=parent['operation_id'],
         cohort_intent_sha256=digest(parent['intent']), tribe_ref='tribe:fixture',
         owner=dict(being_ref=owner.being, embodiment_id=owner.server['embodiment_id']), snapshot_request=request)
-    group = dict(selected={'tribe_ref': 'tribe:fixture'}, application_sha256='b' * 64,
-        publication_sha256='c' * 64, installation_sha256='d' * 64)
+    group = dict(selected={'tribe_ref': 'tribe:fixture'},
+        application_sha256=recipe['selection']['application_sha256'],
+        publication_sha256=recipe['selection']['publication_sha256'],
+        installation_sha256=recipe['selection']['visibility_installation_sha256'])
     previous = owner.status()
     previous['runtime_status']['loaded_runtime'] = {'stores': request['params']['expected_stores']}
+    if profile == 'guest':
+        previous['admission_parent'] = dict(uid=1, pid=1, start_ticks=2, boot_id='fixture')
     source = None
     if profile == 'source':
         settings = dict(schema='cluster-onboarding-source/v1', runtime_root=str(owner.root),
@@ -441,7 +446,8 @@ def admission_child_fixture(tmp_path, *, profile, with_group=True):
         frozen = dict(being_ref=owner.being, origin=owner.server, predecessor=previous,
             group=group, store_bindings=request['params']['expected_stores'], mode='preserve',
             preservation=request['params']['expected_preservation'])
-        candidate = dict(admission_link=link)
+        approved = parent['intended_transition']['cohort_admission']['receivers'][name]['candidate']
+        candidate = dict(admission_link=link, runtime_code=approved['code'], code_uid=approved['code_uid'])
         precondition = {'guest_bootstraps': {name: {'owner': frozen}}}
         transition = {'guest_bootstraps': {name: candidate}}
     snapshot = dict(schema='cluster-group-publication-result/v1', operation_id=request['operation_id'],
@@ -453,24 +459,28 @@ def admission_child_fixture(tmp_path, *, profile, with_group=True):
             result=dict(schema='cluster-group-publication-result/v1', operation_id=request['operation_id'], step=step, action=action,
                 status='recorded', receiving_readiness='unobserved'))
     derived = admission_group_derivation(link, snapshot, previous=group, stores=snapshot['stores'])
-    effects = dict(quiesced={'process': previous['process'], 'exit_observed': True})
+    quiesced = (dict(process=previous['process'], exit_observed=True, writer_available=True)
+        if profile == 'source' else dict(schema='cluster-guest-service-quiescence/v1',
+            process=previous['process'], admission_parent=previous['admission_parent'],
+            exits={'process': True, 'admission_parent': True}))
+    effects = {'quiesced': quiesced} if with_exit else {}
     if with_group:
         effects['admission_group'] = derived
     row = plan_update(journal, manifest_digest=parent['intent']['runtime_call']['manifest_digest'],
-        target='lifecycle:' + profile, expected_precondition=precondition,
+        target='lifecycle:' + name + ':' + profile, expected_precondition=precondition,
         intended_transition=transition, audit_identity={'private_metadata': 'keep-local'})
     journal.advance(row['operation_id'], 'runtime-dispatching', runtime_observation=(
         {'source_bootstrap': effects} if profile == 'source' else {'guest_bootstraps': {name: effects}}))
     recipe['lifecycle_operation_id'] = row['operation_id']
     if source is not None:
         owner.lifecycle_operation = lambda operation_id: source.receiving_lifecycle(journal.path.parent, operation_id)['lifecycle']
-    return controller, owners, journal, parent, recipe, source
+    return controller, owners, journal, parent, recipe, source, dict(quiesced=quiesced, admission_group=derived)
 
 
 @pytest.mark.parametrize('profile', ['source', 'guest'])
 def test_admission_lifecycle_projection_binds_original_cohort_and_hides_private_inputs(tmp_path, profile):
     from clusterctl.onboarding_receiving_update import admission_lifecycle_projection
-    controller, owners, journal, parent, recipe, source = admission_child_fixture(tmp_path, profile=profile)
+    controller, owners, journal, parent, recipe, source, _ = admission_child_fixture(tmp_path, profile=profile)
     before = journal.get(recipe['lifecycle_operation_id'])
     observed = controller._lifecycle('eko', recipe)
     proof = observed['admission'] if source is not None else admission_lifecycle_projection(observed, profile=profile, name='eko')
@@ -487,7 +497,7 @@ def test_admission_lifecycle_projection_binds_original_cohort_and_hides_private_
 
 @pytest.mark.parametrize('part', ['cohort_operation_id', 'cohort_intent_sha256', 'tribe_ref', 'owner', 'manifest_digest', 'derived'])
 def test_admission_cannot_reuse_another_owner_operation_or_group(tmp_path, part):
-    controller, owners, journal, parent, recipe, _ = admission_child_fixture(tmp_path, profile='source')
+    controller, owners, journal, parent, recipe, _, _effects = admission_child_fixture(tmp_path, profile='source')
     original = owners['eko'].lifecycle_operation(recipe['lifecycle_operation_id'])
     altered = copy.deepcopy(original)
     altered['admission'][part] = None
@@ -500,7 +510,7 @@ def test_admission_cannot_reuse_another_owner_operation_or_group(tmp_path, part)
 
 def test_guest_cannot_reuse_a_valid_child_journal_for_another_admission(tmp_path):
     from clusterctl.onboarding_receiving_update import admission_group_derivation, admission_lifecycle_projection
-    controller, owners, journal, _, recipe, _ = admission_child_fixture(tmp_path, profile='guest')
+    controller, owners, journal, _, recipe, _source, _effects = admission_child_fixture(tmp_path, profile='guest')
     row = journal.get(recipe['lifecycle_operation_id'])
     transition = copy.deepcopy(row['intended_transition'])
     link = transition['guest_bootstraps']['eko']['admission_link']
@@ -523,7 +533,7 @@ def test_guest_cannot_reuse_a_valid_child_journal_for_another_admission(tmp_path
 @pytest.mark.parametrize('profile', ['source', 'guest'])
 def test_partial_admission_projection_never_becomes_receiving_adoption(tmp_path, profile):
     from clusterctl.onboarding_receiving_update import admission_lifecycle_projection
-    controller, owners, journal, _, recipe, source = admission_child_fixture(tmp_path, profile=profile, with_group=False)
+    controller, owners, journal, _, recipe, source, _ = admission_child_fixture(tmp_path, profile=profile, with_group=False)
     row = journal.get(recipe['lifecycle_operation_id'])
     proof = (source.receiving_lifecycle(journal.path.parent, row['operation_id'])['lifecycle']['admission']
         if source is not None else admission_lifecycle_projection(row, profile=profile, name='eko'))
@@ -536,7 +546,7 @@ def test_partial_admission_projection_never_becomes_receiving_adoption(tmp_path,
 @pytest.mark.parametrize('profile', ['source', 'guest'])
 def test_projection_refuses_incomplete_publication_correlation(tmp_path, profile):
     from clusterctl.onboarding_receiving_update import admission_lifecycle_projection
-    controller, owners, journal, _, recipe, _ = admission_child_fixture(tmp_path, profile=profile)
+    controller, owners, journal, _, recipe, _source, _effects = admission_child_fixture(tmp_path, profile=profile)
     row = journal.get(recipe['lifecycle_operation_id'])
     effects = (row['runtime_observation']['source_bootstrap'] if profile == 'source'
         else row['runtime_observation']['guest_bootstraps']['eko'])
@@ -544,6 +554,128 @@ def test_projection_refuses_incomplete_publication_correlation(tmp_path, profile
     with pytest.raises(OnboardingError, match='lifecycle_unobserved'):
         admission_lifecycle_projection(row, profile=profile, name='eko')
     assert all(owner.effects == 0 for owner in owners.values())
+
+
+@pytest.mark.parametrize('profile', ['source', 'guest'])
+def test_admission_child_is_bound_before_stop_and_cannot_be_rebound_afterwards(tmp_path, profile):
+    controller, owners, journal, parent, recipe, _, effects = admission_child_fixture(
+        tmp_path, profile=profile, with_group=False, with_exit=False)
+    bound = controller.bind_admission_lifecycle('eko', recipe['lifecycle_operation_id'])
+    assert controller.bind_admission_lifecycle('eko', recipe['lifecycle_operation_id']) == bound
+    original = journal.get(parent['operation_id'])
+    child = journal.get(recipe['lifecycle_operation_id'])
+    journal.advance(child['operation_id'], child['state'], runtime_observation=(
+        {'source_bootstrap': effects} if profile == 'source' else {'guest_bootstraps': {'eko': effects}}))
+    assert controller.bind_admission_lifecycle('eko', recipe['lifecycle_operation_id']) == bound
+    assert journal.get(parent['operation_id']) == original
+    assert all(owner.effects == 0 for owner in owners.values())
+
+
+def test_admission_binding_cannot_be_added_after_the_original_stop(tmp_path):
+    controller, owners, _, _, recipe, _, _effects = admission_child_fixture(tmp_path, profile='source')
+    with pytest.raises(OnboardingError, match='binding_too_late'):
+        controller.bind_admission_lifecycle('eko', recipe['lifecycle_operation_id'])
+    assert all(owner.effects == 0 for owner in owners.values())
+
+
+@pytest.mark.parametrize('profile', ['source', 'guest'])
+def test_admission_barrier_rechecks_stopped_original_without_starting_or_replaying_stop(tmp_path, monkeypatch, profile):
+    from clusterctl import onboarding_receiving_update as updates
+    controller, owners, journal, parent, recipe, _, effects = admission_child_fixture(
+        tmp_path, profile=profile, with_group=False, with_exit=False)
+    controller.bind_admission_lifecycle('eko', recipe['lifecycle_operation_id'])
+    controller.revoke_senders()
+    original = copy.deepcopy(journal.get(parent['operation_id'])['runtime_observation']['sender_revocations'])
+    journal.advance(recipe['lifecycle_operation_id'], 'runtime-dispatching', runtime_observation=(
+        {'source_bootstrap': effects} if profile == 'source' else {'guest_bootstraps': {'eko': effects}}))
+    def unavailable():
+        raise OSError('synthetic original exited')
+    owners['eko'].status = unavailable
+    monkeypatch.setattr(owners['newcomer'], 'status', lambda: pytest.fail('unstarted member queried'))
+    live = [False]
+    queries = []
+    def query():
+        queries.append(True)
+        return dict(schema=('cluster-source-bootstrap-quiescence/v1' if profile == 'source'
+            else 'cluster-guest-service-quiescence-observation/v1'),
+            process=original['eko']['process'], server=original['eko']['server'],
+            exit_sha256=digest(effects['quiesced']), observed_at_ns=time.monotonic_ns(),
+            service={'manager': dict(ActiveState='active' if live[0] else 'inactive',
+                SubState='running' if live[0] else 'dead', MainPID='0')})
+    if profile == 'source':
+        def action(operation_id, verb):
+            assert operation_id == recipe['lifecycle_operation_id'] and verb == 'quiescence'
+            return query()
+        owners['eko'].lifecycle_action = action
+    else:
+        owners['eko'].backend = object()
+        class Query:
+            def __init__(self, selected_journal, operation_id, backend, name):
+                assert selected_journal is journal and operation_id == recipe['lifecycle_operation_id']
+                assert backend is owners['eko'].backend and name == 'eko'
+            def observe_quiescence(self, *, timeout_seconds):
+                assert 0 < timeout_seconds <= 30
+                return query()
+        monkeypatch.setattr(updates, 'GuestBootstrapController', Query)
+    for _ in range(2):
+        result = controller.require_revocation_barrier()
+        assert result['current_senders']['eko']['state'] == 'stopped'
+    assert len(queries) == 2
+    live[0] = True
+    with pytest.raises(OnboardingError, match='quiescence_unobserved'):
+        controller.require_revocation_barrier()
+    assert journal.get(parent['operation_id'])['runtime_observation']['sender_revocations'] == original
+    assert all(owner.effects == (0 if name == 'newcomer' else 1) for name, owner in owners.items())
+
+
+@pytest.mark.parametrize('profile', ['source', 'guest'])
+def test_admission_replacement_requires_its_own_exact_revoke_and_load(tmp_path, profile):
+    controller, owners, journal, parent, recipe, _, effects = admission_child_fixture(
+        tmp_path, profile=profile, with_group=False, with_exit=False)
+    controller.bind_admission_lifecycle('eko', recipe['lifecycle_operation_id'])
+    controller.revoke_senders()
+    old = copy.deepcopy(journal.get(parent['operation_id'])['runtime_observation']['sender_revocations'])
+    owner = owners['eko']
+    owner.process = {**owner.process, 'start_ticks': owner.process['start_ticks'] + 1}
+    owner.gate = {**owner.gate, 'phase': 'unselected', 'process_instance_id': 'replacement',
+        'operation_id': None, 'release_digest': None, 'request_sha256': None}
+    loaded_runtime = dict(process_id=owner.process['pid'], stores={'ledger': {'synthetic': 'store-binding'}})
+    application = dict(application_sha256='b' * 64, publication_sha256='c' * 64,
+        visibility={'installation_sha256': 'd' * 64})
+    parent_process = dict(uid=1, pid=1, start_ticks=3, boot_id='fixture')
+    status = owner.status
+    def actual():
+        value = status()
+        value['runtime_status'].update(loaded_runtime=loaded_runtime, loaded_application=application)
+        if profile == 'guest':
+            value['admission_parent'] = parent_process
+        return value
+    owner.status = actual
+    effects['controlled_loaded'] = dict(process=copy.deepcopy(owner.process), loaded_runtime=loaded_runtime,
+        loaded_application=application, **({'admission_parent': parent_process} if profile == 'guest' else {}))
+    journal.advance(recipe['lifecycle_operation_id'], 'runtime-dispatching', runtime_observation=(
+        {'source_bootstrap': effects} if profile == 'source' else {'guest_bootstraps': {'eko': effects}}))
+    assert controller.require_revocation_barrier()['current_senders']['eko']['state'] == 'revoked-replacement'
+    retained = journal.get(parent['operation_id'])['runtime_observation']
+    assert retained['sender_revocations'] == old
+    assert retained['sender_replacements']['eko']['accepted']['process'] == owner.process
+    assert controller.require_revocation_barrier()['current_senders']['eko']['state'] == 'revoked-replacement'
+    assert owner.effects == 2
+    owner.process = {**owner.process, 'start_ticks': owner.process['start_ticks'] + 1}
+    with pytest.raises(OnboardingError, match='replacement_unobserved'):
+        controller.require_revocation_barrier()
+    assert owner.effects == 2
+
+
+def test_admission_barrier_does_not_treat_an_unavailable_original_ack_as_quiescence(tmp_path):
+    controller, owners, _, _, _ = admission_fixture(tmp_path)
+    controller.revoke_senders()
+    def unavailable():
+        raise OSError('synthetic unavailable original, exit unknown')
+    owners['eko'].status = unavailable
+    with pytest.raises(OnboardingError, match='lifecycle_binding_required'):
+        controller.require_revocation_barrier()
+    assert owners['eko'].effects == 1
 
 
 def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profile='source', assessment_fault=None, tooling_profile='matrix-only'):

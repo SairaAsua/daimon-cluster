@@ -992,9 +992,28 @@ A partial projection remains inspectable but cannot qualify receiving adoption;
 an ordinary software-update lifecycle cannot stand in for an admission. The
 projection preserves command/result hashes for the coordinator to compare against
 its approved publication commands; it does not itself approve those commands.
-The admission-aware barrier, closed Source lifecycle effect caller and protected
-worker coordinator remain unfinished integration. These lifecycle helpers do not
-establish complete portal admission or installed receiving acceptance.
+Before dispatching an existing member's first lifecycle effect, the coordinator
+retains `bind_admission_lifecycle` in this same cohort operation. The association
+cannot first be attached after the original stop. The Source owner CLI now exposes
+only the closed preserve-mode admission phases through `--receiving-lifecycle`
+and `--lifecycle-action`; the unit, argv and candidate come from the original
+owner journal. It retains the caller's absolute deadline through qualification,
+manager/native calls and final unit-file CAS. Ordinary direct controller use
+without that option retains its previous contract.
+
+The admission barrier accepts a freshly observed exact revoked original, or its
+retained exit plus a fresh stopped named-unit observation, or a child-qualified
+replacement with its own retained exact revoke. An unavailable socket alone is
+never exit proof. Quiescence queries dispatch neither StopUnit nor StartUnit and
+cannot create a missing root operation or turn an initial request into a start.
+The guest query takes no host job/mutation locks, so the existing managed first
+start can call it while holding its own job scope. It passes only the remaining
+host budget into the root call and checks expiry after it; guest monotonic values
+are not compared with the host clock. No prior ACK is attributed to a replacement.
+
+The protected worker coordinator, approved publication-command comparison and
+installed old-members/newcomer journey remain unfinished. These lifecycle helpers
+do not establish complete portal admission or installed receiving acceptance.
 
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry
