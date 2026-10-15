@@ -984,8 +984,17 @@ Guest `execute(authority_closure=...)` refreshes the prospective snapshot before
 a first start; a lost-start retry observes the retained execution. Both profiles
 require actual qualified loaded group and original store bindings, with initial
 sender gates disabled. A snapshot alone never qualifies that process or cohort.
-The admission-aware barrier and protected worker caller remain separate unfinished
-integration; these lifecycle helpers do not establish complete portal admission.
+`Source.receiving_lifecycle` now also projects the protected admission association
+and public effect hashes, without the private snapshot/preservation inputs. The
+cohort consumes this projection or the local guest journal and compares the
+original cohort intent, owner, Tribe, release, predecessor and derived group.
+A partial projection remains inspectable but cannot qualify receiving adoption;
+an ordinary software-update lifecycle cannot stand in for an admission. The
+projection preserves command/result hashes for the coordinator to compare against
+its approved publication commands; it does not itself approve those commands.
+The admission-aware barrier, closed Source lifecycle effect caller and protected
+worker coordinator remain unfinished integration. These lifecycle helpers do not
+establish complete portal admission or installed receiving acceptance.
 
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry

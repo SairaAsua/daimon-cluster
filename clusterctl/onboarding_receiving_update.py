@@ -921,6 +921,80 @@ def preserved_admission_stores(root: Path, bundle: dict, preservation: dict, ori
     return admission_store_bindings(root, bundle, original)
 
 
+def admission_lifecycle_projection(row: dict, *, profile: str, name: str | None = None) -> dict | None:
+    """Export only the retained admission association and public effect hashes.
+
+    The owner validates its full local journal before projecting it. Private
+    snapshot inputs, preservation vectors and custody/client locations stay
+    local. The cohort must still match this association to its own intent.
+    """
+    try:
+        before, after = row['expected_precondition'], row['intended_transition']
+        call = row['intent']['runtime_call']
+        if (row['operation'] != 'receiving-update' or row['intent_hash'] != digest(row['intent'])
+                or call['precondition_digest'] != digest(before)
+                or call['transition_digest'] != digest(after)
+                or re.fullmatch('[0-9a-f]{64}', call['manifest_digest']) is None):
+            raise ValueError
+        if profile == 'source':
+            frozen, candidate = before['source_bootstrap'], after['source_bootstrap']
+            effects = (row['runtime_observation'] or {}).get('source_bootstrap', {})
+        elif profile == 'guest' and name is not None:
+            frozen, candidate = before['guest_bootstraps'][name]['owner'], after['guest_bootstraps'][name]
+            effects = (row['runtime_observation'] or {}).get('guest_bootstraps', {}).get(name, {})
+        else:
+            raise ValueError
+        if 'admission_link' not in candidate:
+            if 'admission_group' in effects:
+                raise ValueError
+            return None
+        if profile == 'source':
+            owner = dict(zip(('being_ref', 'embodiment_id'), _owner_identity(frozen['predecessor'])))
+            group = candidate.get('qualification', {}).get('group')
+            stores = frozen['predecessor']['runtime_status']['loaded_runtime']['stores']
+        else:
+            owner = dict(being_ref=frozen['being_ref'], embodiment_id=frozen['origin']['embodiment_id'])
+            group, stores = frozen.get('group'), frozen.get('store_bindings')
+        link = admission_lifecycle_link(candidate['admission_link'], **owner)
+        if (frozen.get('mode') != 'preserve' or not isinstance(group, dict)
+                or group['selected']['tribe_ref'] != link['tribe_ref']
+                or stores != link['snapshot_request']['params']['expected_stores']
+                or frozen['preservation'] != link['snapshot_request']['params']['expected_preservation']):
+            raise ValueError
+        retained = effects.get('admission_group')
+        derived = None
+        if retained is not None:
+            snapshot = retained['snapshot']
+            if admission_group_derivation(link, snapshot, previous=group, stores=stores) != retained:
+                raise ValueError
+            publications = snapshot['publications']
+            if set(publications) != {'application', 'visibility-publish', 'selection'}:
+                raise ValueError
+            for action, step_key in (('application', 'application_step'), ('visibility-publish', 'visibility_step'),
+                                     ('selection', 'selection_step')):
+                result = publications[action]['result']
+                if (result.get('schema') != 'cluster-group-publication-result/v1'
+                        or result['operation_id'] != snapshot['operation_id'] or result['action'] != action
+                        or result['step'] != link['snapshot_request']['params'][step_key]
+                        or result['status'] != 'recorded' or result['receiving_readiness'] != 'unobserved'
+                        or re.fullmatch('[0-9a-f]{64}', publications[action]['command_sha256']) is None):
+                    raise ValueError
+            derived = dict(derivation_sha256=digest(retained),
+                group={key: snapshot['group'][key] for key in (
+                    'application_sha256', 'publication_sha256', 'installation_sha256')},
+                selection_sha256=snapshot['selection_sha256'],
+                publications={action: dict(command_sha256=receipt['command_sha256'],
+                    result_sha256=digest(receipt['result'])) for action, receipt in publications.items()})
+        return dict(schema='cluster-admission-lifecycle-projection/v1',
+            **{key: link[key] for key in ('cohort_operation_id', 'cohort_intent_sha256', 'tribe_ref', 'owner')},
+            link_sha256=digest(link), manifest_digest=call['manifest_digest'],
+            snapshot_request_sha256=digest(link['snapshot_request']),
+            owner_context_sha256=link['snapshot_request']['params']['owner_context_sha256'],
+            publication_operation_id=link['snapshot_request']['operation_id'], derived=derived)
+    except (KeyError, TypeError, ValueError, AttributeError, OnboardingError):
+        raise OnboardingError('receiving_admission_lifecycle_unobserved') from None
+
+
 def freeze_source_bootstrap(source, manager) -> dict:
     """Freeze the Source's existing identity and actual Matrix manager scope."""
     with OwnerGroupClient(source.root, source.root / 'matrix.sock') as owner:
@@ -2848,7 +2922,45 @@ class CohortController:
             row = self.journal.get(recipe['lifecycle_operation_id'])
         if row is not None and row.get('operation_id') != recipe['lifecycle_operation_id']:
             raise OnboardingError('receiving_cohort_lifecycle_unobserved')
+        if admission is not None and row is not None:
+            proof = (row.get('admission') if recipe['profile'] == 'source' and inspect is not None
+                else admission_lifecycle_projection(row, profile=recipe['profile'], name=name))
+            self._admission_lifecycle_association(cohort, admission, name, recipe, row, proof)
         return row
+
+    def _admission_lifecycle_association(self, cohort: dict, admission: dict, name: str,
+                                         recipe: dict, lifecycle: dict, proof: dict | None) -> None:
+        """A valid local load cannot stand in for a different admission intent."""
+        try:
+            approved = admission['receivers'][name]
+            sender = next(item for item in cohort['expected_precondition']['senders'] if item['name'] == name)
+            if recipe['profile'] == 'source':
+                previous = lifecycle['expected_precondition']['source_bootstrap']['predecessor']
+                server = previous['server']
+            else:
+                frozen = lifecycle['expected_precondition']['guest_bootstraps'][name]['owner']
+                previous, server = frozen['predecessor'], frozen['origin']
+            if (not isinstance(proof, dict) or set(proof) != {'schema', 'cohort_operation_id',
+                    'cohort_intent_sha256', 'tribe_ref', 'owner', 'link_sha256', 'manifest_digest',
+                    'snapshot_request_sha256', 'owner_context_sha256', 'publication_operation_id', 'derived'}
+                    or proof['schema'] != 'cluster-admission-lifecycle-projection/v1'
+                    or proof['cohort_operation_id'] != self.operation_id
+                    or proof['cohort_intent_sha256'] != digest(cohort['intent'])
+                    or proof['tribe_ref'] != admission['tribe_ref']
+                    or proof['owner'] != {key: approved[key] for key in ('being_ref', 'embodiment_id')}
+                    or proof['manifest_digest'] != cohort['intent']['runtime_call']['manifest_digest']
+                    or any(recipe.get(key) != value for key, value in approved['recipe'].items())
+                    or previous['process'] != sender['process'] or server != sender['server']
+                    or any(not isinstance(proof[key], str) or re.fullmatch('[0-9a-f]{64}', proof[key]) is None
+                           for key in ('link_sha256', 'snapshot_request_sha256', 'owner_context_sha256'))
+                    or not isinstance(proof['publication_operation_id'], str) or not proof['publication_operation_id']
+                    or not isinstance(proof['derived'], dict)
+                    or proof['derived']['group'] != dict(application_sha256=recipe['selection']['application_sha256'],
+                        publication_sha256=recipe['selection']['publication_sha256'],
+                        installation_sha256=recipe['selection']['visibility_installation_sha256'])):
+                raise ValueError
+        except (KeyError, TypeError, ValueError, StopIteration):
+            raise OnboardingError('receiving_admission_lifecycle_association_changed') from None
 
     def _initial_lifecycle(self, row: dict, name: str, recipe: dict) -> dict:
         """Consume the actual first-load producer, never replacement markers."""

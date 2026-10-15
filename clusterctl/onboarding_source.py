@@ -404,6 +404,7 @@ class Source:
     def receiving_lifecycle(self, journal_path: Path, operation_id: str) -> dict:
         """Project only this Source's retained lifecycle; no service/native RPC."""
         from .operation_journal import OperationJournal
+        from .onboarding_receiving_update import admission_lifecycle_projection
         journal = OperationJournal.existing(being_seed._path(journal_path))
         row = None if journal is None else journal.get(operation_id)
         if row is None or row['operation'] != 'receiving-update':
@@ -430,6 +431,9 @@ class Source:
                 key: qualification[key] for key in ('code', 'code_uid')}}},
             runtime_observation={'source_bootstrap': {
                 key: effects[key] for key in ('quiesced', 'controlled_loaded') if key in effects}})
+        admission = admission_lifecycle_projection(row, profile='source')
+        if admission is not None:
+            projected['admission'] = admission
         return dict(schema='cluster-receiving-source-lifecycle/v1',
             source_config_sha256=digest(self.settings), lifecycle=projected)
 
