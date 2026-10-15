@@ -600,6 +600,33 @@ compatible group artifacts. Old terminated memberships/grants and archived pair
 defaults are not an operational rollback. Historical messages remain readable;
 exact expired retries return their retained outcome without new transmission.
 
+### Controller preparation before initial group admission
+
+Before freezing a new body's group-owner context, prepare its real optional
+receiving controller through the existing qualified guest-owner bootstrap route.
+`receiving-bootstrap-freeze --bootstrap-initial` observes a verified V8 body
+under its actual native writer and requires that no group is selected. It does
+not query a nonexistent running predecessor. Keep that result in the same
+admission operation; do not freeze the later owner context against the preceding
+runtime bundle and then change its capability binding.
+
+`cluster-guest-owner-initial/v1` uses the existing stage/publish actions with
+`predecessor=null` and `group_sha256=digest({"group": null})`. The complete
+plan/genesis/candidate/runtime pins, native staging receipts, preservation or
+renewal checks and exact retry remain required. It never records fictional
+process exits. Cleanup, staged recovery and publication retain their actual
+native writer exclusion; recovery does not recursively acquire a held lock.
+A running writer or a newly selected group refuses initial preparation.
+Supported Target group relationship/publication routes take the same target-root
+lock before their native writer, so they cannot interleave this absence check,
+capability publication or the subsequent owner-context freeze.
+
+This prepares a capability using native custody; it does not select a group,
+start a service, load an application, enable a sender or prove receiving
+readiness. All requests still use the qualified public candidate, existing
+owner UID/CLI and one finite budget. The initial flag is valid only for freeze;
+the explicit request schema carries the distinction through stage and publish.
+
 ### First guest service publication and start
 
 The existing root `GuestServiceBootstrap` accepts an explicit

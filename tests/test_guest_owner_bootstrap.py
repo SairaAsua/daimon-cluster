@@ -61,6 +61,102 @@ def files(root):
             if path.is_file() and path.name != 'lock'}
 
 
+def initial_request(target, request):
+    frozen = receiving_update.freeze_guest_bootstrap(target, deadline_ns=deadline(), initial=True)
+    return {**request, **{key: frozen[key] for key in (
+        'plan_digest', 'genesis_digest', 'code_digest', 'runtime_sha256', 'group_sha256', 'predecessor')},
+        'schema': 'cluster-guest-owner-initial/v1', 'mode': frozen['mode'],
+        'preservation': frozen['preservation']}
+
+
+@pytest.mark.parametrize('action', ['group_relationship', 'group_publication'])
+def test_group_owner_routes_take_target_lock_before_native_writer(tmp_path, monkeypatch, action):
+    from contextlib import contextmanager
+    from clusterctl.onboarding_target import Target
+    target = object.__new__(Target)
+    target.root, target.package = tmp_path, tmp_path / 'package'
+    @contextmanager
+    def writer():
+        # A separate descriptor must observe the real root lock as held when
+        # either supported group route reaches the native-writer boundary.
+        with pytest.raises(being_seed.SeedError, match='seed_operation_in_progress'):
+            with being_seed._locked(target.root):
+                pass
+        raise OnboardingError('synthetic_native_entry')
+        yield
+    monkeypatch.setattr(target, '_runtime_writer', writer)
+    value = dict(operation_id=str(uuid.uuid4()), step='synthetic', params={})
+    if action == 'group_relationship':
+        value['method'] = 'tribe.invite'
+    else:
+        value.update(action='selection', params={'expected_selection_sha256': None})
+    with pytest.raises(OnboardingError, match='synthetic_native_entry'):
+        getattr(target, action)(value, authority_closure={})
+
+
+def test_initial_controller_publication_uses_native_writer_without_fake_predecessor(fixture, monkeypatch):
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    target, request, _, _ = fixture
+    def no_predecessor(*_args, **_kwargs):
+        raise AssertionError('An initial body must not invent a running/exited predecessor')
+    monkeypatch.setattr(target, 'running', no_predecessor)
+    monkeypatch.setattr('clusterctl.owner_process.observe_process_exit', no_predecessor)
+    request = initial_request(target, request)
+    assert request['predecessor'] is None and request['group_sha256'] == digest({'group': None})
+    owner = GuestOwnerBootstrap(target, request)
+    original = target.observe()
+    history = files(target.credential)
+    key = (owner.runtime / 'client.key').read_bytes()
+    counter = target.document_bundle()['keystore']['counter']
+    ready = owner.execute('stage', deadline_ns=deadline())
+    assert owner.execute('stage', deadline_ns=deadline()) == ready
+    actual, calls = upgrade.publish, []
+    def lost(**kwargs):
+        result = actual(**kwargs)
+        calls.append(result)
+        if len(calls) == 1:
+            raise OSError('synthetic lost initial publication reply')
+        return result
+    monkeypatch.setattr(upgrade, 'publish', lost)
+    with pytest.raises(OSError, match='lost initial publication'):
+        owner.execute('publish', deadline_ns=deadline(), ready_sha256=ready['ready_sha256'])
+    ciphertext = (owner.runtime / 'custody.json').read_bytes()
+    result = GuestOwnerBootstrap(target, request).execute('publish', deadline_ns=deadline(),
+        ready_sha256=ready['ready_sha256'])
+    observed = target.observe()
+    assert result['counter_after'] == counter + 1
+    assert observed['receiving_controller']['runtime_sha256'] == result['runtime_sha256']
+    assert observed['receipt'] == original['receipt'] and observed.get('group') is None
+    assert (owner.runtime / 'custody.json').read_bytes() == ciphertext
+    assert (owner.runtime / 'client.key').read_bytes() == key and files(target.credential) == history
+    assert not any(name.endswith('_exited') for name in owner._observations())
+    assert result['receiving_readiness'] == 'unobserved'
+
+
+def test_initial_controller_refuses_an_existing_writer_or_group(fixture, monkeypatch):
+    target, request, _, _ = fixture
+    request = initial_request(target, request)
+    owner = GuestOwnerBootstrap(target, request)
+    with target._runtime_writer():
+        with pytest.raises(BlockingIOError):
+            receiving_update.freeze_guest_bootstrap(target, deadline_ns=deadline(), initial=True)
+        with pytest.raises(BlockingIOError):
+            owner.execute('stage', deadline_ns=deadline())
+    assert not owner.transaction.exists()
+    # A verified selection appearing after the frozen absence must not become
+    # an initial bootstrap. Its signature validation is owned by observed_group.
+    monkeypatch.setattr('clusterctl.onboarding_peer.observed_group', lambda *_args, **_kwargs: {'channel_id': 'tribe'})
+    with pytest.raises(OnboardingError, match='initial_required'):
+        receiving_update.freeze_guest_bootstrap(target, deadline_ns=deadline(), initial=True)
+    with pytest.raises(OnboardingError, match='group_changed'):
+        owner.execute('stage', deadline_ns=deadline())
+    assert not owner.transaction.exists()
+    with pytest.raises(OnboardingError, match='request_required'):
+        GuestOwnerBootstrap(target, {**request, 'group_sha256': 'f' * 64})
+    with pytest.raises(OnboardingError, match='request_required'):
+        GuestOwnerBootstrap(target, {**request, 'schema': 'cluster-guest-owner-bootstrap/v1'})
+
+
 def test_native_stage_and_publication_retain_identity_history_and_exact_retry(fixture):
     target, request, group, _ = fixture
     old = target.observe()

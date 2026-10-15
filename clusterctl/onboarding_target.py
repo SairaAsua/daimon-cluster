@@ -142,7 +142,7 @@ class Target:
             check_retained_ledger, command, load_owner_runtime, owner_authorities, relationship_request,
         )
         value = command(value)
-        with self._runtime_writer():
+        with being_seed._locked(self.root), self._runtime_writer():
             check_retained_ledger(self.package / 'runtime', self.root / 'group-admission', value)
             if self._observe_receiving()['phase'] != 'v8':
                 raise OnboardingError('current_onboarding_target_required')
@@ -163,7 +163,7 @@ class Target:
         root = self.package / 'runtime'
         group = self.root / 'tribe'
         journal = self.root / 'group-admission'
-        with self._runtime_writer():
+        with being_seed._locked(self.root), self._runtime_writer():
             if self._observe_receiving()['phase'] != 'v8':
                 raise OnboardingError('current_onboarding_target_required')
             authorities = owner_authorities(root, group, journal, value['operation_id'], authority_closure)
@@ -787,6 +787,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--bootstrap-request-json')
     parser.add_argument('--bootstrap-ready-sha256')
     parser.add_argument('--bootstrap-timeout-seconds', type=float)
+    parser.add_argument('--bootstrap-initial', action='store_true')
     parser.add_argument('--group-request', type=Path)
     args = parser.parse_args(argv)
     stage = 'arguments'
@@ -809,9 +810,10 @@ def main(argv: list[str] | None = None) -> int:
                     or not 0 < args.bootstrap_timeout_seconds <= 60 or args.ready_fd is not None
                     or (args.action == 'receiving-bootstrap-freeze') != (args.bootstrap_request_json is None)
                     or (args.action == 'receiving-bootstrap-publish') != (args.bootstrap_ready_sha256 is not None)
+                    or args.bootstrap_initial and args.action != 'receiving-bootstrap-freeze'
                     or args.bootstrap_request_json is not None and len(args.bootstrap_request_json.encode()) > 131072):
                 raise OnboardingError('invalid_receiving_bootstrap_request')
-        elif any(value is not None for value in (args.bootstrap_request_json,
+        elif args.bootstrap_initial or any(value is not None for value in (args.bootstrap_request_json,
                 args.bootstrap_ready_sha256, args.bootstrap_timeout_seconds)):
             raise OnboardingError('invalid_receiving_bootstrap_request')
         timeout = args.observation_timeout_seconds
@@ -908,7 +910,7 @@ def main(argv: list[str] | None = None) -> int:
             deadline_ns = time.monotonic_ns() + int(args.bootstrap_timeout_seconds * 1_000_000_000)
             stage = args.action
             if args.action == 'receiving-bootstrap-freeze':
-                result = freeze_guest_bootstrap(target, deadline_ns=deadline_ns)
+                result = freeze_guest_bootstrap(target, deadline_ns=deadline_ns, initial=args.bootstrap_initial)
             else:
                 owner = GuestOwnerBootstrap(target, json.loads(args.bootstrap_request_json))
                 result = owner.execute(args.action.removeprefix('receiving-bootstrap-'),

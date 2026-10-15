@@ -970,10 +970,29 @@ def recover_capability_stage(upgrade, *, runtime_root: Path, transaction: Path,
         raise OnboardingError('receiving_bootstrap_attempt_limit')
 
 
-def freeze_guest_bootstrap(target, *, deadline_ns: int) -> dict:
-    """Observe the receiving body before its separately owned unit is stopped."""
+def freeze_guest_bootstrap(target, *, deadline_ns: int, initial: bool = False) -> dict:
+    """Freeze either a running predecessor or an unstarted, unselected body."""
     from .onboarding_service import GuestServiceBootstrap
     GuestServiceBootstrap._budget(deadline_ns)
+    if initial:
+        with being_seed._locked(target.root), target._runtime_writer():
+            prepared = target.observe()
+            if prepared['phase'] != 'v8' or prepared.get('group') is not None:
+                raise OnboardingError('receiving_guest_bootstrap_initial_required')
+            bundle = target.document_bundle()
+            preservation = controller_preservation(target.package / 'runtime', bundle)
+            mode = controller_bootstrap_mode(bundle, preservation)
+            renewal = {}
+            if mode == 'renew':
+                from daimon_matrix import operator_runtime_upgrade as upgrade
+                renewal['renewal_not_after_ms'] = upgrade._controller_grant_expiry(
+                    bundle, time.time_ns() // 1_000_000)
+            GuestServiceBootstrap._budget(deadline_ns)
+            return dict(plan_digest=digest(target.plan), genesis_digest=digest(target.genesis),
+                code_digest=target.code_digest, runtime_sha256=digest(bundle), group_sha256=digest({'group': None}),
+                mode=mode, preservation=preservation, **renewal,
+                being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'], group=None,
+                observer_startup=target.qualified_startup, predecessor=None)
     observed = target.running(admitted=True, deadline_ns=deadline_ns, bootstrap_base_only=True)
     bundle = target.document_bundle()
     if (observed['responder_association'] != 'same-connection'
@@ -1013,6 +1032,10 @@ class GuestOwnerBootstrap:
 
     def __init__(self, target, request: dict):
         from .owner_process import validate_process
+        initial = request.get('schema') == 'cluster-guest-owner-initial/v1'
+        predecessor = request.get('predecessor')
+        valid_predecessor = (predecessor is None and request.get('group_sha256') == digest({'group': None})
+            if initial else isinstance(predecessor, dict) and set(predecessor) == {'process', 'admission_parent'})
         fields = {'schema', 'operation_id', 'plan_digest', 'genesis_digest', 'code_digest',
                   'runtime_sha256', 'group_sha256', 'predecessor', 'expires_at_ms'}
         if (os.geteuid() != 1000 or set(request) not in (fields, fields | {'mode', 'preservation'})
@@ -1021,7 +1044,7 @@ class GuestOwnerBootstrap:
                 or request.get('mode') in {'preserve', 'renew'} and (
                     request['runtime_sha256'] != request['preservation'].get('runtime_sha256')
                     or request['preservation'].get('origin') != target.document_bundle()['local_origin'])
-                or request['schema'] != 'cluster-guest-owner-bootstrap/v1'
+                or request['schema'] not in {'cluster-guest-owner-bootstrap/v1', 'cluster-guest-owner-initial/v1'}
                 or str(uuid.UUID(request['operation_id'])) != request['operation_id']
                 or any(not isinstance(request[key], str) or re.fullmatch('[0-9a-f]{64}', request[key]) is None
                        for key in fields - {'schema', 'operation_id', 'predecessor', 'expires_at_ms'})
@@ -1029,14 +1052,16 @@ class GuestOwnerBootstrap:
                 or request['plan_digest'] != digest(target.plan)
                 or request['genesis_digest'] != digest(target.genesis)
                 or request['code_digest'] != target.code_digest
-                or set(request['predecessor']) != {'process', 'admission_parent'}):
+                or not valid_predecessor):
             raise OnboardingError('receiving_guest_bootstrap_request_required')
-        child = validate_process(request['predecessor']['process'])
-        parent = validate_process(request['predecessor']['admission_parent'])
-        if (child['uid'] != 1000 or parent['uid'] != 1000 or child['pid'] == parent['pid']
-                or child['boot_id'] != parent['boot_id']):
-            raise OnboardingError('receiving_guest_bootstrap_request_required')
+        if not initial:
+            child = validate_process(request['predecessor']['process'])
+            parent = validate_process(request['predecessor']['admission_parent'])
+            if (child['uid'] != 1000 or parent['uid'] != 1000 or child['pid'] == parent['pid']
+                    or child['boot_id'] != parent['boot_id']):
+                raise OnboardingError('receiving_guest_bootstrap_request_required')
         self.target, self.request = target, request
+        self.initial = initial
         self.runtime = target.package / 'runtime'
         self.operation_id = request['operation_id']
         records_parent = private_directory(target.root / 'receiving-bootstrap', create=True)
@@ -1052,6 +1077,11 @@ class GuestOwnerBootstrap:
                 for path in self.records.glob('*.json')}
 
     def _exits(self) -> None:
+        if self.initial:
+            # No predecessor exists. Cleanup and native stage/publication own
+            # the actual writer; recovery already holds it around this callback.
+            # Never recursively acquire that lock or invent an exit receipt.
+            return
         from .owner_process import observe_process_exit
         retained = self._observations()
         for name, process in self.request['predecessor'].items():
@@ -1064,7 +1094,12 @@ class GuestOwnerBootstrap:
                     raise OnboardingError('receiving_guest_bootstrap_exit_required')
                 self._record(name + '_exited', proof)
 
-    def _group(self) -> dict:
+    def _group(self) -> dict | None:
+        if self.initial:
+            from .onboarding_peer import observed_group
+            if observed_group(self.target, self.target.document_bundle()) is not None:
+                raise OnboardingError('receiving_guest_bootstrap_group_changed')
+            return None
         group = bootstrap_group(self.target, self.target.document_bundle())
         if (digest(group) != self.request['group_sha256']
                 or Path(group['selected']['socket']) != self.runtime / 'tribe.sock'):
