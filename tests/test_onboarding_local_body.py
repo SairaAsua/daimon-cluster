@@ -260,10 +260,13 @@ def test_export_reuses_signed_owner_application_and_refuses_other_visibility(jou
     assert before == {path: path.read_bytes() for path in before}
     with pytest.raises(ValueError, match='existing_owner_visibility_required'):
         export(root, password, tmp_path / 'missing.json', messaging_application=app, peer_file=asset)
-    with pytest.raises(MessagingConfigError):
+    # SDK profiles may reject an absent path before parsing its application.
+    # Both forms must refuse it without publishing or changing existing state.
+    with pytest.raises((MessagingConfigError, FileNotFoundError)):
         export(root, password, tmp_path / 'other.json', visibility_installation=visibility,
                messaging_application=tmp_path / 'missing-app', peer_file=asset)
     assert not any((tmp_path / name).exists() for name in ('bare.json', 'missing.json', 'other.json'))
+    assert before == {path: path.read_bytes() for path in before}
 
 
 def test_blocker_diagnostics_before_archive_are_private_preserved_and_do_not_replace_identity_checks(tmp_path):
