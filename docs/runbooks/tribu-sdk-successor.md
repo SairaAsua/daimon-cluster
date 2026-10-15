@@ -50,6 +50,11 @@ operation budget. Resolve service/socket/process names from the retained binding
 not a guessed conventional name. Use existing bounded diagnostics to resolve
 the concrete missing fact, then continue from it. An early missing socket is
 not a reason to restart a process whose exit has not been observed.
+For a `Type=simple` synthetic baseline, wait for its actual native socket while
+pinning the same service process before freezing the predecessor. A successful
+systemd start is not socket readiness. Capture the existing bounded CLI diagnostic
+on the failing call before coupled cleanup removes that process; a later call
+against a stopped fixture cannot diagnose the earlier live refusal.
 
 Use the selected SDK for both the observer and receiver; validate that binding
 before lifecycle effects. Keep lifecycle journals on their actual owners.
