@@ -6,6 +6,24 @@ from tools.ci_scope import ONBOARDING_CONTRACTS, select
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_owner_tooling_and_maintained_runbook_keep_owner_coverage(tmp_path):
+    from tools.ci_scope import OWNER_CLIENT_TESTS
+    changed = [
+        'clusterctl/onboarding_owner_client.py',
+        'clusterctl/onboarding_chat_native.py',
+        'support/matrix-agent-chat/TOOLING-PROVENANCE.json',
+        'tests/test_onboarding_owner_client.py',
+        'docs/runbooks/tribu-sdk-successor.md',
+    ]
+    expected = ('peer', sorted(set(OWNER_CLIENT_TESTS)))
+    assert select(changed, ROOT) == expected
+    assert select([*changed, 'tools/ci_scope.py', 'tests/test_ci_scope.py'], ROOT) == expected
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    for extra in ('requirements-weave.txt', 'clusterctl/onboarding_custody.py',
+                  'unknown.py', 'docs/unknown-contract.md'):
+        assert select([*changed, extra], ROOT) == ('full', ['tests'])
+
+
 def test_owner_attachment_and_receiving_changes_compose_covered_profiles(tmp_path):
     from tools.ci_scope import (
         LOADED_STARTUP_FILES, LOADED_STARTUP_TESTS,

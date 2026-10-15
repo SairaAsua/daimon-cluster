@@ -78,6 +78,23 @@ refuses without rebuilding. Explicit `sdk-observe`, installation and legacy
 startup retain their installed-site checks. This removes duplicate work, not the
 closed-tree, dependency, interpreter, context or loaded-module checks.
 
+Native Matrix tooling gets a60-second startup allowance only when neither
+`startup_timeout_sec` nor its historical `startup_timeout_ms` is configured.
+Explicit budgets, restrictions and disabled intent remain unchanged. The native
+config writer and model-turn deadline are separate. Existing prepared tooling
+transactions preserve their exact candidate; a corrected release uses its normal
+successor operation rather than rewriting retained intent.
+
+Catalog acceptance shares the caller's finite absolute deadline. Observe selected
+loaded contexts first: an exact current catalog needs no reload, and a starting
+adapter remains pending without a reload. One observed terminal stale catalog may
+justify one supported reload after rechecking the current config, binding,
+endpoint, peer and loaded contexts. A lost reply is recovered by observing current
+state, never by unconditionally refreshing again. With no selected loaded context,
+make one bounded server-only catalog query without a global reload; retain
+`server-catalog-only`, not loaded-context acceptance. None of these observations
+starts a model, resumes a conversation or publishes a message.
+
 Use the selected SDK for both the observer and receiver; validate that binding
 before lifecycle effects. Keep lifecycle journals on their actual owners.
 Root reads Source lifecycle proof through `SourceGroupClient(lifecycle_journal=...)`

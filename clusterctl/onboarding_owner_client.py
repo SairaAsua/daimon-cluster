@@ -17,7 +17,7 @@ from .onboarding import Observation, OnboardingError, digest, validate_plan
 
 INSTALLER_SHA256 = 'aaef1a28614722a1f52d4c32dbbd3add5f1abfcd6f766cfaf6b7cfa3073a9af9'
 TOOLING_INSTALLER_MODULE = 'onboarding_chat_native.py'
-TOOLING_INSTALLER_SHA256 = '4d3f5e26fbd65babffbfd338317e02aab7eb116a818eee96e36c83ac923b608b'
+TOOLING_INSTALLER_SHA256 = '75bd210889cae7f68ec365b635d57d107db99b4991391a3831040012e8dd103b'
 
 
 # Only these maintained domain codes may cross the CLI boundary. Exception
@@ -179,8 +179,7 @@ def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict
             or len(threads) != len(set(threads)) or len(threads) > 128
             or any(not isinstance(item, str) or str(uuid.UUID(item)) != item for item in threads)):
         raise OnboardingError('native_tooling_context_required')
-    deadline = min(time.monotonic_ns() + 30_000_000_000,
-        deadline_ns if deadline_ns is not None else 2**64)
+    deadline = deadline_ns if deadline_ns is not None else time.monotonic_ns() + 30_000_000_000
     def remaining():
         seconds = (deadline - time.monotonic_ns()) / 1_000_000_000
         if seconds <= 0:
@@ -223,8 +222,6 @@ def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict
             await call('initialize', dict(clientInfo=dict(name='matrix-native-readiness', version='1'),
                 capabilities=dict(experimentalApi=True)))
             await connection.send(json.dumps(dict(method='initialized')))
-            if reload:
-                await call('config/mcpServer/reload', None)
             async def pages(method, parameters):
                 result, cursor, seen = [], None, set()
                 for _ in range(16):
@@ -237,44 +234,68 @@ def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict
                         break
                     seen.add(cursor)
                 raise OnboardingError('native_tooling_observation_limit')
+            def unchanged():
+                configuration()
+                if _installer(code, code_uid)._binding_fingerprint(attachment, binding_filename=binding_filename)[1] != fingerprint:
+                    raise OnboardingError('native_tooling_binding_changed')
+                after = target.lstat()
+                current_selector = endpoint.lstat()
+                if ((socket_info.st_dev, socket_info.st_ino) != (after.st_dev, after.st_ino)
+                        or (selector.st_dev, selector.st_ino, selector.st_ctime_ns) != (
+                            current_selector.st_dev, current_selector.st_ino, current_selector.st_ctime_ns)
+                        or endpoint.resolve(strict=True) != target):
+                    raise OnboardingError('native_tooling_endpoint_changed')
+                observer.verify()
+                remaining()
+                return after
             loaded = await pages('thread/loaded/list', {'limit': 128})
             if not set(threads) <= set(loaded):
                 raise OnboardingError('native_tooling_context_unloaded')
-            records = []
-            for thread in threads or (None,):
-                parameters = dict(serverName='matrix', detail='toolsAndAuthOnly', limit=16)
-                if thread is not None:
-                    parameters['threadId'] = thread
-                while True:
+            refreshed = False
+            while True:
+                records, pending, stale = [], False, False
+                for thread in threads or (None,):
+                    parameters = dict(serverName='matrix', detail='toolsAndAuthOnly', limit=16)
+                    if thread is not None:
+                        parameters['threadId'] = thread
                     rows = await pages('mcpServerStatus/list', parameters)
                     if len(rows) != 1 or rows[0].get('name') != 'matrix':
                         raise OnboardingError('native_tooling_catalog_unavailable')
                     row = rows[0]
                     if thread is not None and row.get('runtimeStatus') == 'starting':
-                        await asyncio.sleep(min(.05, remaining()))
+                        pending = True
                         continue
+                    status = row.get('runtimeStatus')
+                    tools = row.get('tools', {})
+                    if (row.get('toolsError') is not None or set(tools) != set(expected)
+                            or any(tools[name].get('inputSchema') != schema for name, schema in expected.items())
+                            or (row.get('serverInfo') or {}).get('version') != version
+                            or thread is not None and status != 'connected'):
+                        # Only an observed stale/failed thread can justify the
+                        # global native reload. Pending and unknown states do not.
+                        if (thread is None or status not in ('connected', 'failed')
+                                or status == 'connected' and (
+                                    (row.get('serverInfo') or {}).get('version') == version
+                                    or row.get('toolsError') is not None)):
+                            raise OnboardingError('native_tooling_catalog_mismatch')
+                        stale = True
+                    else:
+                        records.append(dict(thread_id=thread, tools_sha256=digest(expected), server_version=version))
+                if pending:
+                    await asyncio.sleep(min(.05, remaining()))
+                    continue
+                if not stale:
                     break
-                tools = row.get('tools', {})
-                if (row.get('toolsError') is not None or set(tools) != set(expected)
-                        or any(tools[name].get('inputSchema') != schema for name, schema in expected.items())
-                        or (row.get('serverInfo') or {}).get('version') != version
-                        or thread is not None and row.get('runtimeStatus') != 'connected'):
+                if not reload or refreshed:
                     raise OnboardingError('native_tooling_catalog_mismatch')
-                records.append(dict(thread_id=thread, tools_sha256=digest(expected), server_version=version))
+                if not set(threads) <= set(await pages('thread/loaded/list', {'limit': 128})):
+                    raise OnboardingError('native_tooling_context_unloaded')
+                unchanged()
+                refreshed = True
+                await call('config/mcpServer/reload', None)
             if not set(threads) <= set(await pages('thread/loaded/list', {'limit': 128})):
                 raise OnboardingError('native_tooling_context_unloaded')
-            configuration()
-            if _installer(code, code_uid)._binding_fingerprint(attachment, binding_filename=binding_filename)[1] != fingerprint:
-                raise OnboardingError('native_tooling_binding_changed')
-            after = target.lstat()
-            current_selector = endpoint.lstat()
-            if ((socket_info.st_dev, socket_info.st_ino) != (after.st_dev, after.st_ino)
-                    or (selector.st_dev, selector.st_ino, selector.st_ctime_ns) != (
-                        current_selector.st_dev, current_selector.st_ino, current_selector.st_ctime_ns)
-                    or endpoint.resolve(strict=True) != target):
-                raise OnboardingError('native_tooling_endpoint_changed')
-            observer.verify()
-            remaining()
+            after = unchanged()
             return dict(schema='cluster-native-tool-catalog/v1', config_sha256=config_sha256,
                 binding_sha256=fingerprint, native_process=observer.process,
                 endpoint_sha256=digest(dict(path=str(endpoint), target=str(target), device=after.st_dev,

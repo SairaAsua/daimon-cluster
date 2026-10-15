@@ -656,7 +656,7 @@ def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list
         # Guest SDK, custody and dependency changes still require wider coverage.
         return 'portal', sorted(set(HOSTED_CHECK_TESTS))
     if (set(changed) & {'clusterctl/onboarding_owner_client.py', 'tests/test_onboarding_owner_client.py'}
-            and set(changed) <= OWNER_CLIENT_FILES | CI_FILES
+            and set(changed) <= OWNER_CLIENT_FILES | CI_FILES | RUNBOOK_DOCS
             and all((root / path).is_file() for path in OWNER_CLIENT_TESTS)):
         # A host-only owner command retains native socket authentication,
         # admission, immutable SDK/context and first-welcome boundaries.
