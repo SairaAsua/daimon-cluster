@@ -5,7 +5,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from clusterctl.homes.homemaker import Homemaker
-from clusterctl.homes.service import handler
+from clusterctl.homes.service import Application, handler
 from tests.test_home_gateway import serving
 from tests.test_home_passkeys import system, approved
 from clusterctl.homes.policy import Actor
@@ -56,6 +56,35 @@ def test_central_pair_ambiguity_is_not_resolved_by_first_match_or_hostname(syste
     app.authority.paired_human=lambda home:'human' if home=='three' else original(home)
     with pytest.raises(ValueError,match='context_unavailable'):
         provider.scope('two',app.authority.actor('human'),'pair')
+
+
+def test_retired_editor_redirects_only_entry_and_never_forwards_reader_credentials(system):
+    from urllib.parse import parse_qs
+    app,_=system;app.designs=receiving(app);app.homemaker_home='two'
+    token,_=approved(app)
+    with serving(handler(app)) as base:
+        conn=HTTPConnection(urlsplit(base).netloc)
+        for entry in ('/homemaker/', '/homemaker/miniapp.html'):
+            conn.request('GET',entry,headers={'Host':'one.example.test','Cookie':'__Host-home='+token})
+            response=conn.getresponse();response.read();assert response.status==307
+            destination=urlsplit(response.getheader('Location'))
+            assert destination.netloc=='two.example.test' and destination.path==entry
+            assert parse_qs(destination.query)=={'target':['one'],'scope':['pair'],'return_to':['https://one.example.test/']}
+            assert token not in response.getheader('Location')
+        for method,path in (('GET','/homemaker/bootstrap.js'),('POST','/homemaker/api/default')):
+            conn.request(method,path,body='{}' if method=='POST' else None,headers={
+                'Host':'one.example.test','Cookie':'__Host-home='+token,'Origin':'https://one.example.test'})
+            response=conn.getresponse();response.read();assert response.status==410
+        conn.close()
+
+
+def test_configured_consumer_returns_require_an_exact_registered_public_origin(system):
+    app,_=system
+    for destination in ('http://one.example.test/', 'https://foreign.example/',
+                        'https://one.example.test@foreign.example/', 'https://private-one.example.test/',
+                        'https://one.example.test/\nprivate', 'https://one.example.test/\\foreign'):
+        with pytest.raises(ValueError,match='invalid_homemaker_return'):
+            Application(app.config,app.authority,app.sessions,backends=app.backends,homemaker_returns=[destination])
 
 
 def test_central_browser_baseline_and_save_use_verified_pair_under_the_same_origin(system):

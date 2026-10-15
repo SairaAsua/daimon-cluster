@@ -168,3 +168,31 @@ remain part of the coordinated owner release. Keep the existing source/state and
 paths selected until that successor is qualified. A hostname change or this flag
 alone is not consolidation. Coordination: Matrix328 and the owning Homemaker
 `docs/CONSOLIDATION.md`.
+
+The coordinated successor also loads `backend.application.OwnerApplication` from
+the selected owning release and injects the existing `DesignAuthority` instance.
+It checks the release declaration against the configured canonical origin and
+entry paths; changing the source does not create another store. The owning
+`public/lib/owner-entry.js` recovers the permitted saved recipe before mounting
+the atelier. Recovery failure blocks that initialization rather than silently
+replacing an existing choice with a fresh default.
+
+`/homemaker/api/selection` supports bounded read/select/follow/pin/default using
+current context and registered surfaces. `/homemaker/api/recipe` returns only the
+canonical permitted recipe projection. Browser writes retain the current session
+and exact Origin checks; CAS conflicts retain409 responses. Request-supplied
+actors/scopes are refused. The same native owner operations remain available.
+
+Launch query `target` names a registered home request, verified against the
+current human's pairing; it grants nothing. `return_to` must be an exact registered
+return bound to that target's public origin. Home roots are registered by default;
+`--homemaker-return EXACT_HTTPS_URL` adds a specific consumer path/query/fragment.
+The source-owned entry uses the returned verified URL as a normal human-clicked
+link. No reader cookie, browser proof or credential enters that URL.
+
+With the owner-operated release selected, former home editor entries temporarily
+redirect to the canonical entry with their target/return context. Former editor
+assets/API routes return410 and cannot remain competing editors/writers. Public
+font and read-only style consumers remain local adapters of the same authority.
+Use temporary redirects during rollout to preserve compatible-code rollback.
+This source behavior alone is not an activation or physical-device receipt.

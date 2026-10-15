@@ -5,7 +5,10 @@ Recipes, design history and selections stay in Homemaker's canonical authority.
 The source directory is operator-selected immutable code, never a request field.
 """
 import importlib.util
+import importlib
+import hashlib
 import json
+import sys
 from pathlib import Path
 
 
@@ -23,6 +26,68 @@ class Homemaker:
         self.authority = module.DesignAuthority(state, authorize=self.authorize)
         templates = json.loads((self.source / 'public/content/templates.json').read_text())
         self.templates = {entry['id']: entry['name'] for entry in templates}
+        self.owner_application = None
+        if app.homemaker_home:
+            declaration = json.loads((self.source / 'release.json').read_text())
+            origin = app.homes[app.homemaker_home]['public_url']
+            if (declaration.get('contract') != 'homemaker.owner-release/v1' or
+                    declaration.get('origin') != origin or
+                    declaration.get('component') != 'backend.application.OwnerApplication' or
+                    declaration.get('entries') != {'web':'/homemaker/', 'compact':'/homemaker/miniapp.html'}):
+                raise ValueError('invalid_homemaker_owner_release')
+            # Operator-selected immutable code only. A distinct namespace keeps
+            # relative imports local to this release, including in fixture runs.
+            name = '_home_creator_' + hashlib.sha256(str(self.source).encode()).hexdigest()[:24]
+            if name not in sys.modules:
+                spec = importlib.util.spec_from_file_location(name, self.source / 'backend/__init__.py',
+                    submodule_search_locations=[str(self.source / 'backend')])
+                package = importlib.util.module_from_spec(spec)
+                sys.modules[name] = package
+                try:
+                    spec.loader.exec_module(package)
+                except BaseException:
+                    sys.modules.pop(name, None)
+                    raise
+            owner_module = importlib.import_module(name + '.application')
+            self.context_type = owner_module.ApplicationContext
+            self.owner_application = owner_module.OwnerApplication(self.source,
+                authority=self.authority, resolve_context=self.verified_context, origin=origin,
+                allowed_returns=app.homemaker_returns)
+
+    def verified_context(self, principal, *, target, mode):
+        home = self.app.homemaker_home
+        owner, audience, label = self.scope(home, principal, mode)
+        if target is not None:
+            if (target not in self.app.homes or
+                    self.app.authority.paired_human(target) != principal.ref or
+                    (mode == 'pair' and self.app.homes[target]['owner_being_ref'] != owner['ref'])):
+                raise ValueError('design_operation_denied')
+        return self.context_type(principal.ref, owner, audience, label)
+
+    def application_context(self, subject, mode, *, target=None, return_to=None):
+        context = self.owner_application.context(subject, target=target, mode=mode, return_to=return_to)
+        selected = target
+        if selected is None:
+            if mode == 'personal':
+                matches = [ref for ref in self.app.homes
+                           if self.app.authority.paired_human(ref) == subject.ref]
+                selected = matches[0] if len(matches) == 1 else self.app.homemaker_home
+            else:
+                selected = self.pair_home(self.app.homemaker_home, subject)
+        if return_to is not None:
+            from urllib.parse import urlsplit
+            if urlsplit(return_to).netloc != urlsplit(self.app.homes[selected]['public_url']).netloc:
+                raise ValueError('application_return_denied')
+        return context, selected
+
+    def application_selection(self, subject, mode, *, target=None, surface='default', payload=None):
+        context, selected = self.application_context(subject, mode, target=target)
+        surface = self.surface(selected, surface)
+        if payload is None:
+            return self.authority.read_selection(context.actor, scope=context.owner, surface=surface)
+        if not isinstance(payload, dict) or set(payload) != {'selection','expected_revision','operation_id'}:
+            raise ValueError('invalid_design_selection')
+        return self.authority.select(context.actor, scope=context.owner, surface=surface, **payload)
 
     def authorize(self, subject, action, scope):
         current = self.app.authority.actor(subject) if subject else None
@@ -73,11 +138,16 @@ class Homemaker:
         return template, self.templates[template]
 
     def baseline(self, home, subject, context, variant):
+        if getattr(self, 'owner_application', None):
+            return self.owner_application.baseline(subject, target=None, mode=context, variant=variant)
         owner, _, _ = self.scope(home, subject, context)
         self.variant(variant)
         return self.authority.editor_default(subject.ref, owner=owner, identifier=variant)
 
     def save(self, home, subject, context, payload):
+        if getattr(self, 'owner_application', None):
+            return self.owner_application.save(subject, target=None, mode=context,
+                origin=self.app.homes[self.app.homemaker_home]['public_url'], payload=payload)
         owner, audience, _ = self.scope(home, subject, context)
         return self._save(subject, owner, audience, payload)
 
@@ -171,6 +241,20 @@ document.addEventListener('homemaker:default-saved',()=>window.dispatchEvent(new
 window.addEventListener('pagehide',event=>{if(!event.persisted)app.destroy();});
 '''
 
+OWNER_BOOTSTRAP = '''import {mountOwnerEntry} from './lib/owner-entry.js';
+mountOwnerEntry().catch(() => {
+  const message = document.createElement('p');
+  message.setAttribute('role', 'alert');
+  message.textContent = 'No pudimos recuperar tu taller. No guardamos ni cambiamos tu estilo.';
+  const retry = document.createElement('button');
+  retry.className = 'button'; retry.textContent = 'Volver a intentar';
+  retry.addEventListener('click', () => location.reload(), {once:true});
+  const main = document.querySelector('main') || document.body;
+  main.prepend(retry); main.prepend(message);
+});
+'''
+
+
 
 def editor_page(provider, entry='index.html', *, context='pair'):
     # Disable the source's standalone initializer and inject its existing
@@ -187,7 +271,7 @@ def editor_page(provider, entry='index.html', *, context='pair'):
 def routes(handler, app, method, data=b''):
     import html
     import mimetypes
-    from urllib.parse import parse_qs, unquote, urlsplit
+    from urllib.parse import parse_qs, unquote, urlsplit, urlencode
     from .service import auth_controls
     provider = app.designs
     path = urlsplit(handler.path).path
@@ -209,9 +293,20 @@ def routes(handler, app, method, data=b''):
     if vpn or handler.headers.get('Authorization'):
         raise ValueError('homemaker_requires_public_browser')
     query = parse_qs(urlsplit(handler.path).query, keep_blank_values=True, strict_parsing=True)
-    if any(len(v) != 1 for v in query.values()) or set(query) - {'scope', 'variant'}:
+    if any(len(v) != 1 for v in query.values()) or set(query) - {
+            'scope', 'variant', 'target', 'return_to', 'surface', 'design_ref', 'design_revision'}:
         raise ValueError('invalid_homemaker_query')
     context = query.get('scope', ['pair'])[0]
+    canonical = getattr(app, 'homemaker_home', None)
+    if canonical and home != canonical:
+        if method == 'GET' and path in ('/homemaker/', '/homemaker/miniapp.html'):
+            target_query = {'scope':context, 'target':home,
+                            'return_to':query.get('return_to', [app.homes[home]['public_url'] + '/'])[0]}
+            handler.respond(307, b'', headers=(('Location', app.homes[canonical]['public_url'] +
+                                              path + '?' + urlencode(target_query)),))
+        else:
+            handler.respond(410, {'error':'use_canonical_homemaker'})
+        return True
     if method == 'GET' and path in ('/homemaker/', '/homemaker/miniapp.html') and not subject:
         miniapp = path.endswith('miniapp.html')
         presentation = ('<script src="https://telegram.org/js/telegram-web-app.js"></script>'
@@ -222,9 +317,43 @@ def routes(handler, app, method, data=b''):
                 '<main><h1>Tu taller de estilos</h1><p>Entrá con tu identidad habitual para elegir el estilo de tus espacios.</p>'+
                 auth+'<p id="passkey-status" role="status" aria-live="polite"></p></main></html>')
         handler.respond(200, body.encode(), 'text/html; charset=utf-8', telegram_sdk=miniapp);return True
+    owner_app = getattr(provider, 'owner_application', None)
+    target = query.get('target', [None])[0]
+    return_to = query.get('return_to', [None])[0]
+    verified = None
+    if owner_app and (path.startswith('/homemaker/api/') or path in ('/homemaker/', '/homemaker/miniapp.html')):
+        verified, selected_home = provider.application_context(subject, context, target=target, return_to=return_to)
     if path == '/homemaker/api/context' and method == 'GET':
-        _, audience, label = provider.scope(home, subject, context)
-        handler.respond(200, {'audience': audience, 'label': label});return True
+        if verified:
+            value = {'audience':verified.audience, 'label':verified.label,
+                     'target':selected_home, 'return_to':return_to or app.homes[selected_home]['public_url'] + '/'}
+        else:
+            _, audience, label = provider.scope(home, subject, context)
+            value = {'audience':audience, 'label':label}
+        handler.respond(200, value);return True
+    if owner_app and path in ('/homemaker/api/selection', '/homemaker/api/recipe'):
+        if method == 'POST' and handler.headers.get('Origin') != origin:
+            raise ValueError('design_operation_denied')
+        if path.endswith('/recipe') and method == 'GET':
+            revision = query.get('design_revision', [None])[0]
+            if revision is not None:
+                if not revision.isdecimal() or len(revision) > 12:
+                    raise ValueError('invalid_design_recipe_request')
+                revision = int(revision)
+            value = owner_app.recipe(subject, target=target, mode=context,
+                design_ref=query.get('design_ref', [None])[0], revision=revision)
+        elif path.endswith('/selection') and method in ('GET', 'POST'):
+            try:
+                value = provider.application_selection(subject, context, target=target,
+                    surface=query.get('surface', ['default'])[0],
+                    payload=json.loads(data) if method == 'POST' else None)
+            except ValueError as error:
+                if str(error) in ('design_selection_conflict', 'design_operation_conflict'):
+                    handler.respond(409, {'error':str(error)});return True
+                raise
+        else:
+            raise ValueError('unknown_homemaker_operation')
+        handler.respond(200, value);return True
     if path == '/homemaker/api/default':
         if method == 'GET':
             handler.respond(200, provider.baseline(home, subject, context, query.get('variant', [None])[0]));return True
@@ -249,7 +378,7 @@ def routes(handler, app, method, data=b''):
             handler.respond(200, editor_page(provider, entry, context=context), 'text/html; charset=utf-8',
                             style_inline=True, telegram_sdk=entry == 'miniapp.html');return True
         if path == '/homemaker/bootstrap.js':
-            handler.respond(200, BOOTSTRAP.encode(), 'text/javascript; charset=utf-8');return True
+            handler.respond(200, (OWNER_BOOTSTRAP if owner_app else BOOTSTRAP).encode(), 'text/javascript; charset=utf-8');return True
         asset = provider.asset(unquote(path.removeprefix('/homemaker/')))
         handler.respond(200, asset.read_bytes(), mimetypes.guess_type(asset.name)[0] or 'application/octet-stream');return True
     raise ValueError('unknown_homemaker_operation')
