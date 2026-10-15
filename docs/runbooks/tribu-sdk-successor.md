@@ -70,6 +70,14 @@ loaded code are still verified afterwards. Ordinary status without a deadline
 keeps its immediate missing-socket refusal. Do not replay a retained native start
 or mint another controller because its first socket observation raced startup.
 
+Qualified V4 Target startup verifies the closed imports it actually executes,
+not the unused installed site-packages. Resolve the prepared generation from
+the just-verified SDK manifest, hold shared preparation ownership and require
+its existing imports/receipt before full startup qualification. Missing preparation
+refuses without rebuilding. Explicit `sdk-observe`, installation and legacy
+startup retain their installed-site checks. This removes duplicate work, not the
+closed-tree, dependency, interpreter, context or loaded-module checks.
+
 Use the selected SDK for both the observer and receiver; validate that binding
 before lifecycle effects. Keep lifecycle journals on their actual owners.
 Root reads Source lifecycle proof through `SourceGroupClient(lifecycle_journal=...)`
@@ -174,6 +182,16 @@ Apply that normalization only within the authorized rollout and shared selection
 lock, then freeze the actual normalized manager state through the ordinary
 controller. Never fake an inspection, ignore a live override or add another
 override to out-sort the previous ones. Subsequent updates use the single unit.
+
+The read-only guest bootstrap observation verifies the current signed public
+bundle, operator/client binding, protected target plan/genesis and actual native
+status/admission on the same observed process. It does not reopen custody or
+reconstruct the archived bilateral enrollment. Protected input drift is refused;
+present loaded-base metadata must match the captured bundle. A legacy daemon
+without that metadata proves only authenticated predecessor presence, never a
+loaded candidate or receiving readiness. Mutation, publication, startup and
+historical inspection retain their original full validation. Keep the same
+bounded deadline rather than extending it to accommodate duplicate preparation.
 
 ## Preserve the receiving context
 
