@@ -72,7 +72,7 @@ def catalog(app, home, subject, vpn):
                          'title': entry['title'], 'summary': entry.get('summary', ''),
                          'url': entry['url'], 'author': app.homes[ref]['name'],
                          'source': app.homes[ref]['public_url'] + '/view/' + entry['artifact_ref'],
-                         'revision': entry['revision']})
+                         'version_ref': entry['version_ref']})
             if len(apps) == 256:
                 break
         if len(apps) == 256:
