@@ -175,7 +175,7 @@ class Backend:
         ):
             raise ValueError("home_backend_must_be_loopback")
 
-    def open(self, path, *, method="GET", byte_range=None):
+    def open(self, path, *, method="GET", byte_range=None, timeout=15):
         headers = {
             "Authorization": "Bearer " + private_text(self.home["gateway_token_file"])
         }
@@ -190,10 +190,10 @@ class Backend:
         request = urllib.request.Request(
             self.home["backend"].rstrip("/") + path, method=method, headers=headers
         )
-        return urllib.request.build_opener(NoRedirect).open(request, timeout=15)
+        return urllib.request.build_opener(NoRedirect).open(request, timeout=timeout)
 
-    def state(self):
-        with self.open("/_home/state") as response:
+    def state(self, *, timeout=15):
+        with self.open("/_home/state", timeout=timeout) as response:
             data = response.read(MAX_MANIFEST + 1)
             if len(data) > MAX_MANIFEST:
                 raise ValueError("home_manifest_too_large")
@@ -251,8 +251,9 @@ class Application:
         row = self.sessions.resolve(token, home=home, origin=origin)
         return self.policy.current(row["actor"], row["revision"]) if row else None
 
-    def publication(self, home):
-        observed = self.backends[home].state()
+    def publication(self, home, *, timeout=None):
+        observed = (self.backends[home].state() if timeout is None
+                    else self.backends[home].state(timeout=timeout))
         committed = self.registry.current(home, observed_state=observed)
         return (
             committed["state"]
@@ -260,10 +261,10 @@ class Application:
             else {"schema": 1, "entries": []}
         )
 
-    def entries(self, home, subject, vpn=False):
+    def entries(self, home, subject, vpn=False, *, timeout=None):
         return [
             e
-            for e in self.publication(home)["entries"]
+            for e in self.publication(home, timeout=timeout)["entries"]
             if self.policy.allows(e, home=home, subject=subject, dedicated_vpn=vpn)
         ]
 
@@ -706,7 +707,11 @@ def handler(app, *, owner=False):
                     return self.content(content_origins[self.headers["Host"]])
                 home, origin, subject, vpn, cookies, parent_token = self.context()
                 path = urlsplit(self.path).path
-                if path == "/":
+                if path.startswith("/apps/"):
+                    from .launcher import routes
+                    if routes(self, app, path, home, subject, vpn): return
+                    self.respond(404, {})
+                elif path == "/":
                     self.respond(
                         200,
                         render(
@@ -741,7 +746,7 @@ def handler(app, *, owner=False):
                     surface = surface[0]
                     if viewer[0] == 'personal' and (not subject or subject.kind != 'human'):
                         raise ValueError('style_viewer_denied')
-                    if surface != "home" and not (surface == 'homemaker' and app.designs) and not app.selected(home, surface, "current", subject, vpn):
+                    if surface not in ("home", "apps") and not (surface == 'homemaker' and app.designs) and not app.selected(home, surface, "current", subject, vpn):
                         raise ValueError("style_surface_denied")
                     self.respond(200, app.styles.resolved(home, surface, subject, personal=viewer[0] == 'personal'))
                 elif path == "/access/status":
