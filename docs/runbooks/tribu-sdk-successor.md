@@ -944,3 +944,16 @@ Cluster #227 still owns orchestrated application/visibility/selector publication
 distinct before/after receiving cohorts, first managed start and integrated
 admission qualification. The prepared2144 update is a separate immutable candidate;
 future-admission source does not replace it.
+
+Qualification must use the dependency route that owns the operation. The ordinary
+receiving test fixtures create custody through `matrix_host._matrix_api`, whose
+retained contract requires an exact VCS installation. Putting an offline wheel's
+site-packages ahead of that environment causes `daimon_matrix_commit_unverifiable`
+before the intended candidate owner entry runs. That is a fixture-route failure,
+not a serving or candidate admission defect. Do not manufacture `direct_url.json`,
+relax the retained guard or change production pins to make that fixture pass.
+Offline-wheel owner qualification uses the existing protected V4 selection and
+`onboarding_sdk.runtime_command` after genuine supported fixture preparation.
+Its actual native effects must be observed separately from pure reader/install
+success. Owner-publication fixtures also require owner-only destination roots
+under ancestors without group/world write permission, as the SDK enforces.
