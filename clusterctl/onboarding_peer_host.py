@@ -1,8 +1,9 @@
-"""Finite, resumable owner-local Source link before managed receiving admission.
+"""Verify shared group selection before managed receiving admission.
 
-Only encrypted proposals and signed public responses cross the host boundary.
-The Source owner child retains custody; its existing daemon is always restarted.
-Loopback Incus proxies keep peer routes independent of administrative networking.
+Normal onboarding requires the existing signed Tribe group, without per-pair
+enrollment or proxies. Missing group admission remains an explicit deployment
+gap. Historical Source/member setup is available only through the separately
+requested ``repair_directed`` route; its service effects are not the group flow.
 """
 from __future__ import annotations
 
@@ -164,6 +165,14 @@ class PeerHost:
                     or group['channel_id'] != 'tribe'):
                 raise OnboardingError('approved_onboarding_group_required')
             return group['application'], group['visibility']
+        return None
+
+    def directed_application(self, plan: dict) -> tuple[str, str] | None:
+        """Inspect explicitly requested historical directed repair only.
+
+        Worker group selection never calls this route or interprets its retained
+        pair receipt as shared Tribe admission.
+        """
         self._identity(plan)
         path = self.state / digest(plan) / 'complete.json'
         if not path.exists() or not self._proxies(plan):

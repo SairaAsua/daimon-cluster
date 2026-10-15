@@ -118,7 +118,7 @@ def test_host_retry_reuses_signed_response_and_retains_native_source(journey, tm
             host.repair_directed(plan)
         assert state and source._load(signed=True).egress is not None
         host.repair_directed(plan)
-        assert host.application(plan) == (str('/home/agent/.local/state/daimon-onboarding/' + plan['name'] + '/matrix/peer/application'),
+        assert host.directed_application(plan) == (str('/home/agent/.local/state/daimon-onboarding/' + plan['name'] + '/matrix/peer/application'),
             '/home/agent/.local/state/daimon-onboarding/' + plan['name'] + '/matrix/peer/visibility/installation.json')
         before = json.loads((root / fingerprint / 'response.json').read_bytes())
         with pytest.raises(OnboardingError, match='onboarding_group_enrollment_required'):
@@ -221,7 +221,8 @@ def test_selected_application_matches_native_receiving_target_layout(tmp_path, m
     monkeypatch.setattr(host, '_identity', lambda p: {})
     monkeypatch.setattr(host, '_proxies', lambda p: True)
     monkeypatch.setattr(host, '_source', lambda action, args: dict(running=True, applications=[digest(plan)]))
-    application, visibility = host.application(plan)
+    assert host.application(plan) is None
+    application, visibility = host.directed_application(plan)
     selected_relative = Path(application).relative_to('/home/agent')
     assert (home / selected_relative / 'publication.json').is_file()
     assert Path(visibility).relative_to('/home/agent') == native_peer.relative_to(home) / 'visibility/installation.json'
