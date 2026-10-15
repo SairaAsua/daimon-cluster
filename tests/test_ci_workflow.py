@@ -146,3 +146,15 @@ def test_recovery_workflow_uses_the_actual_host_matrix_contract_pin() -> None:
     workflow = (root/'.github/workflows/tests.yml').read_text().split('  recovery-rebirth-disposable-hosts:', 1)[1]
     assert re.search(r'ref: ([0-9a-f]{40})', workflow).group(1) == MATRIX_CONTRACT_COMMIT
     assert re.search(r'git -C matrix-source rev-parse HEAD.*?([0-9a-f]{40})', workflow, re.S).group(1) == MATRIX_CONTRACT_COMMIT
+
+
+def test_guest_owner_contract_uses_kernel_uid_mapping_and_is_not_run_twice() -> None:
+    workflow = (Path(__file__).parents[1] / '.github/workflows/tests.yml').read_text()
+    step = workflow.split('      - name: Test the guest owner under its actual UID contract\n', 1)[1].split('      - name:', 1)[0]
+    assert "contains(needs.scope.outputs.pytest_args, 'tests/test_guest_owner_bootstrap.py')" in step
+    assert "needs.scope.outputs.profile == 'full'" in step
+    assert 'qualification_uid="$(id -u)"' in step and 'qualification_gid="$(id -g)"' in step
+    assert 'sudo unshare --user --map-users="$qualification_uid,1000,1" --map-groups="$qualification_gid,1000,1"' in step
+    assert '--setuid=1000 --setgid=1000' in step
+    assert 'tests/test_guest_owner_bootstrap.py' in step and '-W error::ResourceWarning' in step
+    assert workflow.count('--deselect=tests/test_guest_owner_bootstrap.py') == 1

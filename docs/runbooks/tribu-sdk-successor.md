@@ -91,7 +91,18 @@ Python imports explicitly; do not silently test the installed production SDK.
 Use the repository's `tools/check_rc_types.py` typing boundary, which intentionally
 skips unrelated dependency implementation. A bare unrestricted mypy run changes
 that contract and can report failures in the old installed SDK or unrelated
-cryptography versions. Never replace a live venv to prepare a source test.
+cryptography versions. Host ceremony fixtures require the exact VCS-pinned host
+installation; a closed receiving SDK has offline installation receipts instead
+of VCS provenance and is a different boundary. Use a matching host environment or
+the selected CI job. Never replace a live venv or manufacture direct_url metadata
+to prepare a source test.
+
+The guest-owner module really requires UID1000. CI maps its current disposable
+runner user to kernel UID/GID1000 in a user namespace, retaining the same interpreter,
+SDK and filesystem ownership. The regular test pass deselects that module; its
+canonical-owner pass runs it once. Do not change the runtime owner guard or fake
+geteuid to make it pass. Slow-daemon tests delay the actual pinned child process;
+a forwarding proxy changes SO_PEERCRED and is not the same native responder.
 Own a finite synthetic admission producer and its named synthetic native unit in
 the same qualification scope. Stop that unit before retiring the producer; on
 interruption reconcile and close the unit as part of the same cleanup. Leaving

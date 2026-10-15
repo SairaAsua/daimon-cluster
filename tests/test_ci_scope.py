@@ -184,20 +184,33 @@ def test_pin_only_qualification_checks_code_content(monkeypatch, tmp_path):
 
 def test_literal_sdk_successor_composes_receiving_tests_without_unrelated_full_jobs(monkeypatch, tmp_path):
     import subprocess
+    import json
     from clusterctl.onboarding_sdk import MATRIX_COMMIT
     from tools.ci_scope import LOADED_STARTUP_TESTS, SDK_TESTS
     pins = {'requirements-weave.txt', 'clusterctl/onboarding_sdk.py', 'clusterctl/matrix_host.py'}
+    metadata = 'support/matrix-onboarding/PROVENANCE.json'
     changes = sorted(pins | {'clusterctl/onboarding_receiving_update.py', 'clusterctl/onboarding_target.py',
         'tests/test_guest_owner_bootstrap.py', 'tests/test_guest_bootstrap_controller.py',
         'tests/test_source_bootstrap.py', 'docs/runbooks/tribu-sdk-successor.md'})
     def show(argv, **_kwargs):
         path = argv[2].split(':', 1)[1]
-        assert path in pins
+        assert path in pins | {metadata}
         return subprocess.CompletedProcess(argv, 0, (ROOT / path).read_bytes().replace(MATRIX_COMMIT.encode(), b'a' * 40))
     monkeypatch.setattr('tools.ci_scope.subprocess.run', show)
     profile, tests = select(changes, ROOT, base='a' * 40)
     assert profile == 'sdk' and set(tests) == set(LOADED_STARTUP_TESTS) | set(SDK_TESTS)
     assert len(tests) == len(set(tests))
+    assert select([*changes, metadata], ROOT, base='a' * 40) == (profile, tests)
+    def changed_tool(argv, **kwargs):
+        result = show(argv, **kwargs)
+        if argv[2].endswith(metadata):
+            value = json.loads(result.stdout)
+            value['sha256'] = 'f' * 64
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode())
+        return result
+    with monkeypatch.context() as altered:
+        altered.setattr('tools.ci_scope.subprocess.run', changed_tool)
+        assert select([*changes, metadata], ROOT, base='a' * 40) == ('full', ['tests'])
     for extra in ('clusterctl/onboarding_custody.py', 'unknown.py', 'constraints.txt'):
         assert select([*changes, extra], ROOT, base='a' * 40) == ('full', ['tests'])
     assert select(changes, tmp_path, base='a' * 40) == ('full', ['tests'])

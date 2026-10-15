@@ -440,8 +440,10 @@ def receiving_support_only(root: Path, base: str, names: set[str]) -> bool:
 def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
     pins = {'requirements-weave.txt', 'clusterctl/onboarding_sdk.py', 'clusterctl/matrix_host.py'}
     detached_pins = pins - {'clusterctl/onboarding_sdk.py'}
-    if pins < set(changed) and sdk_pin_files_only(root, base, detached_pins):
-        remaining = sorted(set(changed) - detached_pins)
+    metadata = {'support/matrix-onboarding/PROVENANCE.json'} & set(changed)
+    if (pins < set(changed) and sdk_pin_files_only(root, base, detached_pins)
+            and (not metadata or sdk_pin_metadata_only(root, base))):
+        remaining = sorted(set(changed) - detached_pins - metadata)
         profile, tests = select(remaining, root, base=base)
         if profile == 'peer' and all((root / path).is_file() for path in SDK_TESTS):
             # Compose existing receiving coverage with the full SDK contract.
@@ -734,6 +736,23 @@ def sdk_pin_files_only(root: Path, base: str, pins: set[str]) -> bool:
         if old_count != 1 or new_count != 1 or old != new:
             return False
     return True
+
+
+def sdk_pin_metadata_only(root: Path, base: str) -> bool:
+    """Carry the same vendored tool while updating its installed-SDK record."""
+    name = 'support/matrix-onboarding/PROVENANCE.json'
+    before = subprocess.run(['git', 'show', base + ':' + name], cwd=root, capture_output=True, check=False)
+    try:
+        original = json.loads(before.stdout)
+        current = json.loads((root / name).read_bytes())
+        selected = re.search(r'(?m)^MATRIX_CONTRACT_COMMIT = [\"\x27]([0-9a-f]{40})[\"\x27]$',
+            (root / 'clusterctl/matrix_host.py').read_text())
+        return (before.returncode == 0 and selected is not None
+                and current.get('installed_sdk_commit') == selected.group(1)
+                and 'installed_sdk_commit' in original
+                and current == {**original, 'installed_sdk_commit': current['installed_sdk_commit']})
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
 
 
 def scope_base(root: Path, base: str, head: str) -> str:

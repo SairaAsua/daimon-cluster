@@ -387,68 +387,25 @@ def test_interrupted_partial_publication_reuses_exact_client(native):
 
 @pytest.mark.parametrize('observer', ['owner-client', 'runtime-presence'])
 def test_slow_authenticated_native_daemon_is_not_treated_as_departed(native, observer):
+    import signal
     import socket
+    import struct
     import threading
-    import time
 
     target, payload = native
-    socket_path = target.package / "runtime/matrix.sock"
-    actual_path = socket_path.with_name("slow.sock")
-    socket_path.rename(actual_path)
-    listener = socket.socket(socket.AF_UNIX)
-    listener.bind(str(socket_path))
-    socket_path.chmod(0o600)
-    listener.listen()
-    listener.settimeout(1)
-    stop = threading.Event()
-    errors = []
-    workers = []
-    delay_lock = threading.Lock()
-    delayed = False
-
-    def receive(connection, size):
-        data = b""
-        while len(data) < size:
-            chunk = connection.recv(size - len(data))
-            if not chunk:
-                if not data:
-                    return b''
-                raise ValueError("unfinished authenticated frame")
-            data += chunk
-        return data
-
-    def handle(connection):
-        nonlocal delayed
-        try:
-            with connection, socket.socket(socket.AF_UNIX) as server:
-                header = receive(connection, 4)
-                if not header:
-                    # Presence also makes an empty SO_PEERCRED connection.
-                    return
-                server.connect(str(actual_path))
-                server.sendall(header + receive(connection, int.from_bytes(header, 'big')))
-                header = receive(server, 4)
-                response = header + receive(server, int.from_bytes(header, 'big'))
-                with delay_lock:
-                    first = not delayed
-                    delayed = True
-                if first:
-                    time.sleep(6)
-                connection.sendall(response)
-        except Exception as error:
-            errors.append(type(error).__name__)
-
-    def forward():
-        while not stop.is_set():
-            try:
-                connection, _ = listener.accept()
-            except TimeoutError:
-                continue
-            worker = threading.Thread(target=handle, args=(connection,))
-            workers.append(worker)
-            worker.start()
-
-    thread = threading.Thread(target=forward)
+    # Delay the actual native process. A forwarding proxy changes SO_PEERCRED
+    # and must not stand in for the same-connection responder we are testing.
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.connect(str(target.package / "runtime/matrix.sock"))
+        pid, uid, _gid = struct.unpack('3i', connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+    assert uid == os.geteuid() and pid != os.getpid()
+    descriptor = os.pidfd_open(pid)
+    release = threading.Event()
+    def resume():
+        release.wait(6)
+        signal.pidfd_send_signal(descriptor, signal.SIGCONT)
+    signal.pidfd_send_signal(descriptor, signal.SIGSTOP)
+    thread = threading.Thread(target=resume)
     thread.start()
     try:
         if observer == 'owner-client':
@@ -458,16 +415,13 @@ def test_slow_authenticated_native_daemon_is_not_treated_as_departed(native, obs
         else:
             result = target.running()
             assert result['origin'] == payload['origin']
+            assert result['process']['pid'] == pid
             assert result['schema'] == 'cluster-onboarding-runtime-presence/v1'
-        assert not errors
     finally:
-        stop.set()
+        release.set()
         thread.join(timeout=10)
-        listener.close()
-        for worker in workers:
-            worker.join(timeout=10)
-        socket_path.unlink()
-        actual_path.rename(socket_path)
+        assert not thread.is_alive()
+        os.close(descriptor)
 
 
 def test_host_adapter_verifies_installed_sdk_and_current_plan_before_dispatch(
