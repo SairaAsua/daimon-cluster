@@ -150,14 +150,17 @@ def test_signed_group_is_selected_before_base_visibility_composition(tmp_path, m
     """Composition-order seam only; actual group startup has its own qualification."""
     import socket
     from types import SimpleNamespace
-    from clusterctl import onboarding_runtime, onboarding_target, onboarding_code_successor
+    from clusterctl import onboarding_runtime, onboarding_target, onboarding_code_successor, onboarding_peer
     from daimon_matrix import runtime, daemon
     selected=dict(application=str(tmp_path/'tribe/application'),
         visibility=str(tmp_path/'tribe/visibility/installation.json'))
     monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda *_args, **_kwargs:{})
     monkeypatch.setattr(onboarding_target, 'Target', lambda *_args, **_kwargs:
         SimpleNamespace(observe=lambda:dict(phase='v8',group=selected), package=tmp_path,
+            root=tmp_path/'matrix', document_bundle=lambda:{},
             _reader=lambda: pytest.fail('composition test opened custody')))
+    # Signed authority loading is covered by the native group-authority tests.
+    monkeypatch.setattr(onboarding_peer, 'approved_group_authorities', lambda *_args:{})
     observed=[]
     def load(*_args, **kwargs):
         observed.append(kwargs)
@@ -211,7 +214,10 @@ def test_changed_group_selection_never_composes_an_application(tmp_path, monkeyp
     monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda *_args, **_kwargs:{})
     monkeypatch.setattr(onboarding_target, 'Target', lambda *_args, **_kwargs:
         SimpleNamespace(observe=lambda:dict(phase='v8',group=early), package=tmp_path,
+            root=tmp_path/'matrix', document_bundle=lambda:{},
             _reader=lambda:pytest.fail('race test opened custody')))
+    # Keep this seam focused on the early/late selection race.
+    monkeypatch.setattr(onboarding_peer, 'approved_group_authorities', lambda *_args:{})
     monkeypatch.setattr(runtime, 'load_runtime', lambda *_args, **_kwargs:
         SimpleNamespace(state_root=state_root))
     monkeypatch.setattr(onboarding_peer, 'group_application', lambda *_args:late)
