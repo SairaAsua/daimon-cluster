@@ -21,6 +21,7 @@ SCHEMA = "cluster-onboarding-job/v1"
 PLAN_SCHEMA = "cluster-onboarding-plan/v1"
 STAGES = ("environment", "context", "memory", "matrix", "access", "telegram", "welcome", "acceptance")
 REASONS = frozenset({
+    'group_admission_required', 'group_admission_pending',
     "host_authorization_required", "capacity_required", "connection_data_required",
     "identity_authorization_required", "account_authorization_required",
     "human_contact_required", "uncertain_external_effect", "observed_state_conflict",

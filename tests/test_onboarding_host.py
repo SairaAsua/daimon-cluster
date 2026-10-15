@@ -76,7 +76,7 @@ def configured(tmp_path):
     return config, value, run, HostBackend(config, run=run)
 
 
-@pytest.mark.parametrize('action', ['native-install', 'probe', 'prepare', 'install'])
+@pytest.mark.parametrize('action', ['native-install', 'native-observe', 'probe', 'prepare', 'install'])
 def test_native_harness_commands_do_not_require_bot_connections(tmp_path, action):
     from clusterctl.onboarding import Observation
     _, value, _, backend = configured(tmp_path)
@@ -640,3 +640,89 @@ def test_incus_stdin_is_bounded_and_never_routed_through_a_shell(monkeypatch):
     with pytest.raises(OnboardingError, match='invalid_receiving_control_request'):
         HostBackend._run(['exec', 'fixture'], input_data='x' * (being_seed.MAX_SELECTION + 1))
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('action', ['observe', 'sdk-observe', 'sdk-prepare'])
+def test_host_prepared_target_observations_keep_supported_finite_cli_budget(tmp_path, monkeypatch, action):
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    result = backend._target_call(value, action, candidate=candidate, observation_timeout_seconds=2)
+    assert result == {'observed': True}
+    command, options = calls[-1]
+    assert '--observation-timeout-seconds' in command
+    assert 0 < options['timeout_seconds'] <= 2
+
+
+def test_group_target_prepares_approved_candidate_only_after_original_v8(tmp_path, monkeypatch):
+    import time
+    config, value, run, backend = configured(tmp_path)
+    backend.config = replace(config, code=tmp_path/'base', views=tmp_path/'views')
+    backend._guest_paths = lambda p: (tmp_path, Path('/guest/base'), {})
+    candidate = (tmp_path/'candidate', 'a'*64)
+    mount = dict(type='disk', source=str(candidate[0]), path='/guest/candidate', readonly='true')
+    backend._runtime_paths = lambda p, base, **kw: (Path('/guest/code'), [],
+        {'approved-candidate': mount} if kw else {})
+    backend._matrix_mount = lambda p: {}
+    attached, ready, calls = {'value': False}, {'v8': False, 'sdk': False}, []
+    def mounted(p, mounts, **kw):
+        return attached['value'] if 'approved-candidate' in mounts else True
+    backend._mounted = mounted
+    backend._sdk_successor = lambda p: False
+    def target(p, action, **options):
+        calls.append(action)
+        if action == 'observe':
+            return {'phase': 'v8' if ready['v8'] else 'v8-published'}
+        if action == 'sdk-observe':
+            return {'ready': ready['sdk']}
+        assert action == 'sdk-prepare' and attached['value']
+        ready['sdk'] = True
+        return {'ready': True}
+    backend._target_call = target
+    def dispatch(p, command, **options):
+        assert ready['v8'] and command[:3] == ['config', 'device', 'add']
+        attached['value'] = True
+        calls.append('mount')
+        return ''
+    backend._dispatch = dispatch
+    deadline = time.monotonic_ns()+2_000_000_000
+    assert not backend.prepare_group_target(value, candidate, deadline_ns=deadline)
+    assert calls == ['observe']
+    ready['v8'] = True
+    assert backend.prepare_group_target(value, candidate, deadline_ns=deadline)
+    assert calls[-4:] == ['observe', 'mount', 'sdk-observe', 'sdk-prepare']
+    assert backend.prepare_group_target(value, candidate, deadline_ns=deadline)
+    assert calls[-2:] == ['observe', 'sdk-observe']
+
+
+@pytest.mark.parametrize('expired', [False, True])
+def test_host_native_budget_and_frozen_expiry_reach_guest_before_effect(tmp_path, monkeypatch, expired):
+    import time
+    from clusterctl import onboarding_host
+    _, value, _, backend = configured(tmp_path)
+    clock = [time.monotonic_ns()]
+    monkeypatch.setattr(onboarding_host, 'time', SimpleNamespace(
+        monotonic_ns=lambda: clock[0], time_ns=time.time_ns))
+    def environment(p, **options):
+        if expired:
+            clock[0] += 3_000_000_000
+        return SimpleNamespace(state='complete')
+    backend._environment = environment
+    backend._guest_paths = lambda p: (tmp_path, Path('/guest/code'), {})
+    backend._telegram_paths = lambda p, base: (base, [], {})
+    backend._mounted = lambda *a, **k: True
+    calls = []
+    def dispatch(p, command, **options):
+        calls.append(command)
+        return json.dumps({'plan_digest': digest(p)})
+    backend._dispatch = dispatch
+    deadline, expiry = clock[0]+2_000_000_000, time.time_ns()//1_000_000+10000
+    def invoke():
+        backend._telegram_command(value, 'native-install', deadline_ns=deadline, authorization_expires_at_ms=expiry)
+    if expired:
+        with pytest.raises(OnboardingError, match='deadline_expired'):
+            invoke()
+        assert calls == []
+    else:
+        invoke()
+        command = calls[-1]
+        assert float(command[command.index('--operation-timeout-seconds')+1]) == 2
+        assert command[command.index('--authorization-expires-at-ms')+1] == str(expiry)

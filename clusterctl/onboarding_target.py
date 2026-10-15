@@ -829,7 +829,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.bootstrap_ready_sha256, args.bootstrap_timeout_seconds)):
             raise OnboardingError('invalid_receiving_bootstrap_request')
         timeout = args.observation_timeout_seconds
-        if timeout is not None and (args.action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship', 'group-publication'}
+        if timeout is not None and (args.action not in {'observe', 'sdk-observe', 'sdk-prepare', 'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship', 'group-publication'}
                 or not math.isfinite(timeout) or not 0 < timeout <= 60):
             raise OnboardingError('invalid_receiving_observation_timeout')
         now_ns = time.monotonic_ns()
@@ -855,12 +855,16 @@ def main(argv: list[str] | None = None) -> int:
         if (controlling or identity_query or bootstrapping or grouping or args.require_loaded) and not sdk_parameters:
             raise OnboardingError('qualified_onboarding_target_observer_required')
         matrix_commit = sdk_parameters.get('matrix_commit', onboarding_sdk.MATRIX_COMMIT)
+        if observation_deadline_ns is not None and time.monotonic_ns() >= observation_deadline_ns:
+            raise OnboardingError('onboarding_observation_deadline_expired')
         if args.action == 'sdk-prepare':
             stage = 'sdk-preparation'
             venv = onboarding_sdk.install(args.home, runtime, args.runtime_digest or plan['release_digest'], **sdk_parameters)
             if sdk_parameters:
                 stage = 'sdk-imports'
                 onboarding_sdk.runtime_imports(venv, runtime, **sdk_parameters)
+            if observation_deadline_ns is not None and time.monotonic_ns() >= observation_deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
             print(json.dumps(dict(ready=True, matrix_commit=matrix_commit)))
             return 0
         if args.action == 'sdk-observe':
@@ -870,6 +874,8 @@ def main(argv: list[str] | None = None) -> int:
                 ready = True
             except FileNotFoundError:
                 ready = False
+            if observation_deadline_ns is not None and time.monotonic_ns() >= observation_deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
             print(json.dumps(dict(ready=ready, matrix_commit=matrix_commit)))
             return 0
         stage = 'sdk-observation'
@@ -917,6 +923,8 @@ def main(argv: list[str] | None = None) -> int:
         stage = 'owner-action'
         target = Target(args.home, plan, document(args.genesis), code=runtime,
             code_digest=args.runtime_digest or plan['release_digest'], qualified_startup=startup)
+        if observation_deadline_ns is not None and time.monotonic_ns() >= observation_deadline_ns:
+            raise OnboardingError('onboarding_observation_deadline_expired')
         if bootstrapping:
             from .onboarding_receiving_update import GuestOwnerBootstrap, freeze_guest_bootstrap
             deadline_ns = time.monotonic_ns() + int(args.bootstrap_timeout_seconds * 1_000_000_000)
@@ -1027,6 +1035,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise OnboardingError("onboarding_target_activation_required")
             target.apply_credential(document(args.credential_response))
         result = target.observe()
+        if observation_deadline_ns is not None and time.monotonic_ns() >= observation_deadline_ns:
+            raise OnboardingError('onboarding_observation_deadline_expired')
         if args.action == "credential-prepare":
             result["request"] = target.credential_request()
         print(json.dumps(result))

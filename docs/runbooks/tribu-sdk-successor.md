@@ -1029,9 +1029,42 @@ the exact endpoint from the approved Codex recipe before fencing old senders.
 After genuine application publication and first load, retain full native catalog
 acceptance through the existing tooling route before positive cohort selection.
 
-The protected worker coordinator, approved publication-command comparison and
-installed old-members/newcomer journey remain unfinished. These lifecycle helpers
-do not establish complete portal admission or installed receiving acceptance.
+The optional protected host `group_admission` selection now connects the existing
+worker to the receiving operation before `JobStore.tick` takes its job lock.
+It is a fixed process setting: changing that pointer requires the worker's own
+explicit lifecycle. Ordinary jobs without it keep their existing backend path.
+The closed `cluster-onboarding-group-coordinator/v1` map contains `tribe_ref`,
+the existing operation `journal`, typed Source/guest `owners`, and per-plan
+`admissions` operation IDs. The immutable transition's `portal_admission` binds
+the exact plan, Matrix stage operation ID and selected owner-map digest. Neither
+intake labels nor a selected application can supply that approval.
+
+The caller uses operation -> jobs-parent -> jobs ownership and revalidates the
+stored plan, grant, consent, configuration and original authorization horizon.
+While ordinary V8/SDK/mount preparation is incomplete, it returns to the existing
+Matrix stage. It then prepares only the approved candidate mount/SDK, without
+selecting that runtime. Native software is attached before its observation.
+Source and guest endpoints are observed through their existing owner routes;
+only the newcomer's independent native service may be prepared. The read-only
+`native-observe` inspects the exact unit and manager state. A lost install reply
+is observed before retry; an already active unit receives no second start.
+
+The native-only CLI receives both the remaining duration and fixed authorization
+expiry. One guest-local budget begins before verification and is checked before
+unit publication, reload, enable/start and after each bounded wait. A host timeout
+does not prove guest cancellation. The coordinator also checks its original
+budget after retaining native readiness. That evidence is historical preparation,
+not receiving or current health; it is not repeatedly rebuilt on worker cadence.
+The later caller must revalidate the endpoint before admission effects.
+
+Matrix and acceptance stages remain pending until this exact receiving operation
+is complete, followed by the existing actual managed-presence/acceptance checks.
+The remaining coordinator phases are unfinished: physical/controller preparation,
+signed invitation/acceptance, approved publication-command derivation/comparison,
+full distribution, lifecycle reload/initial load, cohort/steady selection and
+scoped communication acceptance. The installed old-members/newcomer journey is
+also pending. The native phase does not complete portal admission, enable a
+Matrix sender or qualify a deployment.
 
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry

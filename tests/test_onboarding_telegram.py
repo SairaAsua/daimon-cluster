@@ -290,3 +290,78 @@ def test_sessions_release_preserves_goal_predecessor_and_rejects_mixed_pins(tmp_
     manifest.chmod(0o644)
     with pytest.raises(OnboardingError, match="qualified_telegram_binary_required"):
         telegram.artifact_directory(tmp_path, uid=os.getuid())
+
+
+@pytest.mark.parametrize('state', ['absent', 'inactive', 'active', 'pending', 'foreign', 'drop-in', 'unlinked-active'])
+def test_native_manager_observation_is_read_only_and_preserves_foreign_units(tmp_path, monkeypatch, state):
+    from types import SimpleNamespace
+    from clusterctl import onboarding_telegram as telegram
+    unit = tmp_path/telegram.NATIVE_UNIT
+    home, codex, code = Path('/home/agent'), Path('/usr/bin/codex'), Path('/opt/qualified')
+    if state not in {'absent', 'unlinked-active'}:
+        unit.write_bytes(b'foreign' if state == 'foreign' else telegram.native_service(home, codex, code))
+        unit.chmod(0o600)
+    regular = telegram.onboarding_release.regular
+    monkeypatch.setattr(telegram.onboarding_release, 'regular', lambda path, **kw: regular(path, uid=os.geteuid()))
+    fields = dict(LoadState='loaded', FragmentPath=str(unit), DropInPaths='',
+        MainPID='41' if state in {'active', 'unlinked-active'} else '0',
+        ActiveState='active' if state in {'active', 'unlinked-active'} else 'activating' if state == 'pending' else 'inactive')
+    if state == 'absent':
+        fields.update(LoadState='not-found', FragmentPath='')
+    if state == 'drop-in':
+        fields['DropInPaths'] = '/foreign/override.conf'
+    calls = []
+    def run(argv, **kwargs):
+        assert argv[:2] == ['systemctl', 'show']
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout='\n'.join(key+'='+value for key, value in fields.items()))
+    if state in {'foreign', 'drop-in', 'unlinked-active'}:
+        with pytest.raises(OnboardingError):
+            telegram.native_observation(home, codex, code, unit_directory=tmp_path, run=run)
+    else:
+        assert telegram.native_observation(home, codex, code, unit_directory=tmp_path, run=run) == {'native_state': state}
+    assert len(calls) == (0 if state == 'foreign' else 1)
+
+
+@pytest.mark.parametrize('expire', [None, 'before-publish', 'after-publish', 'after-reload'])
+def test_guest_native_install_keeps_one_budget_through_verification_and_each_effect(tmp_path, monkeypatch, expire):
+    from types import SimpleNamespace
+    from clusterctl import onboarding_telegram as telegram
+    clock = {'mono': 0, 'wall': 100_000_000_000}
+    monkeypatch.setattr(telegram, 'time', SimpleNamespace(
+        monotonic_ns=lambda: clock['mono'], time_ns=lambda: clock['wall']))
+    budget = telegram.native_budget(2, 101_000)
+    published, commands = [], []
+    def publish(path, raw):
+        published.append(raw)
+        if expire == 'after-publish':
+            clock['mono'] = 3_000_000_000
+    monkeypatch.setattr(telegram, 'publish', publish)
+    if expire == 'before-publish':
+        # Verification consumed the original guest budget; do not reset it.
+        clock['mono'] = 3_000_000_000
+    def run(argv, **kwargs):
+        assert 0 < kwargs['timeout'] <= 1
+        commands.append(argv)
+        if expire == 'after-reload':
+            # A wall-clock authorization expiry is independent of monotonic time.
+            clock['wall'] = 102_000_000_000
+        return SimpleNamespace(returncode=0)
+    def install():
+        telegram.install_native(Path('/home/agent'), Path('/usr/bin/codex'), Path('/opt/qualified'),
+            unit_directory=tmp_path, budget=budget, run=run)
+    if expire:
+        with pytest.raises(OnboardingError, match='native_codex_preparation_expired'):
+            install()
+        assert len(commands) == (1 if expire == 'after-reload' else 0)
+        assert len(published) == (0 if expire == 'before-publish' else 1)
+    else:
+        install()
+        assert commands == [['systemctl', 'daemon-reload'], ['systemctl', 'enable', '--now', telegram.NATIVE_UNIT]]
+
+
+@pytest.mark.parametrize('timeout, expiry', [(None, 1), (1, None), (0, 101000), (61, 101000), (float('nan'), 101000)])
+def test_guest_native_budget_refuses_incomplete_or_invalid_bounds(timeout, expiry):
+    from clusterctl.onboarding_telegram import native_budget
+    with pytest.raises(OnboardingError, match='native_codex_preparation_expired'):
+        native_budget(timeout, expiry)

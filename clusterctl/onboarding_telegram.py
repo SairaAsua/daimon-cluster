@@ -404,15 +404,82 @@ def _upgrade(home: Path, base: Path, code: Path, codex: Path, plan: dict, *,
     return dict(plan_digest=digest(plan), upgraded=True, database_restored=False)
 
 
+def native_budget(timeout_seconds: float | None, expires_at_ms: int | None):
+    """One guest-local budget, established before code/plan verification."""
+    if timeout_seconds is None and expires_at_ms is None:
+        return lambda maximum: maximum
+    import math
+    if (timeout_seconds is None or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 60
+            or type(expires_at_ms) is not int or not 0 < expires_at_ms < 2**53):
+        raise OnboardingError('native_codex_preparation_expired')
+    deadline = time.monotonic_ns() + int(timeout_seconds * 1_000_000_000)
+    def remaining(maximum):
+        value = min(maximum, (deadline - time.monotonic_ns()) / 1_000_000_000,
+            (expires_at_ms - time.time_ns() // 1_000_000) / 1000)
+        if value <= 0:
+            raise OnboardingError('native_codex_preparation_expired')
+        return value
+    remaining(60)
+    return remaining
+
+
+def install_native(home: Path, codex: Path, code: Path, *, budget,
+                   unit_directory: Path = Path('/etc/systemd/system'), run=subprocess.run) -> None:
+    budget(180)
+    publish(unit_directory / NATIVE_UNIT, native_service(home, codex, code))
+    for command in (['systemctl', 'daemon-reload'], ['systemctl', 'enable', '--now', NATIVE_UNIT]):
+        result = run(command, capture_output=True, text=True, timeout=budget(180), check=False)
+        budget(180)
+        if result.returncode:
+            raise OnboardingError('native_codex_daemon_start_failed')
+
+
+def native_observation(home: Path, codex: Path, code: Path, *,
+                       unit_directory: Path = Path('/etc/systemd/system'), run=subprocess.run,
+                       timeout_seconds: float = 30) -> dict:
+    """Observe the exact native unit; never start, stop or reload it."""
+    unit = unit_directory / NATIVE_UNIT
+    expected = native_service(home, codex, code)
+    exists = unit.exists() or unit.is_symlink()
+    if exists and onboarding_release.regular(unit, uid=0) != expected:
+        raise OnboardingError('existing_native_codex_service_preserved')
+    result = run(['systemctl', 'show', NATIVE_UNIT, '--property=LoadState', '--property=ActiveState',
+        '--property=MainPID', '--property=FragmentPath', '--property=DropInPaths'],
+        capture_output=True, text=True, timeout=timeout_seconds, check=False)
+    fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+    if (not fields.get('MainPID', '').isdecimal() or fields.get('DropInPaths') != ''
+            or fields.get('LoadState') not in {'loaded', 'not-found'}):
+        raise OnboardingError('native_codex_daemon_observation_failed')
+    pid = int(fields['MainPID'])
+    if not exists:
+        if (fields['LoadState'] != 'not-found' or fields.get('FragmentPath') != ''
+                or fields.get('ActiveState') not in {'inactive', 'failed'} or pid):
+            raise OnboardingError('existing_native_codex_service_preserved')
+        state = 'absent'
+    else:
+        if (fields.get('FragmentPath') not in {'', str(unit)}
+                or result.returncode and fields['LoadState'] != 'not-found'):
+            raise OnboardingError('existing_native_codex_service_preserved')
+        state = ('active' if fields.get('ActiveState') == 'active' and pid > 0 else
+                 'inactive' if fields.get('ActiveState') in {'inactive', 'failed'} and pid == 0 else 'pending')
+    return dict(native_state=state)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action', choices=('prepare', 'install', 'observe', 'probe', 'native-install', 'native-serve', 'upgrade'))
+    parser.add_argument('action', choices=('prepare', 'install', 'observe', 'probe', 'native-install', 'native-observe', 'native-serve', 'upgrade'))
     parser.add_argument('--code', type=Path, required=True)
     parser.add_argument('--runtime-code', type=Path)
     parser.add_argument('--runtime-digest')
     parser.add_argument('--plan', type=Path, required=True)
+    parser.add_argument('--operation-timeout-seconds', type=float)
+    parser.add_argument('--authorization-expires-at-ms', type=int)
     args = parser.parse_args(argv)
     try:
+        budget = native_budget(args.operation_timeout_seconds, args.authorization_expires_at_ms)
+        if (args.operation_timeout_seconds is not None or args.authorization_expires_at_ms is not None) and args.action not in {
+                'native-install', 'native-observe', 'probe'}:
+            raise OnboardingError('native_codex_preparation_expired')
         import pwd
         account = pwd.getpwnam('agent')
         if (account.pw_uid != 1000 or account.pw_gid != 1000 or account.pw_dir != '/home/agent'
@@ -448,24 +515,26 @@ def main(argv=None) -> int:
                 raise OnboardingError('qualified_guest_telegram_required')
             native_serve(home, codex)
             return 0
+        elif args.action == 'native-observe':
+            if os.geteuid() != 0:
+                raise OnboardingError('qualified_guest_telegram_required')
+            value = dict(native_observation(home, codex, args.code, timeout_seconds=budget(30)), plan_digest=digest(plan))
+            budget(30)
         elif args.action == 'native-install':
             if os.geteuid() != 0:
                 raise OnboardingError('qualified_guest_telegram_required')
-            publish(Path('/etc/systemd/system') / NATIVE_UNIT, native_service(home, codex, args.code))
-            for command in (['systemctl', 'daemon-reload'], ['systemctl', 'enable', '--now', NATIVE_UNIT]):
-                result = subprocess.run(command, capture_output=True, text=True, timeout=180, check=False)
-                if result.returncode:
-                    raise OnboardingError('native_codex_daemon_start_failed')
+            install_native(home, codex, args.code, budget=budget)
             value = dict(native_started=True, plan_digest=digest(plan))
         elif args.action == 'probe':
             if os.geteuid() != 1000:
                 raise OnboardingError('qualified_guest_telegram_required')
             # No bot read, listener, history import or model inference.
             result = subprocess.run([str(binary), '--probe-native', str(codex), str(home / 'Projects/being')],
-                capture_output=True, text=True, timeout=60, check=False,
+                capture_output=True, text=True, timeout=budget(60), check=False,
                 env=dict(HOME=str(home), CODEX_HOME=str(home / '.codex'), PATH='/usr/local/bin:/usr/bin:/bin'))
             if result.returncode:
                 raise OnboardingError('native_telegram_probe_failed')
+            budget(60)
             value = dict(native_probe=json.loads(result.stdout), inference=False, bot_read=False)
         else:
             if os.geteuid() != 0:
