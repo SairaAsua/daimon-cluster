@@ -199,6 +199,13 @@ and resume must use those retained vectors under actual selection/writer locks.
 Preparation itself does not select code, accept authority, load a receiver or
 enable egress. The maintained controllers own subsequent effects; their complete
 receiving/communication acceptance and live selection remain #232 work.
+After a failed cohort has confirmed every sender disabled and released its native
+reservations, the owning orchestrator must also close that abandoned journal
+operation through `OperationJournal.advance(..., 'compensated')`, preserving its
+observations and clear receipts. This compensates sender activation only; it
+never claims software or accepted authority was rolled back. An uncertain or
+partially disabled cohort stays open for reconciliation. Do not change the target
+or discard the journal merely to bypass its contradictory-operation guard.
 
 `onboarding_receiving_update.preflight` consumes that operation's approved external
 Matrix release manifest and exact receiving-code digest. It verifies the manifest

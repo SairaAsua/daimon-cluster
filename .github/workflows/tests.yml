@@ -450,7 +450,7 @@ jobs:
             tests/test_onboarding_host_ownership.py -k 'root_worker or existing_authority' \
             -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning
       - run: >-
-          python -m pytest -q
+          python -m pytest -q -x --tb=short
           ${{ needs.scope.outputs.pytest_args }}
           --deselect=tests/test_guest_owner_bootstrap.py
           -W error::ResourceWarning
