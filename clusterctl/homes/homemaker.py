@@ -41,14 +41,27 @@ class Homemaker:
         return owns and action in (
             'design.update', 'design.select', 'design.share')
 
+    def pair_home(self, home, subject):
+        """Resolve a central editor's member from current pairing, never its host."""
+        if getattr(self.app, 'homemaker_home', None) != home:
+            return home
+        matches = [ref for ref in self.app.homes
+                   if self.app.authority.paired_human(ref) == subject.ref]
+        owners = {self.app.homes[ref]['owner_being_ref'] for ref in matches}
+        if len(owners) != 1:
+            raise ValueError('design_pair_context_unavailable')
+        return home if home in matches else matches[0]
+
     def scope(self, home, subject, context):
         if (not subject or subject.kind != 'human' or
                 not self.app.policy.current(subject.ref, subject.revision)):
             raise ValueError('design_operation_denied')
         if context == 'personal':
             return {'kind': 'human', 'ref': subject.ref}, 'private', 'Mi estilo personal'
-        if context == 'pair' and self.app.authority.paired_human(home) == subject.ref:
-            return {'kind': 'being', 'ref': self.app.homes[home]['owner_being_ref']}, 'public', 'Nuestra dupla'
+        if context == 'pair':
+            selected = self.pair_home(home, subject)
+            if self.app.authority.paired_human(selected) == subject.ref:
+                return {'kind': 'being', 'ref': self.app.homes[selected]['owner_being_ref']}, 'public', 'Nuestra dupla'
         raise ValueError('design_operation_denied')
 
     def variant(self, variant):
