@@ -108,10 +108,16 @@ def test_owner_private_control_paths_and_public_stdin_stay_in_owner_cli(adapter)
     )
 
 
-def test_group_relationship_uses_qualified_owner_and_only_public_stdin(adapter):
+@pytest.mark.parametrize('publication', [False, True])
+def test_group_relationship_uses_qualified_owner_and_only_public_stdin(adapter, publication):
     client, _, calls = adapter
     command = dict(operation_id=str(uuid.uuid4()), step='invite', method='tribe.invite', params={'payload': {}})
-    client.group_relationship(command, offline=True, authority_closure={})
+    if publication:
+        command = dict(operation_id=str(uuid.uuid4()), step='select', action='selection',
+                       params=dict(expected_selection_sha256=None))
+        client.group_publication(command, authority_closure={})
+    else:
+        client.group_relationship(command, offline=True, authority_closure={})
     argv, options = calls[0]
     assert argv[-2:] == ['--group-request', '-']
     assert options['user'] == client.owner_uid and options['extra_groups'] == ()
@@ -225,6 +231,10 @@ def cli(tmp_path, monkeypatch):
             calls.append(('group', args, options))
             return {'schema': 'cluster-group-relationship-result/v1', 'status': 'recorded'}
 
+        def group_publication(self, *args, **options):
+            calls.append(('group-publication', args, options))
+            return {'schema': 'cluster-group-publication-result/v1', 'status': 'recorded'}
+
         def serve(self, *args, **options):
             pytest.fail("receiving mode started a service")
 
@@ -256,16 +266,22 @@ def cli(tmp_path, monkeypatch):
     return arguments, calls
 
 
-def test_source_cli_group_request_keeps_finite_owner_context_and_never_serves(cli, monkeypatch, capsys):
+@pytest.mark.parametrize('publication', [False, True])
+def test_source_cli_group_request_keeps_finite_owner_context_and_never_serves(cli, monkeypatch, capsys, publication):
     arguments, calls = cli
     command = dict(operation_id=str(uuid.uuid4()), step='invite', method='tribe.invite', params={'payload': {}})
+    if publication:
+        command = dict(operation_id=str(uuid.uuid4()), step='select', action='selection',
+                       params=dict(expected_selection_sha256=None))
     packet = dict(command=command, offline=True, authority_closure={})
     monkeypatch.setattr(source_cli.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(packet).encode())))
     assert source_cli.main([*arguments, '--group-request', '-']) == 0
     assert json.loads(capsys.readouterr().out)['status'] == 'recorded'
-    assert [row[0] for row in calls] == ['construct', 'group']
+    assert [row[0] for row in calls] == ['construct', 'group-publication' if publication else 'group']
     assert calls[1][1] == (command,)
-    assert calls[1][2]['offline'] is True and calls[1][2]['authority_closure'] == {}
+    if not publication:
+        assert calls[1][2]['offline'] is True
+    assert calls[1][2]['authority_closure'] == {}
     assert calls[1][2]['deadline_ns'] == int(arguments[-1])
 
 

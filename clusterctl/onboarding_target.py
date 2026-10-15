@@ -148,11 +148,28 @@ class Target:
                 raise OnboardingError('current_onboarding_target_required')
             root = self.package / 'runtime'
             authorities = owner_authorities(root, self.root / 'tribe', self.root / 'group-admission',
-                                            value, authority_closure)
+                                            value['operation_id'], authority_closure)
             hosted = load_owner_runtime(root, self._reader, authorities=authorities,
                                         qualified_startup=self.qualified_startup)
             return relationship_request(root, self.root / 'group-admission', value,
                                         offline=hosted, deadline_ns=deadline_ns)
+
+    def group_publication(self, value: dict, *, authority_closure: dict,
+                          deadline_ns: int | None = None) -> dict:
+        from .onboarding_group_admission import (
+            load_owner_runtime, owner_authorities, publication_command, publication_request,
+        )
+        value = publication_command(value)
+        root = self.package / 'runtime'
+        group = self.root / 'tribe'
+        journal = self.root / 'group-admission'
+        with self._runtime_writer():
+            if self._observe_receiving()['phase'] != 'v8':
+                raise OnboardingError('current_onboarding_target_required')
+            authorities = owner_authorities(root, group, journal, value['operation_id'], authority_closure)
+            hosted = load_owner_runtime(root, self._reader, authorities=authorities,
+                                        qualified_startup=self.qualified_startup)
+            return publication_request(hosted, group, journal, value, deadline_ns=deadline_ns)
 
     def prepare(self) -> dict:
         from daimon_matrix import canonical, keystore, operator_first_embodiment as first
@@ -740,7 +757,7 @@ class Target:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "group-relationship", "receiving-control-prepare", "receiving-control-apply", "receiving-control-prepare-apply", "receiving-identity", "receiving-bootstrap-freeze", "receiving-bootstrap-stage", "receiving-bootstrap-publish"))
+    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "group-relationship", "group-publication", "receiving-control-prepare", "receiving-control-apply", "receiving-control-prepare-apply", "receiving-identity", "receiving-bootstrap-freeze", "receiving-bootstrap-stage", "receiving-bootstrap-publish"))
     parser.add_argument("--diagnostics", action="store_true", help="write bounded nonsecret refusal detail to stderr")
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
@@ -776,7 +793,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         controlling = args.action in {'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
         identity_query = args.action == 'receiving-identity'
-        grouping = args.action == 'group-relationship'
+        grouping = args.action in {'group-relationship', 'group-publication'}
         if grouping != (args.group_request is not None) or grouping and args.ready_fd is not None:
             raise OnboardingError('onboarding_group_relationship_command_required')
         if args.native_tooling_json is not None and (not identity_query
@@ -798,7 +815,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.bootstrap_ready_sha256, args.bootstrap_timeout_seconds)):
             raise OnboardingError('invalid_receiving_bootstrap_request')
         timeout = args.observation_timeout_seconds
-        if timeout is not None and (args.action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship'}
+        if timeout is not None and (args.action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship', 'group-publication'}
                 or not math.isfinite(timeout) or not 0 < timeout <= 60):
             raise OnboardingError('invalid_receiving_observation_timeout')
         now_ns = time.monotonic_ns()
@@ -936,9 +953,11 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 packet = being_seed._read(args.group_request, limit=being_seed.MAX_SELECTION)
             packet = request_packet(packet)
-            if not packet['offline']:
+            if (not packet['offline']
+                    or (args.action == 'group-publication') != ('action' in packet['command'])):
                 raise OnboardingError('onboarding_group_relationship_writer_required')
-            print(json.dumps(target.group_relationship(packet['command'],
+            method = target.group_publication if args.action == 'group-publication' else target.group_relationship
+            print(json.dumps(method(packet['command'],
                 authority_closure=packet['authority_closure'], deadline_ns=observation_deadline_ns)))
             return 0
         if args.action == 'peer-identity':

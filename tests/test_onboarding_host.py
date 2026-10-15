@@ -548,12 +548,17 @@ def test_receiving_identity_uses_prepared_candidate_and_one_finite_owner_budget(
     assert 0 < options['timeout_seconds'] <= 5
 
 
-def test_group_request_uses_prepared_owner_stdin_without_requiring_running_group(tmp_path, monkeypatch):
+@pytest.mark.parametrize('publication', [False, True])
+def test_group_request_uses_prepared_owner_stdin_without_requiring_running_group(tmp_path, monkeypatch, publication):
     import uuid
     backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
     packet = dict(command=dict(operation_id=str(uuid.uuid4()), step='accept',
         method='tribe.membership.accept', params={'payload': {}}), offline=True, authority_closure={})
-    backend._target_call(value, 'group-relationship', candidate=candidate,
+    action = 'group-publication' if publication else 'group-relationship'
+    if publication:
+        packet['command'] = dict(operation_id=str(uuid.uuid4()), step='select', action='selection',
+                                 params=dict(expected_selection_sha256=None))
+    backend._target_call(value, action, candidate=candidate,
         group_request=packet, observation_timeout_seconds=5)
     argv, options = calls[0]
     assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
@@ -563,7 +568,10 @@ def test_group_request_uses_prepared_owner_stdin_without_requiring_running_group
     assert packet['command']['operation_id'] not in argv
     assert 0 < options['timeout_seconds'] <= 5
     with pytest.raises(OnboardingError, match='writer_required'):
-        backend._target_call(value, 'group-relationship', candidate=candidate, group_request=packet)
+        backend._target_call(value, action, candidate=candidate, group_request=packet)
+    with pytest.raises(OnboardingError, match='writer_required'):
+        backend._target_call(value, 'group-relationship' if publication else 'group-publication',
+            candidate=candidate, group_request=packet, observation_timeout_seconds=5)
     assert len(calls) == 1
 
 

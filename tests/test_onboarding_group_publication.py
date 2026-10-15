@@ -1,0 +1,226 @@
+"""Owner publication routes use native SDK effects, preserving exact retries."""
+import copy
+import hashlib
+import os
+import time
+import uuid
+
+import pytest
+
+from clusterctl import being_seed
+from clusterctl.onboarding import OnboardingError, digest
+from clusterctl.onboarding_group_admission import publication_command, request_packet
+from clusterctl.onboarding_source import Source
+from clusterctl.onboarding_target import Target, document
+from tests import test_onboarding_group_authorities as group_fixtures
+from tests.test_onboarding_group_admission import closure, invitation
+
+group_source = group_fixtures.group_source
+
+
+def initial_publication(group_source, profile):
+    from daimon_matrix.messaging_config import read_publication
+    source, target, _peer, _peer_bundle, _old = group_source
+    base = source._load(signed=False)
+    specification, _ = read_publication(base, source.outputs / 'tribe/application')
+    specification.pop('client')
+    # This first-publication boundary uses the already genuine synthetic Root
+    # and its one active founder. Full new-member admission remains a separate
+    # integrated scenario; no new being or acceptance is fabricated here.
+    specification['authorities'] = [row for row in specification['authorities']
+        if row['manifest']['being_ref'] == target.document_bundle()['manifest']['being_ref']]
+    if profile == 'source':
+        owner = Source({**source.settings, 'outputs': str(source.outputs / 'new-group-owner')})
+        group = owner.outputs / 'tribe'
+        journal = owner.outputs / 'group-admission'
+    else:
+        owner = target
+        group = target.root / 'tribe'
+        journal = target.root / 'group-admission'
+    identifier = str(uuid.uuid4())
+    request = dict(operation_id=identifier, step='application', action='application',
+        params=dict(expected_application_sha256=None, specification=specification, additions=None,
+            admitted_being_refs=[], secret_sources={'route.key': str(source.outputs / 'route.key')}))
+    return owner, group, journal, request, base
+
+
+@pytest.mark.parametrize('profile', ['source', 'target'])
+def test_native_first_publication_signatures_and_selector_recover_exact_lost_replies(group_source, monkeypatch, profile):
+    from daimon_matrix import operator_messaging
+    from daimon_matrix.messaging_config import read_publication, verify_binding
+    source, target, *_ = group_source
+    owner, group, journal, request, base = initial_publication(group_source, profile)
+    identifier = request['operation_id']
+    native = {name: (source.root / name).read_bytes() for name in ('runtime.json', 'custody.json')}
+    prepare = operator_messaging.prepare
+
+    def lost_prepare(*args, **kwargs):
+        prepare(*args, **kwargs)
+        raise OSError('synthetic lost native prepare reply')
+
+    monkeypatch.setattr(operator_messaging, 'prepare', lost_prepare)
+    with pytest.raises(OSError, match='lost native prepare'):
+        owner.group_publication(request, authority_closure={})
+    path = journal / identifier / 'publications/application.json'
+    assert being_seed._read(path)['result'] is None
+    _document, metadata = read_publication(base, group / 'application')
+    client = {name: (metadata / name).read_bytes() for name in ('client.json', 'client.key')}
+    monkeypatch.setattr(operator_messaging, 'prepare',
+        lambda *args, **kwargs: pytest.fail('retry reminted an already published client'))
+    prepared = owner.group_publication(request, authority_closure={})
+    assert prepared['receiving_readiness'] == 'unobserved'
+    assert not {'capability_id', 'client', 'client_key', 'client_config'} & set(prepared)
+    assert owner.group_publication(request, authority_closure={}) == prepared
+    assert {name: (metadata / name).read_bytes() for name in client} == client
+    changed = copy.deepcopy(request)
+    changed['params']['specification']['tribe']['policy']['max_ttl_ms'] -= 1
+    with pytest.raises(OnboardingError, match='publication_intent_conflict'):
+        owner.group_publication(changed, authority_closure={})
+
+    destination = dict(bot_id=1, chat_id=-123, topic_id=None, representation='compact-text/v1')
+    disclosure = owner.group_publication(dict(operation_id=identifier, step='disclosure',
+        action='visibility-disclosure', params=dict(approved_destination=destination,
+            issued_at_ms=time.time_ns() // 1_000_000)), authority_closure={})['disclosure']
+    signing = dict(operation_id=identifier, step='accept-visibility', action='visibility-accept',
+                   params=dict(approved_destination=destination, disclosures=[disclosure]))
+    accepted = owner.group_publication(signing, authority_closure={})
+    binding = accepted['bindings'][0]['binding']
+    verify_binding(base, disclosure, binding)
+    assert binding['body']['being_ref'] == target.document_bundle()['manifest']['being_ref']
+    assert owner.group_publication(signing, authority_closure={}) == accepted
+
+    selection = dict(operation_id=identifier, step='select', action='selection',
+                     params=dict(expected_selection_sha256=None))
+    write = being_seed._write
+    def lost_selection(path, *args, **kwargs):
+        write(path, *args, **kwargs)
+        if path == group / 'selection.json':
+            raise OSError('synthetic lost selection reply')
+    monkeypatch.setattr(being_seed, '_write', lost_selection)
+    with pytest.raises(OSError, match='lost selection'):
+        owner.group_publication(selection, authority_closure={})
+    selected = (group / 'selection.json').read_bytes()
+    monkeypatch.setattr(being_seed, '_write', write)
+    result = owner.group_publication(selection, authority_closure={})
+    assert result['selection_sha256'] == digest(being_seed._read(group / 'selection.json'))
+    assert result['receiving_readiness'] == 'unobserved'
+    assert (group / 'selection.json').read_bytes() == selected
+    assert {name: (source.root / name).read_bytes() for name in native} == native
+    assert not (source.root / 'tribe.sock').exists()
+
+
+def test_pending_initial_publication_preserves_a_later_native_client_renewal(group_source, monkeypatch):
+    from daimon_matrix import operator_messaging
+    from daimon_matrix.messaging_config import config_digest, read_publication
+    owner, group, journal, request, base = initial_publication(group_source, 'source')
+    prepare = operator_messaging.prepare
+    def lost(*args, **kwargs):
+        prepare(*args, **kwargs)
+        raise OSError('synthetic lost first prepare reply')
+    monkeypatch.setattr(operator_messaging, 'prepare', lost)
+    with pytest.raises(OSError, match='first prepare'):
+        owner.group_publication(request, authority_closure={})
+    before, _ = read_publication(base, group / 'application')
+    with owner.writer():
+        operator_messaging.renew(base, group / 'application', expected_application_sha256=config_digest(before))
+    current, metadata = read_publication(base, group / 'application')
+    winner = (group / 'application/publication.json').read_bytes()
+    assert current['client'] != before['client'] and metadata != group / 'application'
+    assert {key: row for key, row in current.items() if key != 'client'} == request['params']['specification']
+    with pytest.raises(OnboardingError, match='publication_changed'):
+        owner.group_publication(request, authority_closure={})
+    assert (group / 'application/publication.json').read_bytes() == winner
+    path = journal / request['operation_id'] / 'publications/application.json'
+    assert being_seed._read(path)['result'] is None
+
+
+def test_native_additive_publication_recovers_its_sdk_predecessor_without_another_client(group_source, tmp_path, monkeypatch):
+    from daimon_matrix import operator_messaging
+    from daimon_matrix.messaging_config import read_publication
+    from daimon_matrix.relationships import MEMBERSHIP_ACCEPTANCE_SCHEMA
+    source, founder, _peer, peer_bundle, _old = group_source
+    owner, group, journal, first, base = initial_publication(group_source, 'source')
+    approved = closure(peer_bundle)
+    original = owner.group_publication(first, authority_closure=approved)
+    identifier = first['operation_id']
+    request = {**invitation(source, peer_bundle), 'operation_id': identifier}
+    invited = owner.group_relationship(request, offline=True, authority_closure=approved)['result']['event']
+    target = Target(tmp_path / 'candidate/guest', founder.plan,
+        document(tmp_path / 'candidate/custody' / digest(founder.plan) / 'genesis.json'))
+    foreign = closure(founder.document_bundle())
+    declaration = next(row for row in base.service.relationships.store.events()
+                       if row['kind'] == 'matrix/tribe-declaration')
+    for step, event in (('declaration', declaration), ('invitation', invited)):
+        assert target.group_relationship(dict(operation_id=identifier, step=step,
+            method='relationship.event.ingest', params=dict(event=event)),
+            authority_closure=foreign)['status'] == 'recorded'
+    acceptance = target.group_relationship(dict(operation_id=identifier, step='accept',
+        method='tribe.membership.accept', params=dict(payload=dict(schema=MEMBERSHIP_ACCEPTANCE_SCHEMA,
+            tribe_ref=request['params']['payload']['tribe_ref'], founder_epoch=0,
+            invitation_ref=dict(event_id=invited['event_id'], event_hash=invited['content_hash']),
+            invitee_being_ref=peer_bundle['manifest']['being_ref'], membership_sequence=0,
+            previous_membership_terminal_ref=None, accepted_at_ms=time.time_ns() // 1_000_000))),
+        authority_closure=foreign)['result']['event']
+    assert owner.group_relationship(dict(operation_id=identifier, step='accepted',
+        method='relationship.event.ingest', params=dict(event=acceptance)),
+        offline=True, authority_closure=approved)['status'] == 'recorded'
+    key = source.outputs / 'peer-route.key'
+    key.write_bytes(os.urandom(32))
+    key.chmod(0o600)
+    route = dict(provider_ref='peer', route_ref='peer', key_ref='peer',
+        endpoint='http://127.0.0.1:48676/dm-messaging/v1/message',
+        secret_file=key.name, secret_sha256=hashlib.sha256(key.read_bytes()).hexdigest())
+    peer = peer_bundle['manifest']['being_ref']
+    addition = dict(operation_id=identifier, step='add-member', action='application', params=dict(
+        expected_application_sha256=original['application_sha256'], specification=None,
+        admitted_being_refs=[peer], secret_sources={key.name: str(key)},
+        additions=dict(authorities=[approved[peer]['authority']], relationship_events=[invited, acceptance],
+            roster=[dict(being_ref=peer, embodiment_id=peer_bundle['local_origin']['embodiment_id'],
+                body_ref=peer_bundle['local_origin']['body_ref'], route=route)])))
+    _, previous_metadata = read_publication(base, group / 'application')
+    client = {name: (previous_metadata / name).read_bytes() for name in ('client.json', 'client.key')}
+    events = base.service.ledger.events()
+    admit = operator_messaging.admit_group_application
+    def lost(*args, **kwargs):
+        admit(*args, **kwargs)
+        raise OSError('synthetic lost additive publication reply')
+    monkeypatch.setattr(operator_messaging, 'admit_group_application', lost)
+    with pytest.raises(OSError, match='lost additive'):
+        owner.group_publication(addition, authority_closure=approved)
+    current, metadata = read_publication(base, group / 'application')
+    assert metadata != previous_metadata
+    publication = (group / 'application/publication.json').read_bytes()
+    assert being_seed._read(journal / identifier / 'publications/add-member.json')['result'] is None
+    monkeypatch.setattr(operator_messaging, 'admit_group_application', admit)
+    result = owner.group_publication(addition, authority_closure=approved)
+    assert result['application_sha256'] != original['application_sha256']
+    assert owner.group_publication(addition, authority_closure=approved) == result
+    assert (group / 'application/publication.json').read_bytes() == publication
+    assert (metadata / 'client.json').read_bytes() == client['client.json']
+    assert (group / 'application/client.key').read_bytes() == client['client.key']
+    assert base.service.ledger.events() == events
+    assert {row['manifest']['being_ref'] for row in current['authorities']} == {peer, founder.document_bundle()['manifest']['being_ref']}
+    disclosure = owner.group_publication(dict(operation_id=identifier, step='expanded-disclosure',
+        action='visibility-disclosure', params=dict(approved_destination=dict(bot_id=1,
+            chat_id=-123, topic_id=None, representation='compact-text/v1'),
+            issued_at_ms=time.time_ns() // 1_000_000)), authority_closure=approved)['disclosure']
+    assert set(disclosure['scope']['channels'][0]['participants']) == {peer, founder.document_bundle()['manifest']['being_ref']}
+
+
+def test_publication_packets_are_closed_and_cannot_use_online_relationship_route():
+    value = dict(operation_id=str(uuid.uuid4()), step='select', action='selection',
+                 params=dict(expected_selection_sha256=None))
+    assert publication_command(value) == value
+    assert request_packet(dict(command=value, offline=True, authority_closure={}))['command'] == value
+    with pytest.raises(OnboardingError, match='writer_required'):
+        request_packet(dict(command=value, offline=False, authority_closure={}))
+    for changed in ({**value, 'method': 'tribe.invite'},
+                    {**value, 'action': 'serve'},
+                    {**value, 'params': {**value['params'], 'directory': '/unapproved'}}):
+        with pytest.raises(OnboardingError, match='publication_command_required'):
+            publication_command(changed)
+    initial = {**value, 'action': 'application', 'params': dict(expected_application_sha256=None,
+        specification={'schema': 'dm.messaging.application/v1'}, additions=None,
+        admitted_being_refs=[], secret_sources={})}
+    with pytest.raises(OnboardingError, match='publication_command_required'):
+        publication_command(initial)

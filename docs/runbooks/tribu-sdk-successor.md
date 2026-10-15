@@ -692,6 +692,46 @@ route after the ordinary scoped lifecycle barrier. No acceptance time is backdat
 `recorded` means a native relationship event/result, not active membership,
 receiving readiness or completed admission; inspect the actual reducer afterwards.
 
+### Owner group publication routes
+
+`SourceGroupClient.group_publication` and `GuestGroupClient.group_publication`
+use the same qualified code, protected owner identity, finite deadline and
+bounded stdin routes as native relationship requests. Target names the closed
+action `group-publication`; Source discriminates its command inside the existing
+`--group-request` packet. Publication is always offline under the actual native
+writer and the already frozen complete Root/history context. A host never reads
+or round-trips the application's private client to construct a successor.
+
+Each command has exactly `operation_id`, `step`, `action` and `params`. Actions
+are limited to:
+
+- `application`: a genuine first group specification (V3 only), or additive
+  authorities/events/body registrations against an exact predecessor hash.
+  Existing clients, keys, stores and policy remain the SDK's responsibility.
+  On retry use the SDK-authenticated retained predecessor to reconstruct the
+  same additions. A lost first-prepare reply can reuse only the original initial
+  generation with no predecessor; a later native client renewal is a winner to
+  preserve and report, not proof of the original creation.
+- `visibility-disclosure`: derive the exact current signed-membership scope
+  from the owner's approved destination and retained issue time.
+- `visibility-accept`: validate a bounded batch of those proposals against the
+  owner's approved destination and sign only this being's bindings. Batch one
+  owner invocation, never one being's authority over all participants.
+- `visibility-publish`: use the SDK's fully accepted disclosure/bindings and
+  exact predecessor or approved first installation. Private credential-file
+  references and qualification remain local; no probe is started here.
+- `selection`: publish the same owner-signed group selector using its expected
+  predecessor and the operation's retained public histories.
+
+Retain the exact command/context digest in the same private operation before
+dispatch; persist the resulting public hashes or signatures afterwards. Retry
+rechecks the real SDK publication/CAS even if a result is cached. Preserve a
+later winner and leave an uncertain result unresolved. Do not mint another
+messaging client, duplicate governance or restore old publication bytes.
+Results report `receiving_readiness=unobserved`; these operations neither start
+the group listener nor enable delivery. The admission coordinator still owns
+the real old-sender barrier, full publication distribution and managed start.
+
 Cluster #227 still owns orchestrated application/visibility/selector publication,
 distinct before/after receiving cohorts, first managed start and integrated
 admission qualification. The prepared2144 update is a separate immutable candidate;

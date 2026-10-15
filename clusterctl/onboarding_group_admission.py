@@ -8,6 +8,7 @@ Offline callers must hold the native runtime writer for the entire invocation.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import re
 import time
@@ -18,6 +19,14 @@ from . import being_seed
 from .onboarding import OnboardingError, digest, private_directory
 
 METHODS = frozenset({'tribe.invite', 'tribe.membership.accept', 'relationship.event.ingest'})
+PUBLICATIONS = {
+    'application': {'expected_application_sha256', 'specification', 'additions',
+                    'admitted_being_refs', 'secret_sources'},
+    'visibility-disclosure': {'approved_destination', 'issued_at_ms'},
+    'visibility-accept': {'approved_destination', 'disclosures'},
+    'visibility-publish': {'disclosure', 'bindings', 'expected_installation_sha256', 'initial_configuration'},
+    'selection': {'expected_selection_sha256'},
+}
 
 
 def command(value: dict) -> dict:
@@ -38,8 +47,43 @@ def request_packet(value: dict) -> dict:
     if (not isinstance(value, dict) or set(value) != {'command', 'offline', 'authority_closure'}
             or type(value['offline']) is not bool or not isinstance(value['authority_closure'], dict)):
         raise OnboardingError('onboarding_group_relationship_command_required')
-    return dict(command=command(value['command']), offline=value['offline'],
+    publication = isinstance(value['command'], dict) and 'action' in value['command']
+    if publication and not value['offline']:
+        raise OnboardingError('onboarding_group_relationship_writer_required')
+    return dict(command=(publication_command if publication else command)(value['command']), offline=value['offline'],
                 authority_closure=copy.deepcopy(value['authority_closure']))
+
+
+def publication_command(value: dict) -> dict:
+    try:
+        if (not isinstance(value, dict) or set(value) != {'operation_id', 'step', 'action', 'params'}
+                or str(uuid.UUID(value['operation_id'])) != value['operation_id']
+                or not isinstance(value['step'], str)
+                or re.fullmatch(r'[a-z][a-z0-9-]{0,79}', value['step']) is None
+                or not isinstance(value['action'], str) or value['action'] not in PUBLICATIONS
+                or not isinstance(value['params'], dict)
+                or set(value['params']) != PUBLICATIONS[value['action']]):
+            raise ValueError
+        params = value['params']
+        if value['action'] == 'application':
+            from daimon_matrix.messaging_config import APPLICATION_SCHEMA_V3
+            first = params['expected_application_sha256'] is None
+            if (not isinstance(params['secret_sources'], dict)
+                    or not isinstance(params['admitted_being_refs'], list)
+                    or first and (not isinstance(params['specification'], dict) or params['additions'] is not None
+                        or params['admitted_being_refs'] != []
+                        or params['specification'].get('schema') != APPLICATION_SCHEMA_V3)
+                    or not first and (params['specification'] is not None or not isinstance(params['additions'], dict)
+                        or set(params['additions']) != {'authorities', 'relationship_events', 'roster'}
+                        or any(not isinstance(rows, list) for rows in params['additions'].values()))):
+                raise ValueError
+        if value['action'] == 'visibility-accept' and (not isinstance(params['disclosures'], list)
+                or not 1 <= len(params['disclosures']) <= 256):
+            raise ValueError
+        digest(value)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise OnboardingError('onboarding_group_publication_command_required') from None
+    return copy.deepcopy(value)
 
 
 def public_authorities(bundle: dict, closure: dict) -> dict:
@@ -78,7 +122,7 @@ def merge_authorities(current: dict, supplied: dict) -> dict:
 
 
 def owner_authorities(runtime_root: Path, group_root: Path, journal: Path,
-                      value: dict, closure: dict) -> dict:
+                      operation_id: str, closure: dict) -> dict:
     """Freeze the complete owner-approved closure before partial publication.
 
     The caller holds the native writer. First use validates the actual serving
@@ -87,13 +131,17 @@ def owner_authorities(runtime_root: Path, group_root: Path, journal: Path,
     Normal serving and observation keep their strict application pins.
     """
     from . import onboarding_peer
-    selected = command(value)
+    try:
+        if str(uuid.UUID(operation_id)) != operation_id:
+            raise ValueError
+    except (TypeError, ValueError, AttributeError):
+        raise OnboardingError('onboarding_group_owner_context_conflict') from None
     bundle = being_seed._read(runtime_root / 'runtime.json', limit=being_seed.MAX_SELECTION)
     identity = dict(runtime_root=str(runtime_root), group_root=str(group_root),
         runtime_bundle_sha256=digest(bundle),
-        ledger=check_retained_ledger(runtime_root, journal, selected))
+        ledger=_ledger_identity(runtime_root, bundle))
     approved = dict(schema='cluster-group-owner-context/v1',
-        operation_id=selected['operation_id'], identity=identity,
+        operation_id=operation_id, identity=identity,
         authority_closure=copy.deepcopy(closure))
     authorities = public_authorities(bundle, closure)
     # A self-consistent replacement chain cannot erase native known history.
@@ -101,7 +149,7 @@ def owner_authorities(runtime_root: Path, group_root: Path, journal: Path,
         {ref: authority.active for ref, authority in authorities.items()})
     private_directory(journal, create=True)
     with being_seed._locked(journal):
-        operation = private_directory(journal / selected['operation_id'], create=True)
+        operation = private_directory(journal / operation_id, create=True)
         context = private_directory(operation / 'owner', create=True)
         path = context / 'context.json'
         if path.exists():
@@ -149,17 +197,146 @@ def _sync(directory: Path) -> None:
 
 def check_retained_ledger(runtime_root: Path, journal: Path, value: dict) -> dict:
     """Check the original ledger before a loader could initialize missing state."""
-    from daimon_matrix.service import LoadedStoreBinding
     selected = command(value)
     bundle = being_seed._read(runtime_root / 'runtime.json', limit=being_seed.MAX_SELECTION)
-    name = bundle['ledger']
-    if not isinstance(name, str) or Path(name).name != name or name in {'', '.', '..'}:
-        raise OnboardingError('onboarding_group_relationship_ledger_changed')
-    identity = dict(filename=name, file_identity=list(LoadedStoreBinding.file_identity(runtime_root / name)))
+    identity = _ledger_identity(runtime_root, bundle)
     path = journal / selected['operation_id'] / (selected['step'] + '.json')
     if path.exists() and being_seed._read(path, limit=being_seed.MAX_SELECTION).get('identity', {}).get('ledger') != identity:
         raise OnboardingError('onboarding_group_relationship_ledger_changed')
     return identity
+
+
+def _ledger_identity(runtime_root: Path, bundle: dict) -> dict:
+    from daimon_matrix.service import LoadedStoreBinding
+    name = bundle['ledger']
+    if not isinstance(name, str) or Path(name).name != name or name in {'', '.', '..'}:
+        raise OnboardingError('onboarding_group_relationship_ledger_changed')
+    return dict(filename=name, file_identity=list(LoadedStoreBinding.file_identity(runtime_root / name)))
+
+
+def _publish_application(hosted, directory: Path, params: dict) -> dict:
+    from daimon_matrix import operator_messaging
+    from daimon_matrix.messaging_config import (
+        config_digest, load_application, read_document, read_publication, read_verified_publication, verify_binding,
+    )
+    expected = params['expected_application_sha256']
+    if expected is None:
+        published = directory.exists()
+        if not published:
+            operator_messaging.prepare(hosted, directory, params['specification'],
+                secret_sources=params['secret_sources'])
+        snapshot = read_verified_publication(hosted, directory)
+        publication = json.loads(snapshot.publication)
+        if (snapshot.metadata != directory or publication['body']['generation'] != '.'
+                or publication['body']['predecessor_sha256'] is not None):
+            raise OnboardingError('onboarding_group_publication_changed')
+        application = json.loads(snapshot.application)
+        specification = {key: value for key, value in application.items() if key != 'client'}
+        if specification != params['specification']:
+            raise OnboardingError('onboarding_group_publication_changed')
+        # prepare can publish before its reply/load-validation is lost. Reuse
+        # that exact client and finish native validation, never prepare over it.
+        if published:
+            load_application(hosted, directory)
+        _sync(directory.parent)
+    else:
+        previous, metadata = read_publication(hosted, directory)
+        if config_digest(previous) != expected:
+            # The SDK retains its authenticated predecessor with the selected
+            # successor. Derive the same additions from it on an exact retry.
+            previous = read_document(metadata / 'predecessor.json')
+            verify_binding(hosted, previous, read_document(metadata / 'predecessor-binding.json'))
+        if config_digest(previous) != expected:
+            raise OnboardingError('onboarding_group_publication_changed')
+        specification = copy.deepcopy(previous)
+        for key, rows in params['additions'].items():
+            specification[key].extend(rows)
+        operator_messaging.admit_group_application(hosted, directory, specification,
+            expected_application_sha256=expected, admitted_being_refs=params['admitted_being_refs'],
+            secret_sources=params['secret_sources'])
+        application, _ = read_publication(hosted, directory)
+    return dict(application_sha256=config_digest(application),
+                publication_sha256=config_digest(read_document(directory / 'publication.json')))
+
+
+def _publication_effect(hosted, group_root: Path, value: dict, closure: dict) -> dict:
+    from daimon_matrix import operator_messaging
+    from daimon_matrix.messaging_config import config_digest
+    params = value['params']
+    directory = group_root / 'application'
+    action = value['action']
+    if action == 'application':
+        return _publish_application(hosted, directory, params)
+    if action == 'visibility-disclosure':
+        disclosure = operator_messaging.group_visibility_disclosure(hosted, directory, **params)
+        return dict(disclosure=disclosure, disclosure_sha256=config_digest(disclosure))
+    if action == 'visibility-accept':
+        return dict(bindings=[dict(disclosure_sha256=config_digest(disclosure),
+            binding=operator_messaging.accept_group_visibility(hosted, directory, disclosure,
+                approved_destination=params['approved_destination'])) for disclosure in params['disclosures']])
+    if action == 'visibility-publish':
+        installation = private_directory(group_root / 'visibility', create=True) / 'installation.json'
+        result = operator_messaging.publish_group_visibility(hosted, directory, installation, **params)
+        return dict(installation_sha256=result['installation_sha256'])
+    from .onboarding_peer import publish_group_selection
+    result = publish_group_selection(hosted, group_root, operation_id=value['operation_id'],
+        expected_selection_sha256=params['expected_selection_sha256'],
+        authority_history={ref: row['history'] for ref, row in closure.items()})
+    return {key: result[key] for key in ('selection_sha256', 'application_sha256')}
+
+
+def publication_request(hosted, group_root: Path, journal: Path, value: dict, *,
+                        deadline_ns: int | None = None) -> dict:
+    """Resume one exact owner publication through supported Matrix operations.
+
+    The caller holds the runtime writer and has retained owner_authorities.
+    SDK publication preimages and CAS remain authoritative; cached results do
+    not bypass current publication checks or prove receiving readiness.
+    """
+    selected = publication_command(value)
+    def check_deadline():
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('onboarding_group_relationship_deadline_expired')
+    check_deadline()
+    private_directory(group_root, create=True)
+    with being_seed._locked(journal):
+        operation = private_directory(journal / selected['operation_id'])
+        context = being_seed._read(operation / 'owner/context.json', limit=being_seed.MAX_SELECTION)
+        bundle = being_seed._read(hosted.state_root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+        expected = dict(runtime_root=str(hosted.state_root), group_root=str(group_root),
+            runtime_bundle_sha256=digest(bundle), ledger=_ledger_identity(hosted.state_root, bundle))
+        if (context['identity'] != expected or hosted.service.origin != bundle['local_origin']
+                or hosted.service.runtime_identity != {key: bundle[key] for key in ('runtime_id', 'runtime_label')}):
+            raise OnboardingError('onboarding_group_owner_context_conflict')
+        for binding in hosted.service.loaded_stores.values():
+            binding.verify()
+        directory = private_directory(operation / 'publications', create=True)
+        path = directory / (selected['step'] + '.json')
+        intent = dict(schema='cluster-group-publication-operation/v1', command=selected,
+                      owner_context_sha256=digest(context))
+        if path.exists():
+            retained = being_seed._read(path, limit=being_seed.MAX_SELECTION)
+            if retained != {**intent, 'result': retained.get('result')}:
+                raise OnboardingError('onboarding_group_publication_intent_conflict')
+        else:
+            if (selected['action'] == 'application' and selected['params']['expected_application_sha256'] is None
+                    and (group_root / 'application').exists()):
+                raise OnboardingError('onboarding_group_publication_changed')
+            retained = {**intent, 'result': None}
+            being_seed._write(path, retained, limit=being_seed.MAX_SELECTION)
+        for parent in (directory, operation, journal, journal.parent):
+            _sync(parent)
+        check_deadline()
+        observed = _publication_effect(hosted, group_root, selected, context['authority_closure'])
+        result = dict(schema='cluster-group-publication-result/v1', operation_id=selected['operation_id'],
+            step=selected['step'], action=selected['action'], status='recorded',
+            receiving_readiness='unobserved', **observed)
+        if retained['result'] is not None and retained['result'] != result:
+            raise OnboardingError('onboarding_group_publication_changed')
+        if retained['result'] is None:
+            being_seed._write(path, {**retained, 'result': result}, limit=being_seed.MAX_SELECTION)
+        check_deadline()
+        return result
 
 
 def relationship_request(runtime_root: Path, journal: Path, value: dict, *,

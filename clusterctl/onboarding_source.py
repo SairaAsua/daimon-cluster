@@ -104,10 +104,24 @@ class Source:
         with self.writer():
             check_retained_ledger(self.root, journal, value)
             authorities = owner_authorities(self.root, self.outputs / 'tribe', journal,
-                                            value, authority_closure or {})
+                                            value['operation_id'], authority_closure or {})
             hosted = load_owner_runtime(self.root, self._reader, authorities=authorities,
                                         qualified_startup=self.qualified_startup)
             return relationship_request(self.root, journal, value, offline=hosted, deadline_ns=deadline_ns)
+
+    def group_publication(self, value: dict, *, authority_closure: dict,
+                          deadline_ns: int | None = None) -> dict:
+        from .onboarding_group_admission import (
+            load_owner_runtime, owner_authorities, publication_command, publication_request,
+        )
+        value = publication_command(value)
+        journal = self.outputs / 'group-admission'
+        group = self.outputs / 'tribe'
+        with self.writer():
+            authorities = owner_authorities(self.root, group, journal, value['operation_id'], authority_closure)
+            hosted = load_owner_runtime(self.root, self._reader, authorities=authorities,
+                                        qualified_startup=self.qualified_startup)
+            return publication_request(hosted, group, journal, value, deadline_ns=deadline_ns)
 
     def offer(self, plan_digest: str, peer: dict, endpoints: list[str]) -> dict:
         self.tool.verify_identity(peer)
@@ -505,8 +519,12 @@ def main(argv=None) -> int:
             else:
                 packet = being_seed._read(args.group_request, limit=being_seed.MAX_SELECTION)
             packet = request_packet(packet)
-            result = source.group_relationship(packet['command'], offline=packet['offline'],
-                authority_closure=packet['authority_closure'], deadline_ns=args.observation_deadline_ns)
+            if 'action' in packet['command']:
+                result = source.group_publication(packet['command'], authority_closure=packet['authority_closure'],
+                    deadline_ns=args.observation_deadline_ns)
+            else:
+                result = source.group_relationship(packet['command'], offline=packet['offline'],
+                    authority_closure=packet['authority_closure'], deadline_ns=args.observation_deadline_ns)
             print(json.dumps(result))
             return 0
         if lifecycle:
