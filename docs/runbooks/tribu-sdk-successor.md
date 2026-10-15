@@ -37,6 +37,16 @@ Do not extend expired frozen requests or turn a code-only update into a new
 identity/authority ceremony. Keep any expired fixture's history; a justified new
 synthetic fixture is separate evidence, never a successful retry of the old one.
 
+Select the observer's SDK explicitly before lifecycle effects. A development
+venv can still contain the production predecessor even when the service command
+selects a newer closed SDK. Run observation through the receiving owner's selected
+`runtime_command` (or its maintained Source/guest client), not an ambient import
+of `Source` or `LocalClient`. Verify the observer's closed startup context and
+required reader/client contract before dispatching a start or stop. An incompatible
+observer is a preparation refusal, not a transient startup condition to retry.
+Keep the actual observation and its imported SDK distinct from the serving boot
+proof; do not relabel a fixed fixture launcher as a production SDK defect.
+
 After a dispatched start, observe that same process and retained operation.
 A missing early socket, observation timeout or unavailable status is not proof
 that the service stopped, that adoption failed, or that a new start is permitted.
