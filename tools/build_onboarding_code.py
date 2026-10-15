@@ -19,7 +19,7 @@ from clusterctl.onboarding_input import relative
 HMK_COMMIT = "518f350889001b7f70ac3dd4f843a9e0c16d256c"
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ("__init__.py", "being_seed.py", "onboarding_transfer.py", "onboarding.py", "onboarding_input.py",
-           "onboarding_release.py", "onboarding_code_successor.py", "onboarding_peer.py", "onboarding_guest.py", "onboarding_mounts.py", "onboarding_sdk.py",
+           "onboarding_release.py", "onboarding_code_successor.py", "onboarding_owner_client.py", "onboarding_peer.py", "onboarding_guest.py", "onboarding_mounts.py", "onboarding_sdk.py",
            "onboarding_target.py", "onboarding_existing.py", "onboarding_credential.py", "owner_process.py", "onboarding_admission.py",
            "onboarding_runtime.py", "onboarding_views.py", "onboarding_service.py", "onboarding_ssh.py", "onboarding_provider.py", "onboarding_telegram.py", "admission.py", "admission_supervisor.py", "fences.py", "production_fences.py")
 
@@ -55,6 +55,14 @@ def capture_peer_tool(output: Path) -> None:
         raise OnboardingError('qualified_native_peer_tool_required')
 
 
+def capture_chat_tool(output: Path) -> None:
+    from clusterctl.onboarding_owner_client import TOOLING_INSTALLER_MODULE, TOOLING_INSTALLER_SHA256
+    target = output / 'clusterctl' / TOOLING_INSTALLER_MODULE
+    copy_code(ROOT / 'clusterctl' / TOOLING_INSTALLER_MODULE, target)
+    if hashlib.sha256(onboarding_release.regular(target, uid=os.geteuid())).hexdigest() != TOOLING_INSTALLER_SHA256:
+        raise OnboardingError('qualified_native_peer_tool_required')
+
+
 def build(checkout: Path, commons: Path, selected_profile: dict, output: Path, *, sdk: Path | None = None,
           telegram: Path | None = None) -> dict:
     selected_profile = onboarding_release.profile(selected_profile)
@@ -84,6 +92,7 @@ def build(checkout: Path, commons: Path, selected_profile: dict, output: Path, *
     for name in MODULES:
         copy_code(ROOT / "clusterctl" / name, output / "clusterctl" / name)
     capture_peer_tool(output)
+    capture_chat_tool(output)
     for path in sorted((ROOT / "support/being-seed-tools").rglob("*")):
         if path.is_file() and "__pycache__" not in path.parts:
             copy_code(path, output / path.relative_to(ROOT))

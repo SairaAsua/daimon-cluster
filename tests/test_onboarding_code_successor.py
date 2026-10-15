@@ -50,6 +50,25 @@ def test_runtime_successor_preserves_original_code_and_context_bytes(tmp_path):
     assert (output / 'clusterctl/onboarding_target.py').read_bytes() == b'Updated runtime.'
 
 
+def test_owner_successor_captures_current_tooling_inside_runtime_boundary(tmp_path):
+    import hashlib
+    from pathlib import Path
+    from clusterctl.onboarding_owner_client import TOOLING_INSTALLER_MODULE, TOOLING_INSTALLER_SHA256
+    base, original, source, _ = fixture(tmp_path)
+    (source / 'onboarding_owner_client.py').write_text('Selected owner runtime module.')
+    output = tmp_path / 'successor'
+    result = build(base, original, source, ('onboarding_owner_client.py',), output)
+    assert verify(output, result['runtime_digest'], base, original, uid=os.geteuid())
+    captured = output / 'clusterctl' / TOOLING_INSTALLER_MODULE
+    assert hashlib.sha256(captured.read_bytes()).hexdigest() == TOOLING_INSTALLER_SHA256
+    assert (output / 'inheritance.md').read_bytes() == (base / 'inheritance.md').read_bytes()
+    assert not (base / 'clusterctl' / TOOLING_INSTALLER_MODULE).exists()
+    root = Path(__file__).resolve().parents[1]
+    provenance = json.loads((root / 'support/matrix-agent-chat/TOOLING-PROVENANCE.json').read_bytes())
+    assert provenance['sha256'] == TOOLING_INSTALLER_SHA256
+    assert provenance['captured_module'] == 'clusterctl/' + TOOLING_INSTALLER_MODULE
+
+
 def telegram_fixture(tmp_path, monkeypatch):
     from clusterctl import onboarding_telegram as telegram
     import hashlib
@@ -410,25 +429,30 @@ def test_sdk_successor_rejects_resealed_context_or_marker_changes(tmp_path, asse
         verify(output, replacement, base, original, uid=os.geteuid())
 
 
-def test_target_sdk_observation_and_retry_do_not_load_body_custody(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize('qualified', [False, True])
+def test_target_sdk_observation_and_retry_do_not_load_body_custody(tmp_path, monkeypatch, capsys, qualified):
     from clusterctl import onboarding_code_successor, onboarding_sdk, onboarding_target
     from tests.test_onboarding import plan
     base, original, source, _, sdk, home = sdk_generations(tmp_path)
     output = tmp_path / 'sdk-successor'
-    result = build(base, original, source, ('onboarding_target.py',), output, sdk=sdk)
+    parameters = dict(matrix_commit=onboarding_sdk.MATRIX_COMMIT,
+        matrix_wheel_sha256=onboarding_sdk.wheel(next((sdk / 'wheels').iterdir()), uid=os.geteuid())['sha256']) if qualified else {}
+    result = build(base, original, source, ('onboarding_target.py',), output, sdk=sdk, **parameters)
     plan_path = tmp_path / 'plan.json'
     being_seed._write(plan_path, {**plan(), 'release_digest': original})
     selection = onboarding_code_successor.selection
-    install, observe = onboarding_sdk.install, onboarding_sdk.observe
+    install, observe, imports = onboarding_sdk.install, onboarding_sdk.observe, onboarding_sdk.runtime_imports
     monkeypatch.setattr(onboarding_code_successor, 'selection',
         lambda *a, **kw: selection(*a, uid=os.geteuid()))
     parameters = onboarding_code_successor.sdk_parameters
     monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters',
         lambda code, **kw: parameters(code, uid=os.geteuid()))
     monkeypatch.setattr(onboarding_sdk, 'install',
-        lambda *a, **kw: install(*a, code_uid=os.geteuid()))
+        lambda *a, **kw: install(*a, code_uid=os.geteuid(), **kw))
     monkeypatch.setattr(onboarding_sdk, 'observe',
-        lambda *a, **kw: observe(*a, code_uid=os.geteuid()))
+        lambda *a, **kw: observe(*a, code_uid=os.geteuid(), **kw))
+    monkeypatch.setattr(onboarding_sdk, 'runtime_imports',
+        lambda *a, **kw: imports(*a, code_uid=os.geteuid(), **kw))
     def no_custody(*args, **kwargs):
         raise AssertionError('dependency preparation must not load a Body')
     monkeypatch.setattr(onboarding_target, 'Target', no_custody)
@@ -441,6 +465,9 @@ def test_target_sdk_observation_and_retry_do_not_load_body_custody(tmp_path, mon
     for action in ['sdk-prepare', 'sdk-observe', 'sdk-prepare']:
         assert onboarding_target.main([action, *common]) == 0
         assert json.loads(capsys.readouterr().out)['ready'] is True
+        if qualified:
+            receipts = list(home.rglob('runtime-imports.json'))
+            assert len(receipts) == 1 and (receipts[0].parent / 'runtime-imports').is_dir()
     assert not list(home.rglob('custody.json'))
 
 

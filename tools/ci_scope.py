@@ -7,13 +7,14 @@ contracts. Workflow-only changes exercise the workflow and selector themselves.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import subprocess
 from pathlib import Path
 
-CI_FILES = {'.github/workflows/tests.yml', 'README.md', 'tools/ci_scope.py',
+CI_FILES = {'.github/workflows/tests.yml', 'README.md', 'tools/ci_scope.py', 'tools/ci_guest_owner.py',
             'tests/test_ci_scope.py', 'tests/test_ci_workflow.py'}
 # Closed documentation pages with no generated/runtime consumer. Unknown docs stay full.
 RUNBOOK_DOCS = {'docs/runbooks/tribu-sdk-successor.md', 'docs/design/shared-home-styles.md',
@@ -117,9 +118,12 @@ PEER_TOOL_FILES = {'clusterctl/onboarding_peer.py', 'clusterctl/onboarding_peer_
 PEER_TOOL_TESTS = (*PEER_TESTS, 'tests/test_onboarding_peer.py',
     'tests/test_onboarding_local_body.py', 'tests/test_onboarding_code_successor.py')
 OWNER_CLIENT_FILES = {'clusterctl/onboarding_owner_client.py', 'clusterctl/onboarding_host.py',
+                      'clusterctl/onboarding_chat_native.py', 'tools/build_onboarding_code.py',
+                      'support/matrix-agent-chat/TOOLING-PROVENANCE.json',
                       'tests/test_onboarding_owner_client.py', 'tools/check_rc_types.py',
                       'support/matrix-agent-chat/install_agent_chat.py', 'support/matrix-agent-chat/PROVENANCE.json'}
 OWNER_CLIENT_TESTS = (*WELCOME_TESTS, *PEER_TESTS, 'tests/test_onboarding_owner_client.py',
+                      'tests/test_onboarding_release.py',
                       'tests/test_onboarding_target.py', 'tests/test_onboarding_runtime.py',
                       'tests/test_onboarding_sdk.py', 'tests/test_onboarding_peer.py')
 HOSTED_CHECK_FILES = PORTAL_FILES | {'clusterctl/onboarding_acceptance.py',
@@ -189,6 +193,7 @@ INPUT_CACHE_TESTS = ('tests/test_onboarding_input.py', 'tests/test_onboarding_ho
     'tests/test_onboarding.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
 
 SDK_FILES = {'requirements-weave.txt', 'RESUME.md', 'clusterctl/onboarding_sdk.py',
+    'clusterctl/onboarding_chat_native.py', 'support/matrix-agent-chat/TOOLING-PROVENANCE.json',
     'clusterctl/matrix_host.py', 'clusterctl/onboarding_peer.py',
     'clusterctl/onboarding_peer_native.py', 'clusterctl/onboarding_owner_client.py',
     'support/matrix-onboarding/PROVENANCE.json',
@@ -290,6 +295,38 @@ GROUP_TESTS = ('tests/test_onboarding_group.py', 'tests/test_onboarding_acceptan
 RECEIVING_RUNTIME_FILES = {'clusterctl/onboarding_peer.py', 'clusterctl/onboarding_runtime.py',
     'tests/test_onboarding_peer.py', 'tests/test_onboarding_runtime.py'}
 
+LOADED_STARTUP_FILES = {'RESUME.md', 'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_target.py',
+    'clusterctl/onboarding_code_successor.py',
+    'clusterctl/onboarding_service.py', 'tests/test_source_bootstrap.py',
+    'clusterctl/onboarding_runtime.py', 'clusterctl/onboarding_source.py', 'clusterctl/owner_process.py',
+    'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_cohort_control.py',
+    'tests/test_receiving_host_selection.py', 'tests/test_receiving_update_journal.py',
+    'tests/test_onboarding_sdk.py', 'tests/test_onboarding_target.py', 'tests/test_onboarding_runtime.py',
+    'tests/test_onboarding_code_successor.py',
+    'tests/test_onboarding_source.py', 'tests/test_onboarding_group_authorities.py',
+    'docs/design/onboarding-jobs.md', 'tests/test_receiving_process_observation.py',
+    'tests/test_source_owner_adapter.py',
+    'tests/test_receiving_update_preflight.py', 'tests/test_receiving_update_selection.py',
+    'tests/test_onboarding_service.py', 'clusterctl/onboarding_peer.py',
+    'tests/test_onboarding_peer.py', 'tests/test_guest_service_bootstrap.py', 'tests/test_guest_owner_bootstrap.py',
+    'tests/test_guest_bootstrap_controller.py', 'docs/runbooks/tribu-sdk-successor.md',
+    'tests/fixtures/receiving_reader/canonical.py',
+    'tests/fixtures/receiving_reader/release_compatibility.py',
+    'tests/fixtures/receiving_reader/PROVENANCE.json'}
+LOADED_STARTUP_TESTS = ('tests/test_onboarding_sdk.py', 'tests/test_onboarding_code_successor.py',
+    'tests/test_source_bootstrap.py',
+    'tests/test_receiving_cohort_control.py', 'tests/test_receiving_host_selection.py',
+    'tests/test_receiving_update_journal.py',
+    'tests/test_receiving_update_selection.py', 'tests/test_receiving_update_preflight.py',
+    'tests/test_onboarding_source.py', 'tests/test_onboarding_group_authorities.py',
+    'tests/test_onboarding_runtime.py', 'tests/test_onboarding_service.py',
+    'tests/test_source_owner_adapter.py',
+    'tests/test_receiving_process_observation.py', 'tests/test_onboarding_group.py',
+    'tests/test_onboarding_target.py', 'tests/test_onboarding_admission.py',
+    'tests/test_onboarding_peer.py', 'tests/test_guest_service_bootstrap.py', 'tests/test_guest_owner_bootstrap.py',
+    'tests/test_guest_bootstrap_controller.py',
+    'tests/test_matrix_host_process.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
+
 
 HOME_FILES = {'clusterctl/homes/__init__.py', 'clusterctl/homes/policy.py',
     'clusterctl/homes/launcher.py', 'clusterctl/homes/launcher/index.html',
@@ -341,7 +378,114 @@ HOME_WORKER_TESTS = ('tests/test_home_worker_successor.py', 'tests/test_onboardi
     'tests/test_home_gateway.py', 'tests/test_home_access.py')
 
 
-def select(changed: list[str], root: Path) -> tuple[str, list[str]]:
+def host_observation_only(root: Path, base: str) -> bool:
+    """Recognize exact qualified host receiving changes, never a filename.
+
+    A host filename alone cannot narrow provisioning/access qualification.
+    The initial one-literal metadata fix is compared against its actual base.
+    The candidate/deadline increment is an exact whole-file hash pair: all
+    default paths are retained and qualified by the host/peer regression set.
+    Any other byte change keeps its broader profile, including future edits.
+    """
+    if not re.fullmatch(r'[0-9a-f]{40}', base):
+        return False
+    name='clusterctl/onboarding_host.py'
+    before=subprocess.run(['git','show',base+':'+name],cwd=root,capture_output=True,check=False)
+    if before.returncode:
+        return False
+    try:
+        original=before.stdout
+        current=(root/name).read_bytes()
+    except OSError:
+        return False
+    old=b'set(value) != {"phase", "request", "receipt"}'
+    new=b"set(value) - {'group', 'receiving_controller'} != {\"phase\", \"request\", \"receipt\"}"
+    if original.count(old)==1 and original.replace(old,new,1)==current:
+        return True
+    return (hashlib.sha256(original).hexdigest() in {
+        '742fb3e396d4619369152cde4c3811c22df18504e504d7012e99c99772040c59',
+        '8b0a728465958acb8da5ae0d212fd69c3b548a07f9f9d677e66ec3146b3780d2'}
+        and hashlib.sha256(current).hexdigest() in {
+        '0ec24cc2096f5b88b498d1e49578810404c2248b0a8309d027c30d28d5f2daee',
+        'b33a3bdb9929088a7eb6e9226e871131195830ba1b4b5a4419adcbe6afcb8397',
+        'c065e236c07f0af2a2b580be88730ad06b204e2e23b827449759184ec52e4aa6',
+        '45bb1547863ee1dfcbcdeac970a7a217a792e8755a52df9b63ffed152819c32c'})
+
+
+
+# Exact reviewed shared-helper deltas preserve unrelated behavior. Unknown bytes
+# retain full qualification; a filename or a passing narrower run is not enough.
+RECEIVING_SUPPORT_HASHES = {
+    'clusterctl/being_seed.py': (
+        '9abf29b0948a0bafc3d9ba89e761a0993f45d8b6e9d9a84749abed120356fc14',
+        'f3086cd0f148d9b89b7ff6c36d39d7ecd08d57d0f5af4495a29126649107b9f4'),
+    'clusterctl/onboarding.py': (
+        '22502def8f11549d6b0be262e131dadd95c2de9d897e295e2cfe5eb40e4b1e99',
+        'ba6c5eab4ea1c4397dff2e8cec2e47480800d142a8c2846db0d7c7a23a3bdc91'),
+    'tests/integration/test_recovery_rebirth_containers.py': (
+        'ea7100770ed295650a4c0a9ebf614e6df30d3d108fd91086de162b6e318fe282',
+        '85e2328f47736372ef2d71067dd390d240978a592aaf5fdca42f9ff33fdcab43'),
+}
+
+
+def receiving_support_only(root: Path, base: str, names: set[str]) -> bool:
+    if not re.fullmatch(r'[0-9a-f]{40}', base):
+        return False
+    for name in names:
+        before = subprocess.run(['git','show',base+':'+name],cwd=root,capture_output=True,check=False)
+        try:
+            actual = (hashlib.sha256(before.stdout).hexdigest(),
+                      hashlib.sha256((root/name).read_bytes()).hexdigest())
+        except OSError:
+            return False
+        if before.returncode or actual != RECEIVING_SUPPORT_HASHES[name]:
+            return False
+    return True
+
+
+def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
+    pins = {'requirements-weave.txt', 'clusterctl/onboarding_sdk.py', 'clusterctl/matrix_host.py'}
+    detached_pins = pins - {'clusterctl/onboarding_sdk.py'}
+    metadata = {'support/matrix-onboarding/PROVENANCE.json'} & set(changed)
+    if (pins < set(changed) and sdk_pin_files_only(root, base, detached_pins)
+            and (not metadata or sdk_pin_metadata_only(root, base))):
+        remaining = sorted(set(changed) - detached_pins - metadata)
+        profile, tests = select(remaining, root, base=base)
+        if profile == 'peer' and all((root / path).is_file() for path in SDK_TESTS):
+            # Compose existing receiving coverage with the full SDK contract.
+            # Detached files were proven literal-only. Keep SDK source changes
+            # in receiving qualification; unknown/sensitive edits stay broader.
+            return 'sdk', list(dict.fromkeys((*tests, *SDK_TESTS)))
+    host_files={'clusterctl/onboarding_host.py','tests/test_onboarding_host.py'}
+    # A receiving release also installs its native owner attachment. Compose
+    # the two existing coverage sets instead of falling through to unrelated
+    # physical/archive/model qualification for this known combined delta.
+    owner_files = OWNER_CLIENT_FILES - host_files
+    owner_delta = bool(set(changed) & (owner_files - {'tools/check_rc_types.py'}))
+    loaded_files = LOADED_STARTUP_FILES | owner_files
+    loaded_tests = (tuple(dict.fromkeys((*LOADED_STARTUP_TESTS, *OWNER_CLIENT_TESTS)))
+                    if owner_delta else LOADED_STARTUP_TESTS)
+    host_tests=(*loaded_tests,'tests/test_onboarding_host.py',
+                'tests/test_onboarding_host_ownership.py','tests/test_onboarding_managed.py',
+                'tests/test_onboarding_peer_host.py')
+    support = set(changed) & RECEIVING_SUPPORT_HASHES.keys()
+    support_tests = (*host_tests, 'tests/test_being_seed.py')
+    if (support and set(changed) <= loaded_files | CI_FILES | host_files
+            | RECEIVING_SUPPORT_HASHES.keys() | {'tests/test_being_seed.py'}
+            and all((root/path).is_file() for path in support_tests)
+            and receiving_support_only(root, base, support)
+            and (not (set(changed) & host_files)
+                 or host_files <= set(changed) and host_observation_only(root, base))):
+        return 'peer', list(dict.fromkeys(support_tests))
+    if (host_files <= set(changed) and set(changed) <= loaded_files | CI_FILES | host_files
+            and all((root/path).is_file() for path in host_tests) and host_observation_only(root,base)):
+        return 'peer',list(dict.fromkeys(host_tests))
+    if ({'tests/test_receiving_process_observation.py', 'tests/test_source_bootstrap.py'} & set(changed)
+            and set(changed) <= loaded_files | CI_FILES
+            and all((root / path).is_file() for path in loaded_tests)):
+        # Actual same-connection/process startup, retained SDK and service paths.
+        # No changed archive, physical recovery, authority or native model code.
+        return 'peer', list(loaded_tests)
     if not changed:
         return 'full', ['tests']
     if set(changed) <= RUNBOOK_DOCS:
@@ -571,6 +715,14 @@ def sdk_pin_only(root: Path, base: str, changed: list[str]) -> bool:
                                  'tests/test_clusterd.py'}
     if not pins <= set(changed) or not set(changed) <= allowed:
         return False
+    return (sdk_pin_files_only(root, base, pins)
+            and all((root / path.split('::', 1)[0]).is_file() for path in SDK_PIN_TESTS))
+
+
+def sdk_pin_files_only(root: Path, base: str, pins: set[str]) -> bool:
+    """Prove only the selected detached files contain pin-literal changes."""
+    if not pins or not pins <= {'requirements-weave.txt', 'clusterctl/onboarding_sdk.py', 'clusterctl/matrix_host.py'}:
+        return False
     for name in sorted(pins):
         before = subprocess.run(['git', 'show', base + ':' + name], cwd=root,
                                  capture_output=True, check=False)
@@ -589,7 +741,24 @@ def sdk_pin_only(root: Path, base: str, changed: list[str]) -> bool:
         new, new_count = re.subn(pattern, r'\1<PIN>', current)
         if old_count != 1 or new_count != 1 or old != new:
             return False
-    return all((root / path.split('::', 1)[0]).is_file() for path in SDK_PIN_TESTS)
+    return True
+
+
+def sdk_pin_metadata_only(root: Path, base: str) -> bool:
+    """Carry the same vendored tool while updating its installed-SDK record."""
+    name = 'support/matrix-onboarding/PROVENANCE.json'
+    before = subprocess.run(['git', 'show', base + ':' + name], cwd=root, capture_output=True, check=False)
+    try:
+        original = json.loads(before.stdout)
+        current = json.loads((root / name).read_bytes())
+        selected = re.search(r'(?m)^MATRIX_CONTRACT_COMMIT = [\"\x27]([0-9a-f]{40})[\"\x27]$',
+            (root / 'clusterctl/matrix_host.py').read_text())
+        return (before.returncode == 0 and selected is not None
+                and current.get('installed_sdk_commit') == selected.group(1)
+                and 'installed_sdk_commit' in original
+                and current == {**original, 'installed_sdk_commit': current['installed_sdk_commit']})
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
 
 
 def scope_base(root: Path, base: str, head: str) -> str:
@@ -623,7 +792,7 @@ def main(argv=None):
                                 cwd=root, capture_output=True, check=False)
         if result.returncode == 0:
             changed = result.stdout.decode().rstrip('\0').split('\0') if result.stdout else []
-    profile, tests = select(changed, root)
+    profile, tests = select(changed, root, base=base)
     if profile == 'sdk' and sdk_pin_only(root, base, changed):
         # Retain prior unchanged authority/custody/receiving qualification.
         tests = list(SDK_PIN_TESTS)

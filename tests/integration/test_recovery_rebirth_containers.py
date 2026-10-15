@@ -13,9 +13,11 @@ from pathlib import Path
 
 import pytest
 
+from clusterctl.matrix_host import MATRIX_CONTRACT_COMMIT
+
 
 ROOT = Path(__file__).resolve().parents[2]
-MATRIX_COMMIT = "4c64beac8fce816c2bd15abbcff005e842ff7a0c"
+MATRIX_COMMIT = MATRIX_CONTRACT_COMMIT
 pytestmark = pytest.mark.skipif(
     os.environ.get("DAIMON_RUN_DOCKER_RECOVERY_TESTS") != "1"
     or not os.environ.get("DAIMON_MATRIX_SOURCE"),

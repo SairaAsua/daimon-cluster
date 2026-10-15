@@ -11,7 +11,7 @@ import pytest
 
 from clusterctl import being_seed, onboarding_code_successor, onboarding_release, onboarding_sdk
 from clusterctl.onboarding import OnboardingError
-from clusterctl.onboarding_service import UNIT, entrypoint, install, select_entrypoint, selection_lock
+from clusterctl.onboarding_service import UNIT, code_command, entrypoint, install, select_entrypoint, selection_lock
 from tests.test_onboarding_code_successor import sdk_generations
 from tests.test_receiving_update_preflight import fixture as candidate_fixture, REVISION
 
@@ -94,16 +94,22 @@ def test_target_launcher_selects_qualified_sdk_before_body_or_native_reexec(tmp_
     def prepare(home_arg, code_arg, fingerprint, **kwargs):
         calls.append((home_arg, code_arg, fingerprint, kwargs))
         return home / 'prepared-venv'
+    def prepare_imports(venv, code, **kwargs):
+        assert calls == [(home, output, result['runtime_digest'], selected_parameters)]
+        assert (venv, code, kwargs) == (home / 'prepared-venv', output, selected_parameters)
+        calls.append('closed-imports-prepared')
+        return home / 'closed-imports'
     def no_body(*a, **k):
         pytest.fail('SDK preparation loaded private native state')
     monkeypatch.setattr(onboarding_sdk, 'install', prepare)
+    monkeypatch.setattr(onboarding_sdk, 'runtime_imports', prepare_imports)
     monkeypatch.setattr(onboarding_target, 'Target', no_body)
     path = tmp_path / 'plan.json'
     being_seed._write(path, {**plan(), 'release_digest': original})
     assert onboarding_target.main(['sdk-prepare', '--home', str(home), '--code', str(base),
         '--runtime-code', str(output), '--runtime-digest', result['runtime_digest'],
         '--plan', str(path), '--genesis', str(tmp_path / 'absent-genesis.json')]) == 0
-    assert calls == [(home, output, result['runtime_digest'], selected_parameters)]
+    assert calls == [(home, output, result['runtime_digest'], selected_parameters), 'closed-imports-prepared']
     assert json.loads(capsys.readouterr().out) == dict(ready=True, matrix_commit=REVISION)
     assert manifest['artifacts']['matrix_sdk'] == selected_parameters['matrix_wheel_sha256']
 
@@ -164,7 +170,32 @@ def test_stale_selector_preserves_newer_selection_and_retained_history(tmp_path)
     assert unit.read_bytes() == entrypoint(original, newer_argv)
 
 
-@pytest.mark.parametrize('argv', [[], ['/new/loader', 'bad\nExecStart=other'], ['/new/loader', 'bad\0'], ['relative']])
+@pytest.mark.parametrize('kind', ['qualified-sdk', 'stdlib-bootstrap', 'directive-looking-argument'])
+def test_multiline_arguments_remain_data_in_one_selected_unit_line(tmp_path, kind):
+    unit, original, checksum, _ = unit_fixture(tmp_path)
+    if kind == 'qualified-sdk':
+        argv = onboarding_sdk.runtime_command(Path('/approved/sdk/venv'), Path('/approved/sdk/runtime-imports'),
+            Path('/approved/code'), 'clusterctl.onboarding_source', ['--config', '/approved/source.json'])
+    elif kind == 'stdlib-bootstrap':
+        argv = code_command(Path('/approved/python'), Path('/approved/code'),
+            'clusterctl.onboarding_source', ['--config', '/approved/source.json'])
+    else:
+        argv = ['/approved/loader', 'argument\nExecStart=/another/loader\rEnvironment=UNEXPECTED=yes']
+    assert any('\n' in arg for arg in argv)
+    select_entrypoint(unit, argv, previous_sha256=checksum)
+    lines = unit.read_bytes().splitlines()
+    assert [line for line in lines if not line.startswith(b'ExecStart=')] == [
+        line for line in original.splitlines() if not line.startswith(b'ExecStart=')]
+    encoded = next(line[len(b'ExecStart='):] for line in lines if line.startswith(b'ExecStart=')).decode()
+    decoder, decoded = json.JSONDecoder(), []
+    while encoded:
+        value, end = decoder.raw_decode(encoded)
+        decoded.append(value)
+        encoded = encoded[end:].lstrip()
+    assert decoded == argv
+
+
+@pytest.mark.parametrize('argv', [[], ['/new/loader', 'bad\0'], ['relative']])
 def test_invalid_entrypoint_cannot_replace_or_execute_anything(tmp_path, argv):
     unit, original, checksum, _ = unit_fixture(tmp_path)
     with pytest.raises(OnboardingError):

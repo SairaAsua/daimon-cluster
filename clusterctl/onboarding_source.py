@@ -1,4 +1,4 @@
-"""Owner-local native peer ceremony and hosting with retained native visibility.
+"""Owner-local Source group hosting, observation and retained directed repair.
 
 The caller coordinates the existing daemon lifecycle. These operations acquire
 its real writer lock, use only existing Body custody, never read an inbox, and
@@ -17,13 +17,14 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import being_seed, onboarding_peer
-from .onboarding import OnboardingError, private_directory
+from . import being_seed, onboarding_peer, onboarding_release
+from .onboarding import OnboardingError, digest, private_directory
 from .onboarding_views import serve_views
 
 
 class Source:
-    def __init__(self, settings: dict, *, code: Path | None = None, code_uid: int = 0):
+    def __init__(self, settings: dict, *, code: Path | None = None, code_uid: int = 0,
+                 code_digest: str | None = None, qualified_startup: dict | None = None):
         if (not isinstance(settings, dict) or set(settings) != {'schema', 'runtime_root', 'password_file',
                 'native_visibility', 'outputs', 'applications'} or settings['schema'] != 'cluster-onboarding-source/v1'
                 or any(not isinstance(settings[key], str) or not Path(settings[key]).is_absolute()
@@ -38,7 +39,17 @@ class Source:
         self.visibility = Path(settings['native_visibility'])
         self.code = code or Path(__file__).resolve().parents[1]
         self.code_uid = code_uid
-        self.tool = onboarding_peer.native(self.code, uid=code_uid)
+        self.code_digest = code_digest
+        self.qualified_startup = qualified_startup
+        self._tool = None
+
+    @property
+    def tool(self):
+        # Group serving does not run the archived two-party ceremony. Preserve
+        # that ceremony's exact SDK/tool guards when it is actually requested.
+        if self._tool is None:
+            self._tool = onboarding_peer.native(self.code, uid=self.code_uid)
+        return self._tool
 
     def _reader(self):
         from daimon_matrix.messaging_config import protected_read
@@ -50,7 +61,13 @@ class Source:
             return time.time_ns() // 1_000_000
         options = ({'egress_factory': daemon._visibility_factory(self.visibility, clock=clock)} if signed else
                    {'egress': native_egress.closed_visibility(clock=clock, catalog_mode='migrate')})
-        return runtime.load_runtime(self.root, 'runtime.json', self._reader, clock=clock, **options)
+        bundle = being_seed._read(self.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+        authorities = onboarding_peer.approved_group_authorities(self.root, self.outputs / 'tribe', bundle)
+        if authorities:
+            options['relationship_authorities'] = authorities
+        return runtime.load_runtime(self.root, 'runtime.json', self._reader, clock=clock,
+            **({} if self.qualified_startup is None else {'qualified_startup': self.qualified_startup}),
+            **options)
 
     @contextmanager
     def writer(self):
@@ -158,9 +175,23 @@ class Source:
         raw = regular(original, uid=os.geteuid())
         if hashlib.sha256(raw).hexdigest() != original_sha256:
             raise OnboardingError('existing_onboarding_source_service_preserved')
-        launcher = ('import sys;sys.path.insert(0,sys.argv.pop(1));'
-                    'from clusterctl.onboarding_source import main;raise SystemExit(main())')
-        argv = [str(python), '-B', '-I', '-c', launcher, str(self.code), '--config', str(config)]
+        from . import onboarding_code_successor, onboarding_sdk
+        parameters = onboarding_code_successor.sdk_parameters(self.code, uid=self.code_uid)
+        if parameters:
+            if self.code_digest is None:
+                raise OnboardingError('qualified_onboarding_source_runtime_required')
+            onboarding_release.verify(self.code, self.code_digest, uid=self.code_uid)
+            venv = python.parent.parent
+            imports = onboarding_sdk.runtime_imports(venv, self.code,
+                code_uid=self.code_uid, **parameters)
+            command = onboarding_sdk.runtime_command(venv, imports, self.code,
+                'clusterctl.onboarding_source', ['--config', str(config),
+                                               '--code-digest', self.code_digest])
+        else:
+            launcher = ('import sys;sys.path.insert(0,sys.argv.pop(1));'
+                        'from clusterctl.onboarding_source import main;raise SystemExit(main())')
+            command = [str(python), '-B', '-I', '-c', launcher, str(self.code), '--config', str(config)]
+        argv = command
         def selection(arguments):
             encoded = ' '.join(json.dumps(arg.replace('%', '%%').replace('$', '$$')) for arg in arguments)
             return b'\n'.join(('ExecStart=' + encoded).encode() if line.startswith(b'ExecStart=') else line
@@ -201,15 +232,282 @@ class Source:
         with self.writer():
             serve_views(self.views(), stop, ready_descriptor=ready_descriptor)
 
+    def observe(self, *, require_loaded: bool = False, deadline_ns: int | None = None) -> dict:
+        """Authenticate actual selected listeners without loading another runtime.
+
+        A receiving controller must request loaded evidence explicitly. Legacy
+        callers retain their old probe, clearly outside receiving qualification.
+        Neither branch claims admission, delivery or positive reader selection.
+        """
+        from contextlib import ExitStack
+        import hashlib
+        from types import SimpleNamespace
+        from daimon_matrix.canonical import canonical_bytes
+        from daimon_matrix.client import ClientConfig, LocalClient
+        from daimon_matrix.operator_capabilities import host_capability_profile
+        from .onboarding_target import document
+        from .owner_process import ConnectedProcessObserver
+
+        connected = 'connection_observer' in getattr(LocalClient, '__dataclass_fields__', {})
+        if require_loaded and not connected:
+            raise OnboardingError('qualified_onboarding_client_required')
+        if deadline_ns is not None and 'deadline_ns' not in getattr(LocalClient, '__dataclass_fields__', {}):
+            raise OnboardingError('qualified_onboarding_deadline_client_required')
+        with ExitStack() as ownership:
+            observer = ownership.enter_context(ConnectedProcessObserver()) if connected else None
+            options = {} if observer is None else {'connection_observer': observer}
+            sockets = {}
+
+            def client(path: Path, config_path: Path, key_path: Path):
+                remaining = 40 if deadline_ns is None else (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+                if remaining <= 0:
+                    raise OnboardingError('onboarding_observation_deadline_expired')
+                sockets[path] = path.lstat()
+                key = bytearray(onboarding_release.regular(key_path, uid=os.geteuid()))
+                config = ClientConfig.load(config_path, key)
+                return LocalClient(path, config, timeout_seconds=40,
+                    **({} if deadline_ns is None else {'deadline_ns': deadline_ns}), **options)
+
+            native = client(self.root / 'matrix.sock', self.root / 'client.json', self.root / 'client.key')
+            base = native.runtime_status()[1]
+            if base.get('ok') is not True:
+                raise OnboardingError('onboarding_runtime_not_ready')
+            bundle = document(self.root / 'runtime.json')
+            group = onboarding_peer.observed_group(SimpleNamespace(root=self.outputs, package=self.outputs),
+                bundle, socket_root=self.outputs)
+            application_status = None
+            if group is not None:
+                if observer is not None:
+                    role = host_capability_profile('status')
+                    directory = self.root / role['client_directory']
+                    hosted = client(Path(group['socket']), directory / role['client_config_filename'],
+                                    directory / role['client_key_filename'])
+                    response = hosted.runtime_status()[1]
+                    if response.get('ok') is not True or response['server'] != base['server']:
+                        raise OnboardingError('onboarding_daemon_origin_conflict')
+                    application_status = response['result']
+                else:
+                    directory = Path(group['application'])
+                    hosted = client(Path(group['socket']), directory / 'client.json', directory / 'client.key')
+                    if hosted.invoke('messaging.send', {})[1].get('error', {}).get('code') != 'invalid_params':
+                        raise OnboardingError('onboarding_runtime_not_ready')
+            elif require_loaded:
+                raise OnboardingError('qualified_onboarding_group_required')
+            else:
+                # Explicit retained directed applications remain independently
+                # observable; they never stand in for a missing selected group.
+                for fingerprint in self.settings['applications']:
+                    directory = self.directory(fingerprint) / 'application'
+                    hosted = client(self.outputs / ('peer-' + fingerprint[:12] + '.sock'),
+                                    directory / 'client.json', directory / 'client.key')
+                    if hosted.invoke('messaging.send', {})[1].get('error', {}).get('code') != 'invalid_params':
+                        raise OnboardingError('onboarding_runtime_not_ready')
+            loaded_base = base['result'].get('loaded_runtime')
+            if observer is not None:
+                observer.verify()
+                process = observer.process
+                if process is None:
+                    raise OnboardingError('onboarding_daemon_responder_conflict')
+                for status in (base['result'], application_status):
+                    loaded = None if status is None else status.get('loaded_runtime')
+                    if loaded is not None and loaded.get('process_id') != process['pid']:
+                        raise OnboardingError('onboarding_daemon_responder_conflict')
+                if application_status is not None and (
+                        application_status.get('loaded_runtime') != loaded_base):
+                    raise OnboardingError('onboarding_loaded_base_conflict')
+            if require_loaded:
+                loaded_application = None if application_status is None else application_status.get('loaded_application')
+                if (not isinstance(loaded_base, dict) or not loaded_base.get('qualified_startup')
+                        or not isinstance(loaded_application, dict)
+                        or loaded_application.get('loaded_base_sha256') != hashlib.sha256(canonical_bytes(loaded_base)).hexdigest()):
+                    raise OnboardingError('qualified_onboarding_loaded_view_required')
+            for path, before in sockets.items():
+                after = path.lstat()
+                if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+                    raise OnboardingError('onboarding_daemon_socket_changed')
+            if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
+            return dict(running=True, applications=[] if group else self.settings['applications'], group=group,
+                base_runtime_status=base['result'], runtime_status=application_status,
+                process=None if observer is None else observer.process,
+                responder_association='same-connection' if observer is not None else 'legacy-probe',
+                receiving_readiness='unobserved')
+
+    def receiving_observation(self, *, expires_at_ms: int | None = None,
+                              deadline_ns: int | None = None) -> dict:
+        from .onboarding_receiving_update import OwnerGroupClient
+        observed = self.observe(require_loaded=True,
+            **({} if deadline_ns is None else {'deadline_ns': deadline_ns}))
+        with OwnerGroupClient(self.root, Path(observed['group']['socket']), deadline_ns=deadline_ns) as owner:
+            current = (owner.status() if expires_at_ms is None else
+                owner.qualified_identity(expires_at_ms=expires_at_ms, require_admitted=False))
+            if (current['process'] != observed['process']
+                    or current['server'] != observed['runtime_status']['local_origin']
+                    or any(current['runtime_status'].get(key) != observed['runtime_status'].get(key)
+                           for key in ('loaded_runtime', 'loaded_application'))):
+                raise OnboardingError('receiving_source_process_changed')
+            return {**current, 'group': observed['group']}
+
+    def receiving_control(self, action: str, path: Path, *, command: dict | None = None,
+                          deadline_ns: int | None = None) -> dict:
+        from .onboarding_receiving_update import owner_control
+        observed = (self.observe(require_loaded=True) if deadline_ns is None else
+            self.observe(require_loaded=True, deadline_ns=deadline_ns))
+        if deadline_ns is None:
+            return owner_control(self.root, observed['group'], observed, action, path, command=command)
+        return owner_control(self.root, observed['group'], observed, action, path,
+            command=command, deadline_ns=deadline_ns)
+
+    def receiving_lifecycle(self, journal_path: Path, operation_id: str) -> dict:
+        """Project only this Source's retained lifecycle; no service/native RPC."""
+        from .operation_journal import OperationJournal
+        journal = OperationJournal.existing(being_seed._path(journal_path))
+        row = None if journal is None else journal.get(operation_id)
+        if row is None or row['operation'] != 'receiving-update':
+            raise OnboardingError('receiving_source_lifecycle_unobserved')
+        before, after = row['expected_precondition'], row['intended_transition']
+        call = row['intent'].get('runtime_call', {})
+        frozen = before.get('source_bootstrap', {})
+        qualification = after.get('source_bootstrap', {}).get('qualification', {})
+        if (call.get('precondition_digest') != digest(before)
+                or call.get('transition_digest') != digest(after)
+                or frozen.get('settings_sha256') != digest(self.settings)
+                or not isinstance(frozen.get('predecessor'), dict)
+                or not isinstance(qualification.get('code'), str)
+                or type(qualification.get('code_uid')) is not int
+                or qualification.get('config') is None
+                or being_seed._read(Path(qualification['config'])) != self.settings):
+            raise OnboardingError('receiving_source_lifecycle_conflict')
+        effects = (row['runtime_observation'] or {}).get('source_bootstrap', {})
+        # Never export intents, control capabilities, custody or another Source.
+        projected = dict(operation_id=operation_id, operation='receiving-update',
+            expected_precondition={'source_bootstrap': {'predecessor': {
+                key: frozen['predecessor'].get(key) for key in ('process', 'server')}}},
+            intended_transition={'source_bootstrap': {'qualification': {
+                key: qualification[key] for key in ('code', 'code_uid')}}},
+            runtime_observation={'source_bootstrap': {
+                key: effects[key] for key in ('quiesced', 'controlled_loaded') if key in effects}})
+        return dict(schema='cluster-receiving-source-lifecycle/v1',
+            source_config_sha256=digest(self.settings), lifecycle=projected)
+
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--ready-fd', type=int)
+    parser.add_argument('--code-digest')
+    parser.add_argument('--code-owner', type=int, default=0)
+    parser.add_argument('--observe', action='store_true')
+    parser.add_argument('--require-loaded', action='store_true')
+    control = parser.add_mutually_exclusive_group()
+    control.add_argument('--prepare-control', type=Path)
+    control.add_argument('--apply-control', type=Path)
+    control.add_argument('--prepare-apply-control', type=Path)
+    parser.add_argument('--control-command', type=Path)
+    parser.add_argument('--owner-status', action='store_true')
+    parser.add_argument('--qualified-identity', action='store_true')
+    parser.add_argument('--identity-expires-at-ms', type=int)
+    parser.add_argument('--native-tooling-json')
+    parser.add_argument('--observation-deadline-ns', type=int)
+    parser.add_argument('--expected-config-sha256')
+    parser.add_argument('--receiving-lifecycle')
+    parser.add_argument('--operation-journal', type=Path)
     args = parser.parse_args(argv)
     try:
+        from . import onboarding_code_successor, onboarding_sdk
+        code = Path(__file__).resolve().parents[1]
+        if args.code_owner < 0:
+            raise OnboardingError('qualified_source_code_owner_required')
+        controlling = any(path is not None for path in (args.prepare_control, args.apply_control, args.prepare_apply_control))
+        lifecycle = args.receiving_lifecycle is not None
+        if args.native_tooling_json is not None and (not args.qualified_identity
+                or len(args.native_tooling_json.encode()) > 65536):
+            raise OnboardingError('receiving_native_tooling_recipe_required')
+        receiving = args.owner_status or args.qualified_identity or controlling or lifecycle
+        if (sum((args.observe, args.owner_status, args.qualified_identity, controlling, lifecycle)) > 1
+                or lifecycle != (args.operation_journal is not None)
+                or lifecycle and (args.ready_fd is not None or args.require_loaded)
+                or args.qualified_identity != (args.identity_expires_at_ms is not None)
+                or args.identity_expires_at_ms is not None and not 0 < args.identity_expires_at_ms < 2**53
+                or (args.owner_status or args.qualified_identity) and (args.ready_fd is not None or args.require_loaded)
+                or args.expected_config_sha256 is not None and not receiving
+                or args.observation_deadline_ns is not None and not receiving):
+            raise OnboardingError('invalid_receiving_control_request')
+        if (args.owner_status or args.qualified_identity or lifecycle) and args.observation_deadline_ns is None:
+            args.observation_deadline_ns = time.monotonic_ns() + 30_000_000_000
+        def accept_deadline():
+            if args.observation_deadline_ns is not None and time.monotonic_ns() >= args.observation_deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
+        if args.observation_deadline_ns is not None and not 0 < args.observation_deadline_ns - time.monotonic_ns() <= 60_000_000_000:
+            raise OnboardingError('onboarding_observation_deadline_expired')
+        if (controlling and (args.observe or args.require_loaded or args.ready_fd is not None)
+                or (args.prepare_control is not None or args.prepare_apply_control is not None) != (args.control_command is not None)):
+            raise OnboardingError('invalid_receiving_control_request')
+        stdin_command = None
+        if args.control_command == Path('-'):
+            raw = sys.stdin.buffer.read(being_seed.MAX_SELECTION + 1)
+            if len(raw) > being_seed.MAX_SELECTION:
+                raise OnboardingError('invalid_receiving_control_request')
+            stdin_command = json.loads(raw)
+            if not isinstance(stdin_command, dict):
+                raise OnboardingError('invalid_receiving_control_request')
+        accept_deadline()
+        parameters = onboarding_code_successor.sdk_parameters(code, uid=args.code_owner)
+        if receiving and not parameters:
+            raise OnboardingError('qualified_onboarding_source_observer_required')
+        if args.require_loaded and (not args.observe or not parameters):
+            raise OnboardingError('qualified_onboarding_source_observer_required')
+        if parameters and args.code_digest is None:
+            raise OnboardingError('qualified_onboarding_source_runtime_required')
+        startup = (onboarding_sdk.qualified_startup(Path(sys.prefix), code,
+            code_digest=args.code_digest, code_uid=args.code_owner, **parameters) if parameters else None)
+        accept_deadline()
         settings = being_seed._read(args.config)
-        source = Source(settings)
+        if args.expected_config_sha256 is not None and digest(settings) != args.expected_config_sha256:
+            raise OnboardingError('receiving_source_configuration_changed')
+        accept_deadline()
+        source = Source(settings, code=code, code_uid=args.code_owner, code_digest=args.code_digest,
+                        qualified_startup=startup)
+        if lifecycle:
+            accept_deadline()
+            result = source.receiving_lifecycle(args.operation_journal, args.receiving_lifecycle)
+            accept_deadline()
+            print(json.dumps(result))
+            return 0
+        if controlling:
+            action = 'receiving-control-prepare' if args.prepare_control is not None else 'receiving-control-apply'
+            path = args.prepare_control if args.prepare_control is not None else args.apply_control
+            if args.prepare_apply_control is not None:
+                action, path = 'receiving-control-prepare-apply', args.prepare_apply_control
+            if args.control_command == Path('-'):
+                command = stdin_command
+            else:
+                command = (None if args.control_command is None
+                    else being_seed._read(args.control_command, limit=being_seed.MAX_SELECTION))
+            accept_deadline()
+            result = source.receiving_control(action, path, command=command,
+                **({} if args.observation_deadline_ns is None else {'deadline_ns': args.observation_deadline_ns}))
+            accept_deadline()
+            print(json.dumps(result))
+            return 0
+        if args.owner_status or args.qualified_identity:
+            result = source.receiving_observation(expires_at_ms=args.identity_expires_at_ms,
+                deadline_ns=args.observation_deadline_ns)
+            if args.native_tooling_json is not None:
+                from .onboarding_owner_client import observe_selected_tooling
+                if startup is None:
+                    raise OnboardingError('qualified_native_peer_tool_required')
+                result['native_tooling'] = observe_selected_tooling(json.loads(args.native_tooling_json),
+                    code=code, startup=startup, code_uid=args.code_owner, deadline_ns=args.observation_deadline_ns,
+                    receiving=result)
+            accept_deadline()
+            print(json.dumps(result))
+            return 0
+        if args.observe:
+            if args.ready_fd is not None:
+                raise OnboardingError('invalid_source_observation_request')
+            print(json.dumps(source.observe(require_loaded=args.require_loaded)))
+            return 0
         stop = threading.Event()
         for signum in (signal.SIGTERM, signal.SIGINT):
             signal.signal(signum, lambda *_: stop.set())
@@ -255,30 +553,10 @@ def child() -> int:
             source.register(config, Path(request['unit']), request['unit_sha256'], Path(request['python']), request['plan_digest'])
             value = {'registered': True}
         else:
-            from daimon_matrix.client import ClientConfig, LocalClient
-            native = ClientConfig.load(source.root / 'client.json', bytearray((source.root / 'client.key').read_bytes()))
-            result = LocalClient(source.root / 'matrix.sock', native).runtime_status()[1]
-            # Observe the currently selected group instead of probing archived
-            # bootstrap sockets that the group deployment deliberately retired.
-            if (source.outputs / 'tribe/selection.json').exists():
-                from types import SimpleNamespace
-                group = onboarding_peer.observed_group(SimpleNamespace(
-                    root=source.outputs, package=source.outputs),
-                    source.tool.read_public(source.root / 'runtime.json'), socket_root=source.outputs)
-                selected = source.outputs / 'tribe/application'
-                client = ClientConfig.load(selected / 'client.json', bytearray((selected / 'client.key').read_bytes()))
-                if LocalClient(source.outputs / 'tribe.sock', client).invoke('messaging.send', {})[1].get('error', {}).get('code') != 'invalid_params':
-                    raise OnboardingError('onboarding_runtime_not_ready')
-                value = {'running': result.get('ok') is True, 'applications': [], 'group': group}
-                print(json.dumps(value))
-                return 0
-            for fingerprint in source.settings['applications']:
-                application = source.directory(fingerprint) / 'application'
-                peer = ClientConfig.load(application / 'client.json', bytearray((application / 'client.key').read_bytes()))
-                socket = source.outputs / ('peer-' + fingerprint[:12] + '.sock')
-                if LocalClient(socket, peer).invoke('messaging.send', {})[1].get('error', {}).get('code') != 'invalid_params':
-                    raise OnboardingError('onboarding_runtime_not_ready')
-            value = {'running': result.get('ok') is True, 'applications': source.settings['applications']}
+            if (set(request) - {'require_loaded'}
+                    or 'require_loaded' in request and type(request['require_loaded']) is not bool):
+                raise OnboardingError('invalid_source_observation_request')
+            value = source.observe(require_loaded=request.get('require_loaded') is True)
         print(json.dumps(value))
         return 0
     except Exception:

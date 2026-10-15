@@ -26,6 +26,7 @@ _WIRES = sorted(
     {
         "dm.messaging.application/v3",
         "dm.tribe.conversation/v1",
+        "dm.tribe.direct-conversation/v1",
         "dm.tribe.intake-result/v1",
         "dm.communication.message/v1",
         "dm.communication.resolution/v1",
@@ -49,6 +50,8 @@ _FEATURES = sorted(
         "bounded-numeric-http/v1",
         "owned-transport-reply/v1",
         "bounded-group-fanout/v1",
+        "membership-direct/v1",
+        "signed-roster-cas/v1",
     }
 )
 _CONTRACT_FIELDS = {
@@ -167,6 +170,7 @@ def describe_reader() -> dict[str, Any]:
             "capabilities": list(_FEATURES),
             "pending_inspection": [
                 "dm.tribe.delivery/v1",
+                "dm.tribe.direct-delivery/v1",
                 "dm.tribe.intake-reconciliation/v1",
             ],
             "pending_transmission": "original-binding-unexpired",

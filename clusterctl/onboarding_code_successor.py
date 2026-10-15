@@ -162,7 +162,7 @@ def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, .
           matrix_commit: str | None = None, matrix_wheel_sha256: str | None = None) -> dict:
     """Capture a code-only successor; never read receiving home or custody."""
     from . import being_seed
-    from tools.build_onboarding_code import copy_code, capture_peer_tool
+    from tools.build_onboarding_code import copy_code, capture_peer_tool, capture_chat_tool
     original = onboarding_release.verify(base, base_fingerprint, uid=os.geteuid())
     qualified_sdk = matrix_commit is not None or matrix_wheel_sha256 is not None
     if qualified_sdk and (sdk is None or matrix_commit is None
@@ -209,6 +209,8 @@ def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, .
         replaced.update({'telegram/telecodex', 'telegram/artifact.json'})
     if 'onboarding_peer.py' in modules:
         replaced.add('clusterctl/onboarding_peer_native.py')
+    if 'onboarding_owner_client.py' in modules:
+        replaced.add('clusterctl/onboarding_chat_native.py')
     for row in original['files']:
         if (row['path'] not in replaced and row['path'] != MARKER
                 and not (sdk is not None and row['path'].startswith('sdk/'))):
@@ -217,6 +219,8 @@ def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, .
         copy_code(source / name, output / 'clusterctl' / name)
     if 'onboarding_peer.py' in modules:
         capture_peer_tool(output)
+    if 'onboarding_owner_client.py' in modules:
+        capture_chat_tool(output)
     if sdk is not None:
         for path in sorted(sdk.rglob('*')):
             if path.is_file():

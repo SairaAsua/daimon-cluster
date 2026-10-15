@@ -7,10 +7,15 @@ Does not generate identities, start daemons, or overwrite existing profiles.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
+import shutil
+import stat
+import subprocess
 import sys
+import tomllib
 import uuid
 from pathlib import Path
 from typing import Any
@@ -45,6 +50,148 @@ def _put(path: Path, raw: bytes) -> None:
         stream.write(raw)
         stream.flush()
         os.fsync(stream.fileno())
+
+
+def register_codex_mcp(
+    attachment: Path,
+    command: list[str],
+    *,
+    previous_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Configure this owner's existing Matrix role through Codex's writer.
+
+    This starts no model or service and makes no catalog/readiness claim.
+    Replacing an existing role needs its exact prior command digest; unrelated
+    configuration and optional role settings must remain untouched.
+    """
+    attachment = Path(os.path.abspath(attachment))
+    home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    if not home.is_absolute() or home.is_symlink():
+        raise ValueError("agent_chat_codex_home_invalid")
+    _mkdir(home)
+    _directory(home)
+    lock = os.open(
+        home / ".matrix-mcp-install.lock",
+        os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+        0o600,
+    )
+    try:
+        info = os.fstat(lock)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+            or info.st_nlink != 1
+        ):
+            raise ValueError("agent_chat_codex_mcp_lock_rejected")
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return _register_codex_mcp_locked(home, attachment, command, previous_sha256)
+    finally:
+        os.close(lock)
+
+
+def _sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _register_codex_mcp_locked(
+    home: Path, attachment: Path, command: list[str], previous_sha256: str | None
+) -> dict[str, Any]:
+    # This lock serializes this receiving-owner installer, not arbitrary native
+    # config writers. Reject their observed intervening edits before publication.
+    config = home / "config.toml"
+    from daimon_matrix.messaging_config import protected_read
+
+    before = protected_read(config) if config.exists() or config.is_symlink() else b""
+    old = tomllib.loads(before.decode())
+    servers = old.get("mcp_servers", {})
+    existing = servers.get("matrix")
+    wanted = {"command": command[0], "args": command[1:]}
+    if existing is not None:
+        current = {key: existing.get(key) for key in wanted}
+        if current == wanted:
+            if existing.get("enabled", True) is not True:
+                raise ValueError("agent_chat_codex_mcp_disabled")
+            _sync_directory(home)
+            return {"status": "configured", "catalog_acceptance": "unobserved"}
+        if previous_sha256 != hashlib.sha256(canonical_bytes(current)).hexdigest():
+            raise ValueError("agent_chat_codex_mcp_conflict")
+        # The native add command can replace a role; preserve optional owner
+        # selections rather than assuming how it rewrites them.
+        if set(existing) != set(wanted):
+            raise ValueError("agent_chat_codex_mcp_settings_require_reconciliation")
+    codex = shutil.which("codex")
+    if codex is None:
+        raise ValueError("agent_chat_codex_cli_unavailable")
+    history = attachment / "codex-mcp-history" / str(uuid.uuid4())
+    _put(history / "config.before.toml", before)
+    candidate_home = history / "candidate-home"
+    candidate_config = candidate_home / "config.toml"
+    _put(candidate_config, before)
+    result = subprocess.run(
+        [codex, "mcp", "add", "matrix", "--", *command],
+        env={**os.environ, "CODEX_HOME": str(candidate_home)},
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode:
+        raise ValueError("agent_chat_codex_mcp_registration_failed")
+    candidate = protected_read(candidate_config)
+    new = tomllib.loads(candidate.decode())
+    if (
+        {key: value for key, value in new.items() if key != "mcp_servers"}
+        != {key: value for key, value in old.items() if key != "mcp_servers"}
+        or {
+            key: value
+            for key, value in new.get("mcp_servers", {}).items()
+            if key != "matrix"
+        }
+        != {key: value for key, value in servers.items() if key != "matrix"}
+        or new.get("mcp_servers", {}).get("matrix") != wanted
+    ):
+        raise ValueError("agent_chat_codex_mcp_configuration_conflict")
+    _put(history / "config.candidate.toml", candidate)
+    _put(
+        history / "selection.json",
+        canonical_bytes(
+            {
+                "selection": wanted,
+                "before_sha256": hashlib.sha256(before).hexdigest(),
+                "candidate_sha256": hashlib.sha256(candidate).hexdigest(),
+            }
+        ),
+    )
+    # The preimage, validated candidate and selection must survive a lost reply
+    # after publication. Retrying then observes the already selected exact role.
+    directory = candidate_home
+    while True:
+        _sync_directory(directory)
+        if directory == attachment.parent:
+            break
+        directory = directory.parent
+    temporary = home / (".matrix-mcp-" + str(uuid.uuid4()))
+    try:
+        _put(temporary, candidate)
+        observed = (
+            protected_read(config) if config.exists() or config.is_symlink() else b""
+        )
+        if observed not in (before, candidate):
+            raise ValueError("agent_chat_codex_mcp_configuration_changed")
+        if observed != candidate:
+            os.replace(temporary, config)
+        _sync_directory(home)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return {
+        "status": "configured",
+        "catalog_acceptance": "unobserved",
+        "history": str(history),
+    }
 
 
 def _tools() -> list[dict[str, Any]]:
@@ -135,10 +282,10 @@ def install(args: argparse.Namespace) -> dict[str, Any]:
         _put(home / "daimon-chat" / "connection.json", connection)
         _put(
             home / "daimon-chat" / "agents/openai.yaml",
-            b"policy:\n  allow_implicit_invocation: false\n",
+            b"policy:\n  allow_implicit_invocation: true\n",
         )
     _put(target / "connection.json", connection)
-    return {
+    result: dict[str, Any] = {
         "status": "installed",
         "command": command,
         "new_daemons": 0,
@@ -151,6 +298,13 @@ def install(args: argparse.Namespace) -> dict[str, Any]:
         else None,
         "mcp_command": [*command, "mcp"],
     }
+    if getattr(args, "register_codex_mcp", False):
+        result["codex_mcp"] = register_codex_mcp(
+            target,
+            result["mcp_command"],
+            previous_sha256=getattr(args, "previous_codex_mcp_sha256", None),
+        )
+    return result
 
 
 def _semantic_schema(value: Any) -> Any:
@@ -294,6 +448,12 @@ def main() -> None:
     parser.add_argument("--incoming", action="append", default=[])
     parser.add_argument("--outgoing", action="append", default=[])
     parser.add_argument("--hermes-home", type=Path)
+    parser.add_argument(
+        "--register-codex-mcp",
+        action="store_true",
+        help="Register native Matrix tools through this owner's Codex config writer",
+    )
+    parser.add_argument("--previous-codex-mcp-sha256")
     parser.add_argument(
         "--skills-dir",
         type=Path,

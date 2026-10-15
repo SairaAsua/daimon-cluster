@@ -10,17 +10,18 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 import socket
 import struct
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Iterator
 
 from . import being_seed, onboarding_code_successor, onboarding_release, onboarding_sdk
-from .onboarding import OnboardingError, digest, private_directory, validate_plan
+from .onboarding import OnboardingError, digest, private_directory, refusal_diagnostic, validate_plan
 
 
 def document(path: Path) -> dict:
@@ -33,6 +34,24 @@ def document(path: Path) -> dict:
     return value
 
 
+def _socket_identity(path: Path, deadline_ns: int | None):
+    """Await initial socket publication inside the existing observation budget.
+
+    This is no presence or readiness proof. The actual connection, responder,
+    admission parent and loaded selection are still authenticated afterwards.
+    Ordinary unbounded status keeps its immediate missing-socket refusal.
+    """
+    while True:
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('onboarding_observation_deadline_expired')
+        try:
+            return path.lstat()
+        except FileNotFoundError:
+            if deadline_ns is None:
+                raise
+        time.sleep(min(.05, max(0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)))
+
+
 def profile(plan: dict) -> dict:
     validate_plan(plan)
     return dict(schema="dm.operator.rebirth-target-profile/v1", label=plan["name"] + "-codex-cluster",
@@ -43,7 +62,9 @@ def profile(plan: dict) -> dict:
 
 
 class Target:
-    def __init__(self, home: Path, plan: dict, genesis: dict, *, code: Path | None = None, code_uid: int = 0):
+    def __init__(self, home: Path, plan: dict, genesis: dict, *, code: Path | None = None,
+                 code_uid: int = 0, code_digest: str | None = None,
+                 qualified_startup: dict | None = None):
         self.home = private_directory(home)
         self.plan = validate_plan(plan)
         self.genesis = genesis
@@ -57,6 +78,8 @@ class Target:
         self.credential = self.root / "credential"
         self.code = code if code is not None else Path(__file__).resolve().parents[1]
         self.code_uid = code_uid
+        self.code_digest = code_digest or plan['release_digest']
+        self.qualified_startup = qualified_startup
 
     def document_bundle(self) -> dict:
         return document(self.package / "runtime/runtime.json")
@@ -243,6 +266,8 @@ class Target:
             raise OnboardingError("onboarding_target_runtime_conflict")
         store = keystore.EncryptedKeystore(self.package / "runtime/custody.json").open(
             self._reader, minimum_counter=1, required_control_head=authority.state.head)
+        if store.counter != bundle['keystore']['counter']:
+            raise OnboardingError('existing_onboarding_target_preserved')
         signing = store.secrets[bundle["keystore"]["signing_slot"]]
         if identity.signing_descriptor(signing) != activation["body"]["credential"]["body"]["signing_key"]:
             raise OnboardingError("onboarding_target_runtime_conflict")
@@ -254,16 +279,20 @@ class Target:
             complete = self.credential / "receipt.json"
             if complete.exists() and document(complete) != current_receipt:
                 raise OnboardingError("onboarding_target_runtime_conflict")
-            if bundle != expected:
+            comparison, controller = self._controller_comparison(expected, bundle, store,
+                activation['body']['credential']['body']['signing_key'])
+            if comparison != expected:
                 if (not complete.exists() or not (self.root / 'peer/accepted-private.json').is_file()
-                        or set(bundle) != set(expected) or any(bundle[key] != expected[key]
+                        or set(comparison) != set(expected) or any(comparison[key] != expected[key]
                             for key in expected if key not in {'sources', 'relationships'})):
                     raise OnboardingError('existing_onboarding_target_preserved')
                 from .onboarding_peer import augmented
-                peer_receipt, peer_complete = augmented(self, expected, bundle)
-                result = dict(phase='v8' if peer_complete else 'peer-published', request=request, receipt=peer_receipt)
+                peer_receipt, peer_complete = augmented(self, expected, comparison)
+                result: dict = dict(phase='v8' if peer_complete else 'peer-published', request=request, receipt=peer_receipt)
             else:
                 result = dict(phase="v8" if complete.exists() else "v8-published", request=request, receipt=current_receipt)
+            if controller is not None:
+                result['receiving_controller'] = {**controller, 'historical_receipt_sha256': digest(result['receipt'])}
             if result['phase'] == 'v8':
                 from .onboarding_peer import observed_group
                 group = observed_group(self, bundle)
@@ -271,6 +300,66 @@ class Target:
                     result['group'] = group
             return result
         return dict(phase="credential-pending" if self.existing else "v7", request=request, receipt=receipt)
+
+    def _controller_comparison(self, expected: dict, bundle: dict, store, signing_key: dict) -> tuple[dict, dict | None]:
+        """Observe the native one-controller successor without changing history.
+
+        Normalize only for the retained credential/peer comparison. Current
+        group validation and loaded evidence always use the actual bundle.
+        Authenticity remains inspectable after expiry; this grants no control.
+        The custody counter is an antirollback revision, not a count of controller
+        issuances: renewal retains one role while advancing authenticated custody.
+        Its transaction lineage is retained by the native owner/update journals.
+        """
+        from daimon_matrix import canonical, local_api, operator_capabilities as profiles
+        fields = ('capabilities', 'operator_capability_binding', 'keystore')
+        if all(bundle.get(key) == expected[key] for key in fields):
+            return bundle, None
+        try:
+            profile = profiles.host_capability_profile('receiving-controller')
+            previous = expected['capabilities']
+            current = bundle['capabilities']
+            if (len(current) != len(previous) + 1 or current[:-1] != previous
+                    or any(row['profile'] == profile for row in previous)
+                    or type(bundle['keystore'].get('counter')) is not int
+                    or bundle['keystore']['counter'] <= expected['keystore']['counter']
+                    or bundle['keystore'] != {**expected['keystore'], 'counter': bundle['keystore']['counter']}
+                    or store.counter != bundle['keystore']['counter']):
+                raise ValueError
+            label = expected['runtime_label']
+            slot = profiles.host_capability_slot(label, 'receiving-controller')
+            row = current[-1]
+            key = store.secrets[slot]
+            if (len(key) != 32 or any(value == key for name, value in store.secrets.items() if name != slot)
+                    or row != dict(profile=profile, runtime_id=expected['runtime_id'],
+                        secret_slot=slot, descriptor=row['descriptor'])):
+                raise ValueError
+            for capability in current:
+                local_api.LocalCapability.from_value(capability['descriptor'], store.secrets[capability['secret_slot']])
+            capability = local_api.LocalCapability.from_value(row['descriptor'], key)
+            if (capability.client_id != f'client:host:{label}:receiving-controller'
+                    or frozenset(capability.methods) != profiles.OPTIONAL_HOST_CAPABILITY_PROFILES['receiving-controller']
+                    or capability.descriptor['status'] != 'active'
+                    or capability.descriptor['schema'] != local_api.CAPABILITY_SCHEMA):
+                raise ValueError
+            profiles.verify_operator_capability_binding(bundle['operator_capability_binding'],
+                runtime_id=expected['runtime_id'], runtime_label=label,
+                being_ref=expected['manifest']['being_ref'], origin=expected['local_origin'],
+                signing_key=signing_key, capability_rows=current)
+            directory = private_directory(self.package / 'runtime' / profile['client_directory'])
+            key_path = directory / profile['client_key_filename']
+            if (onboarding_release.regular(key_path, uid=os.geteuid()) != key or key_path.stat().st_mode & 0o077
+                    or document(directory / profile['client_config_filename']) != dict(
+                        schema='dm.local.client-config/v3', capability=capability.descriptor,
+                        expected_server=expected['local_origin'], runtime_id=expected['runtime_id'], runtime_label=label)):
+                raise ValueError
+            comparison = {**bundle, **{field: expected[field] for field in fields}}
+            observation = dict(schema='cluster-receiving-controller-observation/v1',
+                runtime_sha256=hashlib.sha256(canonical.canonical_bytes(bundle)).hexdigest(),
+                counter=store.counter, capability_id=capability.capability_id, control_usability='unobserved')
+            return comparison, observation
+        except (KeyError, TypeError, ValueError, OSError):
+            raise OnboardingError('existing_onboarding_target_preserved') from None
 
     def credential_request(self) -> dict:
         """Persist one Body-accepted native proposal before contacting Root."""
@@ -393,7 +482,9 @@ class Target:
                 argv += ["--visibility-installation", str(visibility_installation)]
             if ready_descriptor is not None:
                 argv += ["--ready-fd", str(ready_descriptor)]
-            return daemon.main(argv)
+            options = {} if self.qualified_startup is None else {
+                'qualified_startup': self.qualified_startup}
+            return daemon.main(argv, **options)
         finally:
             # Native startup consumes/closes the FD. Early refusal may not.
             try:
@@ -403,57 +494,170 @@ class Target:
             except OSError:
                 pass
 
-    def running(self, *, admitted: bool = False) -> dict:
+    def running(self, *, admitted: bool = False, require_loaded: bool = False,
+                deadline_ns: int | None = None, bootstrap_base_only: bool = False) -> dict:
         """Observe a kernel-pinned daemon and authenticate its native status.
 
-        This proves owner-local runtime presence, not a Cluster admission lease,
-        a resource fence, peer delivery or a model/Telegram acceptance.
+        Admitted observations also check the current native body scope. Loaded
+        observations associate the selected group with that same process/base;
+        candidate equality, resource fences and communication remain separate.
+        First adoption may observe only the compatible base/admission route:
+        the predecessor group profile does not expose authenticated status.
+        That mode never establishes group load or qualified receiving readiness.
         """
         from daimon_matrix.client import ClientConfig, LocalClient
-        from .owner_process import ProcessPresence
+        if bootstrap_base_only and (not admitted or require_loaded):
+            raise OnboardingError('invalid_receiving_bootstrap_observation')
+        if deadline_ns is not None:
+            if 'deadline_ns' not in getattr(LocalClient, '__dataclass_fields__', {}):
+                raise OnboardingError('qualified_onboarding_deadline_client_required')
+            if time.monotonic_ns() >= deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
         prepared = self.observe()
         if prepared["phase"] != "v8":
             raise OnboardingError("current_onboarding_target_required")
         root = self.package / "runtime"
-        socket_identity = (root / "matrix.sock").lstat()
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(5)
-            connection.connect(str(root / "matrix.sock"))
-            pid, uid, _gid = struct.unpack("3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-            if uid != os.geteuid():
-                raise OnboardingError("onboarding_daemon_owner_conflict")
-            process = dict(uid=uid, pid=pid,
-                start_ticks=int((Path("/proc") / str(pid) / "stat").read_text().rpartition(")")[2].split()[19]),
-                boot_id=Path("/proc/sys/kernel/random/boot_id").read_text().strip())
-            with ProcessPresence(process) as presence:
-                key = bytearray(onboarding_release.regular(root / "client.key", uid=os.geteuid()))
-                config = ClientConfig.load(root / "client.json", key)
-                # Match the maintained owner client's bounded response window.
-                # A slow authenticated status reply is not evidence of absence.
-                client = LocalClient(root / "matrix.sock", config, timeout_seconds=40)
-                _, status = client.runtime_status()
-                expected = prepared["receipt"]["origin"]
-                if status["ok"] is not True or any(status["server"].get(field) != value for field, value in expected.items()):
-                    raise OnboardingError("onboarding_daemon_origin_conflict")
-                if admitted:
-                    _, observed = client.scope_me()
-                    body = observed.get('result', {}).get('body', {})
-                    if (observed.get('ok') is not True or body.get('state') != 'running'
-                            or any(body.get(field) != expected[field] for field in
-                                   ('body_ref', 'embodiment_id', 'incarnation_id'))):
-                        raise OnboardingError('onboarding_admission_not_current')
-                current_socket = (root / "matrix.sock").lstat()
-                if (socket_identity.st_dev, socket_identity.st_ino) != (current_socket.st_dev, current_socket.st_ino):
-                    raise OnboardingError("onboarding_daemon_socket_changed")
-                presence.verify()
-                return dict(schema="cluster-onboarding-runtime-presence/v1", plan_digest=digest(self.plan),
-                    origin=expected, process=process, runtime_id=config.runtime_id,
-                    runtime_sha256=prepared["receipt"]["runtime_sha256"])
+        socket_identity = _socket_identity(root / "matrix.sock", deadline_ns)
+        key = bytearray(onboarding_release.regular(root / "client.key", uid=os.geteuid()))
+        config = ClientConfig.load(root / "client.json", key)
+        from .owner_process import ConnectedProcessObserver, ParentProcessPresence, ProcessPresence
+        connected = 'connection_observer' in getattr(LocalClient, '__dataclass_fields__', {})
+        if require_loaded and not connected:
+            raise OnboardingError('qualified_onboarding_client_required')
+        with ExitStack() as stack:
+            presence: ConnectedProcessObserver | ProcessPresence
+            if connected:
+                presence = stack.enter_context(ConnectedProcessObserver())
+                options: dict = {'connection_observer': presence}
+            else:
+                # Retained SDKs lack the actual-connection seam. Preserve their
+                # original presence probe, explicitly never receiving-qualified.
+                if self.qualified_startup is not None:
+                    raise OnboardingError('qualified_onboarding_client_required')
+                connection = stack.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM))
+                connection.settimeout(5)
+                connection.connect(str(root / 'matrix.sock'))
+                pid, uid, _gid = struct.unpack('3i', connection.getsockopt(
+                    socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                if uid != os.geteuid():
+                    raise OnboardingError('onboarding_daemon_owner_conflict')
+                process = dict(uid=uid, pid=pid,
+                    start_ticks=int((Path('/proc') / str(pid) / 'stat').read_text().rpartition(
+                        ')')[2].split()[19]),
+                    boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
+                presence = stack.enter_context(ProcessPresence(process))
+                options = {}
+            # Kernel observation covers the exact connection and authenticated
+            # response. A separate empty probe cannot identify this responder.
+            if deadline_ns is not None:
+                options['deadline_ns'] = deadline_ns
+                if time.monotonic_ns() >= deadline_ns:
+                    raise OnboardingError('onboarding_observation_deadline_expired')
+            client = LocalClient(root / "matrix.sock", config, timeout_seconds=40,
+                                 **options)
+            _, status = client.runtime_status()
+            expected = prepared["receipt"]["origin"]
+            if status["ok"] is not True or any(status["server"].get(field) != value for field, value in expected.items()):
+                raise OnboardingError("onboarding_daemon_origin_conflict")
+            loaded = status['result'].get('loaded_runtime')
+            if connected and loaded is not None and (presence.process is None
+                    or loaded.get('process_id') != presence.process['pid']):
+                raise OnboardingError('onboarding_daemon_responder_conflict')
+            group = prepared.get('group')
+            group_status = None
+            if connected and group is not None and not bootstrap_base_only:
+                from daimon_matrix.operator_capabilities import host_capability_profile
+                role = host_capability_profile('status')
+                directory = root / role['client_directory']
+                group_socket = Path(group['socket'])
+                before_group = group_socket.lstat()
+                group_key = bytearray(onboarding_release.regular(
+                    directory / role['client_key_filename'], uid=os.geteuid()))
+                group_config = ClientConfig.load(directory / role['client_config_filename'], group_key)
+                hosted = LocalClient(group_socket, group_config, timeout_seconds=40, **options)
+                response = hosted.runtime_status()[1]
+                if response.get('ok') is not True or response['server'] != status['server']:
+                    raise OnboardingError('onboarding_daemon_origin_conflict')
+                group_status = response['result']
+                if group_status.get('loaded_runtime') != loaded:
+                    raise OnboardingError('onboarding_loaded_base_conflict')
+                after_group = group_socket.lstat()
+                if (before_group.st_dev, before_group.st_ino) != (after_group.st_dev, after_group.st_ino):
+                    raise OnboardingError('onboarding_daemon_socket_changed')
+            if require_loaded:
+                from daimon_matrix.canonical import canonical_bytes
+                application = None if group_status is None else group_status.get('loaded_application')
+                if (not isinstance(loaded, dict) or not loaded.get('qualified_startup')
+                        or not isinstance(application, dict)
+                        or application.get('loaded_base_sha256') != hashlib.sha256(canonical_bytes(loaded)).hexdigest()):
+                    raise OnboardingError('qualified_onboarding_loaded_view_required')
+            identity = None
+            if admitted:
+                _, observed = client.scope_me()
+                scope_result = observed.get('result')
+                body = scope_result.get('body') if isinstance(scope_result, dict) else None
+                if (observed.get('ok') is not True or not isinstance(body, dict) or body.get('state') != 'running'
+                        or any(body.get(field) != expected[field] for field in
+                               ('body_ref', 'embodiment_id', 'incarnation_id'))):
+                    raise OnboardingError('onboarding_admission_not_current')
+                from .onboarding_receiving_update import receiving_identity
+                identity = receiving_identity(observed, status['result'], status['server'])
+            parent = None
+            if admitted and connected:
+                child_process = presence.process
+                if not isinstance(child_process, dict):
+                    raise OnboardingError('onboarding_daemon_responder_conflict')
+                parent = stack.enter_context(ParentProcessPresence(child_process))
+            current_socket = (root / "matrix.sock").lstat()
+            if (socket_identity.st_dev, socket_identity.st_ino) != (current_socket.st_dev, current_socket.st_ino):
+                raise OnboardingError("onboarding_daemon_socket_changed")
+            presence.verify()
+            if parent is not None:
+                parent.verify()
+            if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
+            return dict(schema="cluster-onboarding-runtime-presence/v1", plan_digest=digest(self.plan),
+                origin=expected, process=presence.process, runtime_id=config.runtime_id,
+                admission_parent=None if parent is None else parent.process,
+                runtime_sha256=prepared.get('receiving_controller', prepared['receipt'])["runtime_sha256"],
+                runtime_status=status['result'], group=group, group_runtime_status=group_status,
+                receiving_identity=identity,
+                receiving_readiness='unobserved',
+                responder_association='same-connection' if connected else 'legacy-probe')
+
+    def receiving_control(self, action: str, path: Path, *, command: dict | None = None,
+                          deadline_ns: int | None = None) -> dict:
+        """Use the selected admitted group; preserve exact retained controls."""
+        from .onboarding_receiving_update import owner_control
+        observed = self.running(admitted=True, require_loaded=True, deadline_ns=deadline_ns)
+        result = owner_control(self.package / 'runtime', observed['group'], observed,
+            action, path, command=command, status_key='group_runtime_status', deadline_ns=deadline_ns)
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('onboarding_observation_deadline_expired')
+        return result
+
+    def qualified_receiving_identity(self, *, expires_at_ms: int, deadline_ns: int) -> dict:
+        from .onboarding_receiving_update import OwnerGroupClient
+        observed = self.running(admitted=True, require_loaded=True, deadline_ns=deadline_ns)
+        with OwnerGroupClient(self.package / 'runtime', Path(observed['group']['socket']),
+                              deadline_ns=deadline_ns) as owner:
+            current = owner.qualified_identity(expires_at_ms=expires_at_ms, require_admitted=True)
+            if (current['process'] != observed['process'] or current['server'] != observed['origin']
+                    or any(current['runtime_status'].get(key) != observed['group_runtime_status'].get(key)
+                           for key in ('loaded_runtime', 'loaded_application'))):
+                raise OnboardingError('receiving_control_process_changed')
+            if time.monotonic_ns() >= deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
+            return {**current, 'admission_parent': observed['admission_parent'],
+                    'plan_digest': observed['plan_digest'], 'responder_association': 'same-connection',
+                    'group': observed['group']}
+
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept"))
+    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "receiving-control-prepare", "receiving-control-apply", "receiving-control-prepare-apply", "receiving-identity", "receiving-bootstrap-freeze", "receiving-bootstrap-stage", "receiving-bootstrap-publish"))
+    parser.add_argument("--diagnostics", action="store_true", help="write bounded nonsecret refusal detail to stderr")
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--genesis", type=Path, required=True)
@@ -472,18 +676,76 @@ def main(argv: list[str] | None = None) -> int:
     visibility.add_argument("--receive-only", action="store_true")
     visibility.add_argument("--visibility-installation", type=Path)
     parser.add_argument("--ready-fd", type=int)
+    parser.add_argument('--require-loaded', action='store_true')
+    parser.add_argument('--observation-timeout-seconds', type=float)
+    parser.add_argument('--observation-deadline-ns', type=int)
+    parser.add_argument('--control-file', type=Path)
+    parser.add_argument('--control-command', type=Path)
+    parser.add_argument('--identity-expires-at-ms', type=int)
+    parser.add_argument('--native-tooling-json')
+    parser.add_argument('--bootstrap-request-json')
+    parser.add_argument('--bootstrap-ready-sha256')
+    parser.add_argument('--bootstrap-timeout-seconds', type=float)
     args = parser.parse_args(argv)
+    stage = 'arguments'
     try:
+        controlling = args.action in {'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
+        identity_query = args.action == 'receiving-identity'
+        if args.native_tooling_json is not None and (not identity_query
+                or len(args.native_tooling_json.encode()) > 65536):
+            raise OnboardingError('receiving_native_tooling_recipe_required')
+        if identity_query != (args.identity_expires_at_ms is not None):
+            raise OnboardingError('invalid_receiving_identity_request')
+        if identity_query and not 0 < args.identity_expires_at_ms < 2**53:
+            raise OnboardingError('invalid_receiving_identity_request')
+        bootstrapping = args.action.startswith('receiving-bootstrap-')
+        if bootstrapping:
+            if (args.bootstrap_timeout_seconds is None or not math.isfinite(args.bootstrap_timeout_seconds)
+                    or not 0 < args.bootstrap_timeout_seconds <= 60 or args.ready_fd is not None
+                    or (args.action == 'receiving-bootstrap-freeze') != (args.bootstrap_request_json is None)
+                    or (args.action == 'receiving-bootstrap-publish') != (args.bootstrap_ready_sha256 is not None)
+                    or args.bootstrap_request_json is not None and len(args.bootstrap_request_json.encode()) > 131072):
+                raise OnboardingError('invalid_receiving_bootstrap_request')
+        elif any(value is not None for value in (args.bootstrap_request_json,
+                args.bootstrap_ready_sha256, args.bootstrap_timeout_seconds)):
+            raise OnboardingError('invalid_receiving_bootstrap_request')
+        timeout = args.observation_timeout_seconds
+        if timeout is not None and (args.action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
+                or not math.isfinite(timeout) or not 0 < timeout <= 60):
+            raise OnboardingError('invalid_receiving_observation_timeout')
+        now_ns = time.monotonic_ns()
+        observation_deadline_ns = None if timeout is None else now_ns + int(timeout * 1_000_000_000)
+        if args.observation_deadline_ns is not None:
+            if (observation_deadline_ns is None or args.observation_deadline_ns <= now_ns
+                    or args.observation_deadline_ns > observation_deadline_ns):
+                raise OnboardingError('onboarding_observation_deadline_expired')
+            observation_deadline_ns = args.observation_deadline_ns
+        if identity_query and timeout is None:
+            raise OnboardingError('invalid_receiving_identity_request')
+        if (args.require_loaded and args.action not in {'running', 'admitted-running'}
+                or controlling and (args.control_file is None
+                    or (args.action != 'receiving-control-apply') != (args.control_command is not None))
+                or not controlling and (args.control_file is not None or args.control_command is not None)
+                or controlling and args.ready_fd is not None):
+            raise OnboardingError('invalid_receiving_control_request')
+        stage = 'public-release'
         plan = validate_plan(being_seed._read(args.plan))
         runtime = onboarding_code_successor.selection(args.runtime_code, args.runtime_digest,
             args.code, plan['release_digest'], uid=0)
         sdk_parameters = onboarding_code_successor.sdk_parameters(runtime)
+        if (controlling or identity_query or bootstrapping or args.require_loaded) and not sdk_parameters:
+            raise OnboardingError('qualified_onboarding_target_observer_required')
         matrix_commit = sdk_parameters.get('matrix_commit', onboarding_sdk.MATRIX_COMMIT)
         if args.action == 'sdk-prepare':
-            onboarding_sdk.install(args.home, runtime, args.runtime_digest or plan['release_digest'], **sdk_parameters)
+            stage = 'sdk-preparation'
+            venv = onboarding_sdk.install(args.home, runtime, args.runtime_digest or plan['release_digest'], **sdk_parameters)
+            if sdk_parameters:
+                stage = 'sdk-imports'
+                onboarding_sdk.runtime_imports(venv, runtime, **sdk_parameters)
             print(json.dumps(dict(ready=True, matrix_commit=matrix_commit)))
             return 0
         if args.action == 'sdk-observe':
+            stage = 'sdk-observation'
             try:
                 onboarding_sdk.observe(args.home, runtime, **sdk_parameters)
                 ready = True
@@ -491,15 +753,22 @@ def main(argv: list[str] | None = None) -> int:
                 ready = False
             print(json.dumps(dict(ready=ready, matrix_commit=matrix_commit)))
             return 0
+        stage = 'sdk-observation'
         venv = onboarding_sdk.observe(args.home, runtime, **sdk_parameters)
-        imports = onboarding_sdk.runtime_imports(venv, runtime, **sdk_parameters) if sdk_parameters else None
-        qualified_context = (imports is not None and sys.flags.isolated and sys.flags.no_site
-            and sys.dont_write_bytecode and sys.pycache_prefix == str(imports / '.disabled-bytecode')
-            and sys.path[:2] == [str(runtime), str(imports)])
+        imports = venv.parent / 'runtime-imports' if sdk_parameters else None
+        qualified_context = (imports is not None
+            and onboarding_sdk.startup_context(venv, imports, runtime))
         if Path(sys.prefix) != venv or sdk_parameters and not qualified_context:
-            arguments = argv if argv is not None else sys.argv[1:]
+            arguments = list(argv if argv is not None else sys.argv[1:])
+            if observation_deadline_ns is not None:
+                if time.monotonic_ns() >= observation_deadline_ns:
+                    raise OnboardingError('onboarding_observation_deadline_expired')
+                # Same process/guest monotonic clock across exec. Import/startup
+                # time must consume this budget rather than reset its duration.
+                arguments += ['--observation-deadline-ns', str(observation_deadline_ns)]
             if sdk_parameters:
-                assert imports is not None
+                stage = 'sdk-imports'
+                imports = onboarding_sdk.runtime_imports(venv, runtime, **sdk_parameters)
                 command = onboarding_sdk.runtime_command(venv, imports, runtime,
                     'clusterctl.onboarding_target', arguments)
             else:
@@ -508,7 +777,53 @@ def main(argv: list[str] | None = None) -> int:
                 command = [str(venv / "bin/python"), "-B", "-I", "-c", launcher,
                            str(runtime), *arguments]
             os.execv(venv / "bin/python", command)
-        target = Target(args.home, plan, document(args.genesis), code=runtime)
+        stage = 'sdk-startup'
+        startup = (onboarding_sdk.qualified_startup(venv, runtime,
+            code_digest=args.runtime_digest or plan['release_digest'], **sdk_parameters)
+            if sdk_parameters else None)
+        stage = 'owner-action'
+        target = Target(args.home, plan, document(args.genesis), code=runtime,
+            code_digest=args.runtime_digest or plan['release_digest'], qualified_startup=startup)
+        if bootstrapping:
+            from .onboarding_receiving_update import GuestOwnerBootstrap, freeze_guest_bootstrap
+            deadline_ns = time.monotonic_ns() + int(args.bootstrap_timeout_seconds * 1_000_000_000)
+            stage = args.action
+            if args.action == 'receiving-bootstrap-freeze':
+                result = freeze_guest_bootstrap(target, deadline_ns=deadline_ns)
+            else:
+                owner = GuestOwnerBootstrap(target, json.loads(args.bootstrap_request_json))
+                result = owner.execute(args.action.removeprefix('receiving-bootstrap-'),
+                    deadline_ns=deadline_ns, ready_sha256=args.bootstrap_ready_sha256)
+            print(json.dumps(result))
+            return 0
+        if controlling:
+            if args.control_command == Path('-'):
+                raw = sys.stdin.buffer.read(being_seed.MAX_SELECTION + 1)
+                if len(raw) > being_seed.MAX_SELECTION:
+                    raise OnboardingError('invalid_receiving_control_request')
+                control_command = json.loads(raw)
+                if not isinstance(control_command, dict):
+                    raise OnboardingError('invalid_receiving_control_request')
+            else:
+                control_command = (None if args.control_command is None
+                                   else being_seed._read(args.control_command, limit=being_seed.MAX_SELECTION))
+            print(json.dumps(target.receiving_control(args.action, args.control_file,
+                command=control_command, deadline_ns=observation_deadline_ns)))
+            return 0
+        if identity_query:
+            if observation_deadline_ns is None:
+                raise OnboardingError('invalid_receiving_identity_request')
+            result = target.qualified_receiving_identity(expires_at_ms=args.identity_expires_at_ms,
+                deadline_ns=observation_deadline_ns)
+            if args.native_tooling_json is not None:
+                from .onboarding_owner_client import observe_selected_tooling
+                if startup is None:
+                    raise OnboardingError('qualified_native_peer_tool_required')
+                result['native_tooling'] = observe_selected_tooling(json.loads(args.native_tooling_json),
+                    code=runtime, startup=startup, code_uid=0, deadline_ns=observation_deadline_ns,
+                    receiving=result)
+            print(json.dumps(result))
+            return 0
         if args.action == 'peer-identity':
             from .onboarding_peer import identity
             print(json.dumps(identity(target)))
@@ -533,7 +848,10 @@ def main(argv: list[str] | None = None) -> int:
             return target.serve(receive_only=args.receive_only, visibility_installation=args.visibility_installation,
                                 ready_descriptor=args.ready_fd)
         if args.action in {"running", "admitted-running"}:
-            print(json.dumps(target.running(admitted=args.action == 'admitted-running')))
+            stage = 'native-observation'
+            print(json.dumps(target.running(admitted=args.action == 'admitted-running',
+                require_loaded=args.require_loaded,
+                deadline_ns=observation_deadline_ns)))
             return 0
         if args.action in {'admission-check', 'admission-enroll'}:
             from .onboarding_admission import ReceivingHolder
@@ -562,7 +880,9 @@ def main(argv: list[str] | None = None) -> int:
             result["request"] = target.credential_request()
         print(json.dumps(result))
         return 0
-    except Exception:
+    except Exception as error:
+        if args.diagnostics:
+            print(json.dumps(refusal_diagnostic(error, stage=stage)), file=sys.stderr)
         print(json.dumps({"error": "native_onboarding_target_refused"}))
         return 1
 

@@ -113,11 +113,11 @@ def _record(state_dir: str | Path, name: str, owner: str) -> tuple[Path, dict]:
 
 
 @contextlib.contextmanager
-def _locked(directory: Path):
+def _locked(directory: Path, *, shared: bool = False):
     fd = os.open(_path(directory / "lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise SeedError("seed_operation_in_progress", 409) from exc
         yield

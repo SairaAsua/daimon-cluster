@@ -33,7 +33,9 @@ jobs:
     needs: scope
     if: needs.scope.outputs.profile != 'docs'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Run38728293267 reached75% without a failure before the old20min cap.
+    # Budget the complete suite plus setup; owner/native deadlines stay fixed.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -315,6 +317,7 @@ jobs:
           clusterctl/onboarding_receiving_update.py
           tests/test_receiving_update_preflight.py
           tests/test_receiving_update_selection.py
+          tests/test_source_bootstrap.py
           clusterctl/onboarding_target.py
           clusterctl/onboarding_existing.py
           clusterctl/onboarding_enrollment.py
@@ -433,6 +436,13 @@ jobs:
         run: python tools/check_rc_types.py
       - run: >-
           python -m compileall -q clusterctl clusterd steward_tools tests tools
+      - name: Test the guest owner under its actual UID contract
+        if: contains(needs.scope.outputs.pytest_args, 'tests/test_guest_owner_bootstrap.py') || needs.scope.outputs.profile == 'full'
+        run: |
+          set -eu
+          onboarding_python="$(python -c 'import sys; print(sys.executable)')"
+          sudo env LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}" "$onboarding_python" -B tools/ci_guest_owner.py \
+            --uid="$(id -u)" --gid="$(id -g)"
       - name: Prove root worker and canonical service owner separation
         if: needs.scope.outputs.profile == 'full' || needs.scope.outputs.profile == 'onboarding'
         run: |
@@ -442,8 +452,9 @@ jobs:
             tests/test_onboarding_host_ownership.py -k 'root_worker or existing_authority' \
             -W error::ResourceWarning -W error::pytest.PytestUnraisableExceptionWarning
       - run: >-
-          python -m pytest -q
+          python -m pytest -q -x --tb=short
           ${{ needs.scope.outputs.pytest_args }}
+          --deselect=tests/test_guest_owner_bootstrap.py
           -W error::ResourceWarning
           -W error::pytest.PytestUnraisableExceptionWarning
           --durations=10
@@ -485,7 +496,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: AlterMundi/daimon-matrix
-          ref: cdafbc0513d43c39f03be6e8b1b0636b9e4e9422
+          ref: 0dc0b555939b16a1150a220a366a6911a5ae9c28
           path: matrix-source
           fetch-depth: 0
           persist-credentials: false
@@ -501,7 +512,7 @@ jobs:
           done
           docker version
           test "$(git -C matrix-source rev-parse HEAD)" = \
-            cdafbc0513d43c39f03be6e8b1b0636b9e4e9422
+            0dc0b555939b16a1150a220a366a6911a5ae9c28
       - name: Prove isolated recovery roles and read-only snapshot restore
         env:
           DAIMON_RUN_DOCKER_RECOVERY_TESTS: "1"

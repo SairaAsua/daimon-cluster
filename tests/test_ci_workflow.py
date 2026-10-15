@@ -128,3 +128,31 @@ def test_ci_bubblewrap_install_is_cached_bounded_and_fail_closed() -> None:
     assert "Acquire::https::Timeout=15" in step
     assert "Dpkg::Lock::Timeout=30" in step
     assert "test -x /usr/bin/bwrap" in step
+
+
+def test_recovery_workflow_uses_the_actual_host_matrix_contract_pin() -> None:
+    import re
+    from clusterctl.matrix_host import MATRIX_CONTRACT_COMMIT
+    root = Path(__file__).parents[1]
+    tree = ast.parse((root/'tests/integration/test_recovery_rebirth_containers.py').read_text())
+    assert any(isinstance(node, ast.ImportFrom) and node.module == 'clusterctl.matrix_host'
+               and any(alias.name == 'MATRIX_CONTRACT_COMMIT' for alias in node.names)
+               for node in tree.body)
+    assignments = [node for node in tree.body if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == 'MATRIX_COMMIT'
+                           for target in node.targets)]
+    assert len(assignments) == 1 and isinstance(assignments[0].value, ast.Name)
+    assert assignments[0].value.id == 'MATRIX_CONTRACT_COMMIT'
+    workflow = (root/'.github/workflows/tests.yml').read_text().split('  recovery-rebirth-disposable-hosts:', 1)[1]
+    assert re.search(r'ref: ([0-9a-f]{40})', workflow).group(1) == MATRIX_CONTRACT_COMMIT
+    assert re.search(r'git -C matrix-source rev-parse HEAD.*?([0-9a-f]{40})', workflow, re.S).group(1) == MATRIX_CONTRACT_COMMIT
+
+
+def test_guest_owner_contract_uses_kernel_uid_mapping_and_is_not_run_twice() -> None:
+    workflow = (Path(__file__).parents[1] / '.github/workflows/tests.yml').read_text()
+    step = workflow.split('      - name: Test the guest owner under its actual UID contract\n', 1)[1].split('      - name:', 1)[0]
+    assert "contains(needs.scope.outputs.pytest_args, 'tests/test_guest_owner_bootstrap.py')" in step
+    assert "needs.scope.outputs.profile == 'full'" in step
+    assert 'sudo env LD_LIBRARY_PATH=' in step and 'tools/ci_guest_owner.py' in step
+    assert '--uid="$(id -u)" --gid="$(id -g)"' in step
+    assert workflow.count('--deselect=tests/test_guest_owner_bootstrap.py') == 1

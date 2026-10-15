@@ -150,7 +150,7 @@ class AdmittedDaemon:
                     "raise SystemExit(child_main(Path(sys.argv[2]),json.loads(sys.argv[3]),"
                     "json.loads(sys.argv[4]),int(sys.argv[5]),int(sys.argv[6]),int(sys.argv[7]),"
                     "sys.argv[8]=='true',Path(sys.argv[9]) if sys.argv[9] else None,"
-                    "Path(sys.argv[10]) if sys.argv[10] else None,int(sys.argv[11])))")
+                    "Path(sys.argv[10]) if sys.argv[10] else None,int(sys.argv[11]),sys.argv[12]))")
         def spawn():
             environment = {'PATH':os.defpath, 'LANG':'C.UTF-8', 'HOME':str(self.target.home),
                 'LD_LIBRARY_PATH':str(Path(sys.base_prefix)/'lib')}
@@ -159,7 +159,8 @@ class AdmittedDaemon:
             arguments = [str(self.target.home), json.dumps(self.target.plan),
                 json.dumps(self.target.genesis), str(child.fileno()), str(ready_write), str(os.getpid()),
                 'true' if receive_only else 'false', str(visibility_installation) if visibility_installation else '',
-                str(messaging_application) if messaging_application else '', str(self.target.code_uid)]
+                str(messaging_application) if messaging_application else '', str(self.target.code_uid),
+                self.target.code_digest]
             from . import onboarding_code_successor, onboarding_sdk
             parameters = onboarding_code_successor.sdk_parameters(self.target.code, uid=self.target.code_uid)
             if parameters:
@@ -180,7 +181,8 @@ from clusterctl.onboarding_runtime import child_main
 import json
 raise SystemExit(child_main(Path(sys.argv[1]), json.loads(sys.argv[2]), json.loads(sys.argv[3]),
     int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6]), sys.argv[7]=='true',
-    Path(sys.argv[8]) if sys.argv[8] else None, Path(sys.argv[9]) if sys.argv[9] else None, int(sys.argv[10])))
+    Path(sys.argv[8]) if sys.argv[8] else None, Path(sys.argv[9]) if sys.argv[9] else None,
+    int(sys.argv[10]), sys.argv[11]))
 '''
                 command = [str(venv / 'bin/python'), '-B', '-I', '-S', '-c', child_launcher,
                            str(venv), str(imports), str(self.target.code), *arguments]
@@ -248,12 +250,32 @@ raise SystemExit(child_main(Path(sys.argv[1]), json.loads(sys.argv[2]), json.loa
 
 
 def child_main(home, plan, genesis, descriptor, ready_descriptor, guardian_pid,
-               receive_only, visibility_installation, messaging_application=None, code_uid=0):
+               receive_only, visibility_installation, messaging_application=None, code_uid=0,
+               code_digest=None):
+    # The parent checks its own tree, but only this child can attest its boot.
+    # Do this before importing Matrix or opening Body custody.
+    from . import onboarding_sdk, onboarding_code_successor
+    code = Path(__file__).resolve().parents[1]
+    parameters = onboarding_code_successor.sdk_parameters(code, uid=code_uid)
+    startup = (onboarding_sdk.qualified_startup(Path(sys.prefix), code, code_uid=code_uid,
+        code_digest=code_digest or plan['release_digest'], **parameters) if parameters else None)
     from daimon_matrix import daemon, runtime, native_egress
     from .onboarding_target import Target
-    target = Target(home, plan, genesis, code_uid=code_uid)
-    if target.observe()['phase'] != 'v8' or os.getppid() != guardian_pid:
+    target = Target(home, plan, genesis, code_uid=code_uid, code_digest=code_digest,
+                    qualified_startup=startup)
+    prepared = target.observe()
+    if prepared['phase'] != 'v8' or os.getppid() != guardian_pid:
         raise OnboardingError('onboarding_runtime_parent_rejected')
+    selected_group = prepared.get('group')
+    if selected_group is not None:
+        # The owner-signed group already selects its application and visibility.
+        # Resolve it before composing the base: its disclosure belongs to the
+        # group application, not the native runtime bundle. No redundant CLI
+        # application hint or archived pair selection is needed.
+        if receive_only:
+            raise OnboardingError('onboarding_visibility_selection_required')
+        messaging_application = Path(selected_group['application'])
+        visibility_installation = Path(selected_group['visibility'])
     stopping = threading.Event()
     connection = socket.socket(fileno=descriptor)
     connection.settimeout(5)
@@ -287,11 +309,26 @@ def child_main(home, plan, genesis, descriptor, ready_descriptor, guardian_pid,
         else:
             options = (dict(egress=native_egress.closed_visibility(clock=clock)) if receive_only else
                    dict(egress_factory=daemon._visibility_factory(visibility_installation, clock=clock)))
+        from .onboarding_peer import approved_group_authorities
+        authorities = approved_group_authorities(target.package / 'runtime', target.root / 'tribe',
+            target.document_bundle())
+        if authorities:
+            options['relationship_authorities'] = authorities
         hosted = runtime.load_runtime(target.package/'runtime', 'runtime.json', target._reader,
-            clock=clock, body_reader=body_reader, **options)
+            clock=clock, body_reader=body_reader,
+            **({} if startup is None else {'qualified_startup': startup}), **options)
         from .onboarding_peer import group_application
         group = group_application(target, hosted)
+        if (selected_group is None) != (group is None):
+            raise OnboardingError('onboarding_group_selection_changed')
         if group is not None:
+            if receive_only:
+                raise OnboardingError('onboarding_visibility_selection_required')
+            if (group['tribe_ref'] != selected_group['tribe_ref']
+                    or Path(group['directory']) != Path(selected_group['application'])
+                    or Path(group['visibility']) != Path(selected_group['visibility'])
+                    or hosted.state_root / group['socket'] != Path(selected_group['socket'])):
+                raise OnboardingError('onboarding_group_selection_changed')
             # Reuse the same admitted daemon, native lock and visibility adapter.
             # A group selection replaces bootstrap/default pair apps, not history.
             messaging_application = Path(group['directory'])

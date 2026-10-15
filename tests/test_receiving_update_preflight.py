@@ -120,25 +120,22 @@ def test_new_revision_requires_exact_wheel_selection_not_a_commit_label(tmp_path
 
 def test_completed_generation_with_other_interpreter_is_not_reported_prepared(tmp_path, monkeypatch):
     code, checksum, home, path, manifest, _ = fixture(tmp_path)
-    first = call(code, checksum, path, manifest, prepare=True, home=home)
+    call(code, checksum, path, manifest, prepare=True, home=home)
     receipt = next(home.rglob('installation.json'))
     original_receipt = receipt.read_bytes()
     original_module = next(home.glob('.local/share/daimon-matrix/sdk/*/venv/lib/python*/site-packages/daimon_matrix/canonical.py'))
     original_bytes = original_module.read_bytes()
-    actual_run = onboarding_sdk._run
+    actual_interpreter = onboarding_sdk.interpreter
     probes = []
-    def different_generation_interpreter(argv):
-        if argv[-1].startswith('import json,sys; print'):
-            probes.append(argv)
-            observed = copy.deepcopy(first['interpreter'])
-            observed['version'][2] += 1
-            return json.dumps(observed)
-        return actual_run(argv)
-    monkeypatch.setattr(onboarding_sdk, '_run', different_generation_interpreter)
+    def different_generation_interpreter(venv, **kwargs):
+        probes.append(venv)
+        observed = copy.deepcopy(actual_interpreter(venv, **kwargs))
+        observed['version'][2] += 1
+        return observed
+    monkeypatch.setattr(onboarding_sdk, 'interpreter', different_generation_interpreter)
     with pytest.raises(OnboardingError, match='incompatible_receiving_interpreter'):
         call(code, checksum, path, manifest, prepare=True, home=home)
-    assert len(probes) == 1 and probes[0][1:3] == ['-I', '-S']
-    assert Path(probes[0][0]) == receipt.parent / 'venv/bin/python'
+    assert probes == [receipt.parent / 'venv']
     assert receipt.read_bytes() == original_receipt and original_module.read_bytes() == original_bytes
 
 

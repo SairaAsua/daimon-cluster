@@ -1,6 +1,8 @@
 """Typed substrate commands preserve foreign bodies and reconcile partial creation."""
 import copy
 import json
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -72,6 +74,56 @@ def configured(tmp_path):
                                                       plan=value, revoked=False))
     run = IncusFixture()
     return config, value, run, HostBackend(config, run=run)
+
+
+def test_receiving_base_keeps_original_release_without_requiring_participant_archive(tmp_path):
+    from tests.test_onboarding_code_successor import fixture as code_fixture
+    (tmp_path/'code-fixture').mkdir()
+    (tmp_path/'host-fixture').mkdir()
+    base,checksum,_,_=code_fixture(tmp_path/'code-fixture')
+    config,value,run,_=configured(tmp_path/'host-fixture')
+    value={**value,'release_digest':checksum}
+    config=replace(config,code=base,release_digest=checksum,
+        inputs=tmp_path/'missing-inputs',views=tmp_path/'missing-views')
+    backend=HostBackend(config,run=run)
+    original=copy.deepcopy(value)
+    assert backend._receiving_base(value)==Path('/opt/daimon-onboarding')/checksum
+    assert value==original and not run.calls
+    # Initial onboarding still requires and verifies the participant input.
+    with pytest.raises(FileNotFoundError):
+        backend._guest_paths(value)
+    assert not run.calls
+    with pytest.raises(OnboardingError,match='configuration_required'):
+        backend._receiving_base({**value,'release_digest':'0'*64})
+    (base/'inheritance.md').write_text('Unqualified replacement source context.\n')
+    with pytest.raises(OnboardingError,match='release_digest_mismatch'):
+        backend._receiving_base(value)
+    assert value==original and not run.calls
+
+
+@pytest.mark.parametrize('optional', [{}, {'group': {}}, {'receiving_controller': {}},
+                                     {'group': {}, 'receiving_controller': {}}])
+def test_matrix_observation_wrapper_retains_supported_selection_metadata(tmp_path, optional):
+    """Wrapper seam; Target tests authenticate these receiving observations."""
+    _,value,_,backend=configured(tmp_path)
+    observed=dict(phase='v8',request={},receipt={},**optional)
+    backend._target_call=lambda *_args,**_kwargs:observed
+    assert backend._matrix_command(value,'observe') is observed
+
+
+@pytest.mark.parametrize('change', ['unknown-field','missing-receipt','invalid-phase'])
+def test_matrix_observation_wrapper_still_rejects_unrecognized_contract(tmp_path, change):
+    _,value,_,backend=configured(tmp_path)
+    observed=dict(phase='v8',request={},receipt={})
+    if change=='unknown-field':
+        observed['unexpected']={}
+    elif change=='missing-receipt':
+        del observed['receipt']
+    else:
+        observed['phase']='controller-ready'
+    backend._target_call=lambda *_args,**_kwargs:observed
+    with pytest.raises(OnboardingError,match='invalid_onboarding_observation'):
+        backend._matrix_command(value,'observe')
 
 
 def test_exact_receiving_mount_can_keep_its_existing_operational_alias(tmp_path):
@@ -217,3 +269,296 @@ def test_private_connections_are_owner_scoped_and_never_return_bot_token(tmp_pat
     being_seed._write(directory / 'record.json', {**record, 'created_by': 'other'})
     with pytest.raises(OnboardingError, match='account_authorization_required'):
         backend._ssh_key(value)
+
+
+def candidate_call_fixture(tmp_path, monkeypatch):
+    """Real sealed public code; fake Incus transport/authorization only."""
+    import hashlib
+    import os
+    from dataclasses import replace
+    from pathlib import Path
+    from clusterctl import onboarding_code_successor, onboarding_sdk
+    from tests.test_onboarding_code_successor import sdk_generations
+    base, original, source, _, sdk, _ = sdk_generations(tmp_path)
+    output = tmp_path / 'candidate'
+    wheel = next((sdk / 'wheels').glob('*.whl'))
+    result = onboarding_code_successor.build(base, original, source, ('onboarding_target.py',), output,
+        sdk=sdk, matrix_commit=onboarding_sdk.MATRIX_COMMIT,
+        matrix_wheel_sha256=hashlib.sha256(wheel.read_bytes()).hexdigest())
+    config, value, run, _ = configured(tmp_path)
+    config = replace(config, code=base, release_digest=original,
+        custody=tmp_path / 'custody', custody_grants=tmp_path / 'custody-grants')
+    value = {**value, 'release_digest': original}
+    being_seed._write(config.grants / 'eko.json', dict(schema='cluster-onboarding-host-grant/v1',
+        plan=value, revoked=False))
+    calls = []
+    def execute(argv, **kwargs):
+        if argv[0] == 'exec':
+            calls.append((argv, kwargs))
+            return '{"observed": true}'
+        return run(argv)
+    backend = HostBackend(config, run=execute)
+    monkeypatch.setattr(backend, '_ceremony', lambda _plan: SimpleNamespace(authorize=lambda _plan: True))
+    guest_base = Path('/opt/daimon-onboarding') / original
+    monkeypatch.setattr(backend, '_guest_paths', lambda _plan: (tmp_path, guest_base, {}))
+    candidate = (output, result['runtime_digest'])
+    guest = Path('/opt/daimon-onboarding-runtime') / candidate[1]
+    run.instances.append(dict(name='dm-eko', expanded_devices={'retained-candidate': dict(
+        type='disk', source=str(output), path=str(guest), readonly='true', shift='true')}))
+    assert output.stat().st_uid == os.geteuid()
+    return backend, value, run, candidate, calls
+
+
+def test_host_probes_exact_mounted_candidate_without_selecting_it(tmp_path, monkeypatch):
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    config = backend.config
+    original = {path: path.read_bytes() for path in candidate[0].rglob('*') if path.is_file()}
+    monkeypatch.setattr(backend, '_runtime_selection', lambda _: pytest.fail('active selection used for candidate'))
+    result = backend._target_call(value, 'admitted-running', candidate=candidate,
+        observation_timeout_seconds=5, require_loaded=True)
+    assert result == {'observed': True} and backend.config is config
+    assert len(calls) == 1
+    argv, options = calls[0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    sdk = json.loads((candidate[0] / 'sdk/sdk.json').read_bytes())
+    venv = Path('/home/agent/.local/share/daimon-matrix/sdk') / digest(sdk) / 'venv'
+    entry = argv.index('--') + 1
+    assert argv[entry:entry + 4] == [str(venv / 'bin/python'), '-B', '-I', '-S']
+    assert str(venv.parent / 'runtime-imports') in argv
+    assert argv[argv.index('--runtime-digest') + 1] == candidate[1]
+    assert argv[argv.index('--runtime-code') + 1].endswith(candidate[1])
+    assert '--require-loaded' in argv
+    assert 0 < float(argv[argv.index('--observation-timeout-seconds') + 1]) <= 5
+    assert 0 < options['timeout_seconds'] <= 5
+    assert original == {path: path.read_bytes() for path in original}
+    assert not list(tmp_path.rglob('custody.json'))
+
+
+@pytest.mark.parametrize('action', ['sdk-prepare', 'sdk-observe'])
+def test_host_sdk_preparation_keeps_its_system_interpreter(tmp_path, monkeypatch, action):
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    backend._target_call(value, action, candidate=candidate)
+    argv = calls[0][0]
+    assert argv[argv.index('--') + 1] == '/usr/bin/python3'
+    assert not any('/venv/' in argument for argument in argv)
+
+
+@pytest.mark.parametrize('change', ['missing-mount', 'writable-mount', 'other-source', 'changed-code',
+                                  'wrong-digest', 'authority-action', 'public-profile'])
+def test_host_candidate_refusal_precedes_owner_command(tmp_path, monkeypatch, change):
+    backend, value, run, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    action, options = 'observe', {}
+    mount = run.instances[0]['expanded_devices']['retained-candidate']
+    if change == 'missing-mount':
+        run.instances[0]['expanded_devices'].clear()
+    elif change == 'writable-mount':
+        mount['readonly'] = 'false'
+    elif change == 'other-source':
+        mount['source'] = '/different-source'
+    elif change == 'changed-code':
+        (candidate[0] / 'clusterctl/onboarding_target.py').write_bytes(b'changed')
+    elif change == 'wrong-digest':
+        candidate = (candidate[0], 'f' * 64)
+    elif change == 'authority-action':
+        action = 'activate'
+    else:
+        options['profile'] = {'unexpected': True}
+    with pytest.raises(OnboardingError):
+        backend._target_call(value, action, candidate=candidate, **options)
+    assert not calls and not run.calls
+
+
+@pytest.mark.parametrize('timeout', [0, -1, float('nan'), float('inf'), 61])
+def test_host_observation_budget_rejects_invalid_values_before_transport(tmp_path, timeout):
+    _, value, run, backend = configured(tmp_path)
+    with pytest.raises(OnboardingError, match='deadline_required'):
+        backend._target_call(value, 'admitted-running', observation_timeout_seconds=timeout)
+    assert not run.calls
+
+
+def test_host_rejects_late_observation_without_retry(tmp_path, monkeypatch):
+    from clusterctl import onboarding_host
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    clock = [1_000_000_000]
+    monkeypatch.setattr(onboarding_host.time, 'monotonic_ns', lambda: clock[0])
+    execute = backend.run
+    def late(argv, **kwargs):
+        result = execute(argv, **kwargs)
+        if argv[0] == 'exec':
+            clock[0] += 6_000_000_000
+        return result
+    backend.run = late
+    with pytest.raises(OnboardingError, match='deadline_expired'):
+        backend._target_call(value, 'admitted-running', candidate=candidate, observation_timeout_seconds=5)
+    assert len(calls) == 1
+
+
+def test_host_deadline_exhausted_by_authorization_dispatches_nothing(tmp_path, monkeypatch):
+    from clusterctl import onboarding_host
+    _, value, run, backend = configured(tmp_path)
+    clock = [1_000_000_000]
+    monkeypatch.setattr(onboarding_host.time, 'monotonic_ns', lambda: clock[0])
+    authorize = backend.authorize
+    def late(*args):
+        allowed = authorize(*args)
+        clock[0] += 6_000_000_000
+        return allowed
+    monkeypatch.setattr(backend, 'authorize', late)
+    with pytest.raises(OnboardingError, match='deadline_expired'):
+        backend._dispatch(value, ['exec', 'dm-eko'], timeout_seconds=5, deadline_ns=6_000_000_000)
+    assert not run.calls
+
+
+def test_incus_observation_timeout_is_not_a_guest_exit_receipt(monkeypatch):
+    import subprocess
+    from clusterctl import onboarding_host
+    def timeout(argv, **kwargs):
+        assert kwargs['timeout'] == 3
+        raise subprocess.TimeoutExpired(argv, kwargs['timeout'])
+    monkeypatch.setattr(onboarding_host.subprocess, 'run', timeout)
+    with pytest.raises(OnboardingError, match='host_operation_failed'):
+        HostBackend._run(['exec', 'dm-fixture'], timeout_seconds=3)
+
+
+def test_candidate_mount_and_owner_observation_share_one_budget(tmp_path, monkeypatch):
+    from clusterctl import onboarding_host
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    clock = [1_000_000_000]
+    monkeypatch.setattr(onboarding_host.time, 'monotonic_ns', lambda: clock[0])
+    execute, inspections = backend.run, []
+    def mounted(argv, **kwargs):
+        result = execute(argv, **kwargs)
+        if argv[0] == 'list':
+            inspections.append((argv, kwargs))
+            clock[0] += 3_000_000_000
+        elif argv[0] == 'storage':
+            pytest.fail('volume inventory is unrelated to candidate mount inspection')
+        return result
+    backend.run = mounted
+    backend._target_call(value, 'admitted-running', candidate=candidate, observation_timeout_seconds=5)
+    assert len(inspections) == len(calls) == 1
+    assert inspections[0][1]['timeout_seconds'] == 5
+    assert calls[0][1]['timeout_seconds'] == 2
+    argv = calls[0][0]
+    assert float(argv[argv.index('--observation-timeout-seconds') + 1]) == 2
+
+
+def test_slow_candidate_mount_inspection_never_starts_owner_command(tmp_path, monkeypatch):
+    from clusterctl import onboarding_host
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    clock = [1_000_000_000]
+    monkeypatch.setattr(onboarding_host.time, 'monotonic_ns', lambda: clock[0])
+    execute, inspections = backend.run, []
+    def late(argv, **kwargs):
+        assert argv[0] == 'list'
+        inspections.append(kwargs['timeout_seconds'])
+        result = execute(argv, **kwargs)
+        clock[0] += 6_000_000_000
+        return result
+    backend.run = late
+    with pytest.raises(OnboardingError, match='deadline_expired'):
+        backend._target_call(value, 'admitted-running', candidate=candidate, observation_timeout_seconds=5)
+    assert inspections == [5] and not calls
+
+
+@pytest.mark.parametrize('phase', ['freeze', 'stage', 'publish'])
+def test_host_forwards_owner_bootstrap_only_as_guest_owner(tmp_path, monkeypatch, phase):
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    options = dict(candidate=candidate, bootstrap_timeout_seconds=5)
+    if phase != 'freeze':
+        options['bootstrap_request'] = {'operation_id': 'synthetic', 'plan_digest': digest(value)}
+    if phase == 'publish':
+        options['bootstrap_ready_sha256'] = 'a' * 64
+    backend._target_call(value, 'receiving-bootstrap-' + phase, **options)
+    argv, bounds = calls[0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    assert argv[argv.index('--') + 1] == '/usr/bin/python3'
+    assert 0 < bounds['timeout_seconds'] <= 5
+    assert '--bootstrap-timeout-seconds' in argv and '--observation-timeout-seconds' not in argv
+    if phase != 'freeze':
+        assert json.loads(argv[argv.index('--bootstrap-request-json') + 1]) == options['bootstrap_request']
+    if phase == 'publish':
+        assert argv[argv.index('--bootstrap-ready-sha256') + 1] == 'a' * 64
+
+
+@pytest.mark.parametrize('action', ['bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce',
+                                  'bootstrap-select', 'bootstrap-start'])
+def test_host_root_service_route_never_executes_private_sdk_or_installer(tmp_path, monkeypatch, action):
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    options = dict(candidate=candidate, timeout_seconds=5)
+    if action == 'bootstrap-inspect':
+        options['owner_observation'] = {'process': {'pid': 123}, 'admission_parent': {'pid': 122}}
+    else:
+        options['request'] = {'plan_digest': digest(value)}
+    backend._guest_service_call(value, action, **options)
+    argv, bounds = calls[0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '0', '--group', '0']
+    assert '--' in argv and argv[argv.index('--') + 1] == '/usr/bin/python3'
+    assert argv[argv.index('--action') + 1] == action
+    assert 'clusterctl.onboarding_service' in ''.join(argv)
+    assert not any('site-packages' in item or '/venv/' in item for item in argv)
+    assert '--receive-only' not in argv and '--visibility-installation' not in argv
+    assert 0 < bounds['timeout_seconds'] <= 5
+
+
+@pytest.mark.parametrize('phase', ['freeze', 'stage', 'publish'])
+def test_host_bootstrap_rejects_unqualified_or_incomplete_parameters_before_dispatch(tmp_path, phase):
+    _, value, run, backend = configured(tmp_path)
+    with pytest.raises(OnboardingError, match='invalid_receiving_bootstrap_request'):
+        backend._target_call(value, 'receiving-bootstrap-' + phase, bootstrap_timeout_seconds=5)
+    assert not run.calls
+
+
+def test_host_forwards_control_paths_without_fabricating_a_native_request(tmp_path, monkeypatch):
+    from pathlib import Path
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    private = Path('/home/agent/body/runtime/receiving-control/test.json')
+    command = Path('/home/agent/approved-control.json')
+    backend._target_call(value, 'receiving-control-prepare', candidate=candidate,
+        control_file=private, control_command=command)
+    argv = calls[0][0]
+    assert argv[argv.index('--control-file') + 1] == str(private)
+    assert argv[argv.index('--control-command') + 1] == str(command)
+
+
+def test_guest_control_uses_bounded_stdin_and_owner_retained_request_path(tmp_path, monkeypatch):
+    from pathlib import Path
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    command = {'phase': 'revoke', 'readers': [], 'operation_id': 'synthetic'}
+    backend._target_call(value, 'receiving-control-prepare', candidate=candidate,
+        control_file=Path('/home/agent/body/runtime/receiving-control/test.json'),
+        control_value=command, observation_timeout_seconds=5)
+    argv, options = calls[0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    assert argv[argv.index('--') + 1].endswith('/venv/bin/python')
+    assert argv[argv.index('--control-command') + 1] == '-'
+    assert not any('synthetic' in part for part in argv)
+    assert json.loads(options['input_data']) == command
+    assert 0 < options['timeout_seconds'] <= 5
+
+
+def test_receiving_identity_uses_prepared_candidate_and_one_finite_owner_budget(tmp_path, monkeypatch):
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    backend._target_call(value, 'receiving-identity', candidate=candidate,
+        identity_expires_at_ms=12345, observation_timeout_seconds=5)
+    argv, options = calls[0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    assert argv[argv.index('--') + 1].endswith('/venv/bin/python')
+    assert argv[argv.index('--identity-expires-at-ms') + 1] == '12345'
+    assert 0 < options['timeout_seconds'] <= 5
+
+
+def test_incus_stdin_is_bounded_and_never_routed_through_a_shell(monkeypatch):
+    from clusterctl import onboarding_host
+    calls = []
+    def execute(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout='{}')
+    monkeypatch.setattr(onboarding_host.subprocess, 'run', execute)
+    HostBackend._run(['exec', 'fixture'], timeout_seconds=3, input_data='{"phase":"revoke"}')
+    assert calls[0][0] == ['incus', 'exec', 'fixture']
+    assert calls[0][1]['input'] == '{"phase":"revoke"}'
+    assert calls[0][1]['timeout'] == 3 and 'shell' not in calls[0][1]
+    with pytest.raises(OnboardingError, match='invalid_receiving_control_request'):
+        HostBackend._run(['exec', 'fixture'], input_data='x' * (being_seed.MAX_SELECTION + 1))
+    assert len(calls) == 1

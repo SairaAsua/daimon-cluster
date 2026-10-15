@@ -6,9 +6,38 @@ import threading
 import pytest
 
 from clusterctl import onboarding_peer
-from clusterctl.onboarding import digest
+from clusterctl.onboarding import OnboardingError, digest
 from clusterctl.onboarding_source import Source
 pytest_plugins = ['tests.test_onboarding_peer']
+
+
+@pytest.mark.parametrize('observe', [False, True])
+def test_loaded_source_cli_requires_qualified_startup_before_owner_state(tmp_path, monkeypatch, capsys, observe):
+    from clusterctl import onboarding_source
+    monkeypatch.setattr(onboarding_source, 'Source', lambda *a, **k:
+        pytest.fail('unqualified observation opened owner state'))
+    arguments = ['--config', str(tmp_path / 'unread.json'), '--require-loaded']
+    if observe:
+        arguments.append('--observe')
+    assert onboarding_source.main(arguments) == 1
+    assert capsys.readouterr().out == '{"error": "native_onboarding_source_refused"}\n'
+
+
+def test_source_group_construction_does_not_invoke_unrelated_pair_ceremony(tmp_path, monkeypatch):
+    root = tmp_path / 'runtime'
+    root.mkdir(mode=0o700)
+    calls = []
+    def unavailable(*args, **kwargs):
+        calls.append(True)
+        raise OnboardingError('qualified_native_peer_sdk_required')
+    monkeypatch.setattr(onboarding_peer, 'native', unavailable)
+    source = Source(dict(schema='cluster-onboarding-source/v1', runtime_root=str(root),
+        password_file=str(tmp_path / 'unused.unlock'), native_visibility=str(tmp_path / 'unused.json'),
+        outputs=str(tmp_path / 'outputs'), applications=[]))
+    assert calls == []
+    with pytest.raises(OnboardingError, match='qualified_native_peer_sdk_required'):
+        source.tool
+    assert calls == [True]  # Explicit ceremony still has the exact existing guard.
 
 
 def signed_visibility(target, directory):
@@ -160,6 +189,17 @@ def test_signed_source_retains_native_client_and_peer_under_one_lock(journey, tm
             # An invalid send reaches the authenticated peer dispatcher but
             # cannot create or deliver a message.
             assert client.invoke('messaging.send', {})[1]['error']['code'] == 'invalid_params'
+            observed = source.observe()
+            assert observed['running'] is True
+            assert observed['applications'] == [fingerprint]
+            assert observed['receiving_readiness'] == 'unobserved'
+            assert observed['base_runtime_status']['local_origin'] == native.expected_server
+            connected = 'connection_observer' in getattr(LocalClient, '__dataclass_fields__', {})
+            assert observed['responder_association'] == ('same-connection' if connected else 'legacy-probe')
+            if connected:
+                assert observed['process']['pid'] == os.getpid()
+            with pytest.raises(OnboardingError, match='qualified_onboarding_(?:client|group)_required'):
+                source.observe(require_loaded=True)
         finally:
             stop.set()
             thread.join(timeout=10)

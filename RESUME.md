@@ -4,6 +4,29 @@ Architecture/profile navigation is
 [Matrix current architecture](https://github.com/AlterMundi/daimon-matrix/blob/main/docs/current-architecture.md).
 Current selections below supersede the explicitly historical qualification.
 
+## Current milestone work
+
+Matrix [milestone6 / #336](https://github.com/AlterMundi/daimon-matrix/issues/336)
+is active. Cluster [PR242](https://github.com/nicoechaniz/daimon-cluster/pull/242)
+contains the maintained Source/guest/cohort update controllers and their current
+qualification record; Matrix [PR352](https://github.com/AlterMundi/daimon-matrix/pull/352)
+contains the corresponding SDK candidate. Neither draft is a live-selection receipt.
+The existing three-body production group below stays selected.
+The candidate SDK pin is `0dc0b555939b16a1150a220a366a6911a5ae9c28`, including owner-local #355
+recovery without rebirth; it is not the selected production SDK. Qualification
+and actual receiving adoption remain in the current PR/work record.
+
+Use the current operation/PR evidence and the execution procedure in
+[the receiving update runbook](docs/runbooks/tribu-sdk-successor.md).
+Continue the same retained operation from its next missing effect. Do not turn
+evidence labels into additional manual procedures, reimplement completed stages,
+replay private trial scripts, repeat valid reviews or recreate identities/fixtures
+for routine software corrections. Prepare expiring controls only when needed. Close the receiving/update/compatible rollback gap first;
+I/O, status integration and future-member admission remain in the full milestone.
+Full CI uses one Python3.13.5 job with a30-minute limit. Run38728293267 exhausted
+the former20-minute cap at75% of the fail-fast suite without reporting a test
+failure. This job budget does not change any receiving/native freshness deadline.
+
 ## Current communication target — 2026-10-13
 
 CompAII, Eko and Oliva now use one signed membership group, demonstrated with

@@ -22,7 +22,7 @@ from . import being_seed, onboarding_release
 from .onboarding import OnboardingError, digest, private_directory
 
 SCHEMA = "cluster-onboarding-sdk/v1"
-MATRIX_COMMIT = "a1a70b6420692d19f85ad0edb945cba00c3f5459"
+MATRIX_COMMIT = "0dc0b555939b16a1150a220a366a6911a5ae9c28"
 PREVIOUS_MATRIX_COMMIT = "196ec7219f954cf4e514a1f61ae72eb3451d851e"
 
 
@@ -133,15 +133,21 @@ with ensurepip._get_pip_whl_path_ctx() as wheel:
           str(venv), mode, *arguments])
 
 
-def interpreter(venv: Path) -> dict:
+def interpreter(venv: Path, *, with_executable: bool = False) -> dict:
     """Observe the returned generation's actual interpreter without site hooks."""
-    probe = ("import json,sys; print(json.dumps(dict(implementation=sys.implementation.name, "
-             "version=list(sys.version_info[:3]))))")
+    probe = ("import json,sys,hashlib;from pathlib import Path; "
+             "value=dict(implementation=sys.implementation.name, version=list(sys.version_info[:3])); "
+             + ("value['executable_sha256']=hashlib.sha256(Path('/proc/self/exe').read_bytes()).hexdigest(); "
+                if with_executable else '') + "print(json.dumps(value))")
     value = json.loads(_run([str(venv / 'bin/python'), '-I', '-S', '-c', probe]))
-    if (not isinstance(value, dict) or set(value) != {'implementation', 'version'}
+    fields = {'implementation', 'version'} | ({'executable_sha256'} if with_executable else set())
+    if (not isinstance(value, dict) or set(value) != fields
             or not isinstance(value['implementation'], str)
             or not isinstance(value['version'], list) or len(value['version']) != 3
             or any(type(part) is not int for part in value['version'])):
+        raise OnboardingError('qualified_receiving_interpreter_required')
+    if with_executable and (not isinstance(value['executable_sha256'], str)
+            or re.fullmatch('[0-9a-f]{64}', value['executable_sha256']) is None):
         raise OnboardingError('qualified_receiving_interpreter_required')
     return value
 
@@ -149,6 +155,13 @@ def interpreter(venv: Path) -> dict:
 def runtime_imports(venv: Path, code: Path, *, code_uid: int = 0,
                     matrix_commit: str = MATRIX_COMMIT,
                     matrix_wheel_sha256: str | None = None) -> Path:
+    return _runtime_imports(venv, code, code_uid=code_uid, matrix_commit=matrix_commit,
+                            matrix_wheel_sha256=matrix_wheel_sha256)[0]
+
+
+def _runtime_imports(venv: Path, code: Path, *, code_uid: int = 0,
+                     matrix_commit: str = MATRIX_COMMIT,
+                     matrix_wheel_sha256: str | None = None) -> tuple[Path, dict, dict[str, str]]:
     """Derive one closed import tree without altering the installed generation.
 
     Startup executes only the trusted interpreter, approved code and these exact
@@ -164,7 +177,15 @@ def runtime_imports(venv: Path, code: Path, *, code_uid: int = 0,
         raise OnboardingError('installed_onboarding_sdk_changed')
     target = root / 'runtime-imports'
     receipt = root / 'runtime-imports.json'
-    with being_seed._locked(root):
+    # Prepared imports are immutable: serving startup and owner observation
+    # must not interrupt each other's full verification. Construction and SDK
+    # installation retain exclusive ownership of this same lock.
+    prepared = target.exists() and receipt.exists()
+    with being_seed._locked(root, shared=prepared):
+        if prepared and (not target.exists() or not receipt.exists()):
+            # Do not build or mint a receipt while holding read ownership if
+            # preparation changed before acquiring it.
+            raise OnboardingError('qualified_runtime_imports_required')
         temporary = root / ('runtime-imports-' + uuid.uuid4().hex)
         building = not target.exists() and not target.is_symlink()
         if building:
@@ -246,10 +267,156 @@ def runtime_imports(venv: Path, code: Path, *, code_uid: int = 0,
                     raise OnboardingError('qualified_runtime_imports_required')
             else:
                 being_seed._write(receipt, expected)
-            return target
+            return target, sdk, files
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
+
+
+def startup_context(venv: Path, imports: Path, code: Path) -> bool:
+    """Check the complete actual interpreter context, including its path tail.
+
+    The fresh trusted interpreter supplies its standard-library path list;
+    installed sites and arbitrary extra paths cannot become allowed roots.
+    This is a startup check, not a wheel verifier or a positive receiving claim.
+    """
+    baseline = json.loads(_run([str(venv / 'bin/python'), '-I', '-S', '-c',
+                               'import json,sys; print(json.dumps(sys.path))']))
+    return (Path(sys.prefix) == venv and bool(sys.flags.isolated)
+            and bool(sys.flags.no_site) and bool(sys.flags.dont_write_bytecode)
+            and sys.dont_write_bytecode
+            and sys.pycache_prefix == str(imports / '.disabled-bytecode')
+            and sys.path == [str(code), str(imports), *baseline])
+
+
+def qualified_startup(venv: Path, code: Path, *, code_digest: str, code_uid: int = 0,
+                      matrix_commit: str = MATRIX_COMMIT,
+                      matrix_wheel_sha256: str | None = None) -> dict:
+    """Mint boot evidence in the actual serving process, once before custody.
+
+    Reuse the maintained artifact verifier. Neither a parent receipt nor a
+    selected manifest alone qualifies the process. No mutable global marker,
+    status-time wheel verification or model-visible qualification override.
+    """
+    import importlib
+    from types import ModuleType
+    release = onboarding_release.verify(code, code_digest, uid=code_uid)
+    imports, sdk, files = _runtime_imports(venv, code, code_uid=code_uid,
+        matrix_commit=matrix_commit, matrix_wheel_sha256=matrix_wheel_sha256)
+    if not startup_context(venv, imports, code):
+        raise OnboardingError('qualified_runtime_context_required')
+    actual_interpreter = dict(implementation=sys.implementation.name,
+        version=list(sys.version_info[:3]),
+        executable_sha256=hashlib.sha256(Path('/proc/self/exe').read_bytes()).hexdigest())
+    if interpreter(venv, with_executable=True) != actual_interpreter:
+        raise OnboardingError('qualified_receiving_interpreter_required')
+    code_files = {row['path']: row['sha256'] for row in release['files']}
+    import_directories = {str(imports)}
+    for name in files:
+        import_directories.update(str(imports / parent) for parent in PurePosixPath(name).parents
+                                  if str(parent) != '.')
+    standard = json.loads(_run([str(venv / 'bin/python'), '-I', '-S', '-c',
+                               'import json,sys; print(json.dumps(sys.path))']))
+
+    def origins() -> None:
+        # Check preloaded packages before importing the selected Matrix. A
+        # correct sys.path must never launder an installed/preloaded module.
+        # Cryptography's native extension publishes two CFFI objects without
+        # file/spec metadata. Accept only its actual exports; the extension
+        # itself still undergoes the full inventory/origin checks below.
+        native = sys.modules.get('cryptography.hazmat.bindings._rust')
+        native_spec = getattr(native, '__spec__', None)
+        exports = {}
+        if (native_spec is not None
+                and isinstance(native_spec.loader, importlib.machinery.ExtensionFileLoader)
+                and native_spec.name == 'cryptography.hazmat.bindings._rust'):
+            openssl = getattr(native, '_openssl', None)
+            exports = {'_openssl': openssl, '_openssl.lib': getattr(openssl, 'lib', None)}
+        wrappers = getattr(sys.modules.get('cryptography.utils'), '_ModuleWithDeprecations', None)
+        for name, module in list(sys.modules.items()):
+            if name in {'_openssl', '_openssl.lib'}:
+                if module is None or module is not exports.get(name):
+                    raise OnboardingError('qualified_runtime_module_required')
+                continue
+            wrapped = wrappers is not None and type(module) is wrappers
+            if wrapped:
+                original = getattr(module, '_module', None)
+                if (not name.startswith('cryptography.') or not isinstance(original, ModuleType)
+                        or getattr(module, '__name__', None) != name
+                        or getattr(original, '__name__', None) != name
+                        or getattr(getattr(original, '__spec__', None), 'name', None) != name
+                        or getattr(module, '__file__', None) != getattr(original, '__file__', None)
+                        or getattr(module, '__path__', ()) != getattr(original, '__path__', ())):
+                    raise OnboardingError('qualified_runtime_module_required')
+                module = original
+            managed = (name == 'clusterctl' or name.startswith('clusterctl.')
+                    or name == 'daimon_matrix' or name.startswith('daimon_matrix.')
+                    or name in {'cryptography.hazmat.bindings._rust', 'cryptography.utils'} or wrapped
+                    or name == '__main__' and getattr(getattr(module, '__spec__', None),
+                                                   'name', '').startswith('clusterctl.'))
+            spec = getattr(module, '__spec__', None)
+            filename = getattr(module, '__file__', None)
+            if not managed:
+                if spec is not None and spec.origin in {'built-in', 'frozen'}:
+                    continue
+                if name == '__main__' and filename is None and spec is None:
+                    continue  # The trusted -c launcher has no source file.
+                if isinstance(filename, str):
+                    path = Path(filename)
+                    physical = path.resolve()
+                    if (path.is_absolute() and '..' not in path.parts
+                            and not {'site-packages', 'dist-packages'} & set(physical.parts)
+                            and any(physical.is_relative_to(Path(base).resolve()) for base in standard)):
+                        if any(Path(location) != path.parent or Path(location).resolve() != physical.parent
+                               for location in (
+                                *getattr(module, '__path__', ()),
+                                *(getattr(spec, 'submodule_search_locations', ()) or ()))):
+                            raise OnboardingError('qualified_runtime_module_required')
+                        continue
+                if filename is None and spec is not None and spec.submodule_search_locations:
+                    if all(location in import_directories and Path(location).is_dir()
+                           and Path(location).resolve() == Path(location)
+                           for location in (*getattr(module, '__path__', ()),
+                                            *spec.submodule_search_locations)):
+                        continue  # A verified-tree namespace package.
+                    raise OnboardingError('qualified_runtime_module_required')
+            root = code if name.startswith('clusterctl') or name == '__main__' else imports
+            inventory = code_files if root == code else files
+            if not isinstance(filename, str):
+                raise OnboardingError('qualified_runtime_module_required')
+            path = Path(filename)
+            if not path.is_absolute() or not path.is_relative_to(root):
+                raise OnboardingError('qualified_runtime_module_required')
+            relative = path.relative_to(root).as_posix()
+            owner = code_uid if root == code else os.geteuid()
+            if (relative not in inventory or hashlib.sha256(onboarding_release.regular(
+                    path, uid=owner)).hexdigest() != inventory[relative]):
+                raise OnboardingError('qualified_runtime_module_required')
+            for location in getattr(module, '__path__', ()):
+                if Path(location) != path.parent:
+                    raise OnboardingError('qualified_runtime_module_required')
+            if spec is None or spec.origin != filename:
+                raise OnboardingError('qualified_runtime_module_required')
+            for location in spec.submodule_search_locations or ():
+                if Path(location) != path.parent:
+                    raise OnboardingError('qualified_runtime_module_required')
+
+    origins()
+    importlib.import_module('daimon_matrix.runtime')
+    importlib.import_module('daimon_matrix.native_egress')
+    reader = importlib.import_module('daimon_matrix.release_compatibility').describe_reader()
+    origins()
+    if not startup_context(venv, imports, code):
+        raise OnboardingError('qualified_runtime_context_required')
+    return dict(schema='cluster-onboarding-loaded-startup/v1', process_id=os.getpid(),
+        startup_instance_id=str(uuid.uuid4()), code_digest=code_digest,
+        matrix_commit=sdk['matrix_commit'], sdk_digest=digest(sdk),
+        matrix_wheel_sha256=next(row['sha256'] for row in sdk['wheels']
+                                if row['distribution'] == 'daimon-matrix'),
+        import_files_sha256=digest(files), import_context_sha256=digest(dict(
+            path=sys.path, dont_write_bytecode=sys.dont_write_bytecode,
+            pycache_prefix=sys.pycache_prefix)), interpreter=actual_interpreter, reader=reader,
+        isolated=True, no_site=True, no_bytecode=True)
 
 
 def runtime_command(venv: Path, imports: Path, code: Path, module: str,

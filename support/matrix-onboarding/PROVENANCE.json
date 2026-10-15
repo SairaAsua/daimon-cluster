@@ -1,6 +1,6 @@
 {
   "commit": "63968130294c4db6eac51a94800a837f2c10bad5",
-  "installed_sdk_commit": "a1a70b6420692d19f85ad0edb945cba00c3f5459",
+  "installed_sdk_commit": "0dc0b555939b16a1150a220a366a6911a5ae9c28",
   "path": "tools/chat_link.py",
   "purpose": "Explicitly directed legacy peer ceremony. Upstream origin is retained; the qualified receiving copy includes maintained runtime compatibility extensions. It is not the Tribe group onboarding default.",
   "repository": "https://github.com/AlterMundi/daimon-matrix",

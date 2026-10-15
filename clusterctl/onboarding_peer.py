@@ -28,21 +28,29 @@ TOOL_COMMIT = '63968130294c4db6eac51a94800a837f2c10bad5'
 def native(code: Path, *, uid: int = 0):
     import importlib.metadata
     import sys
-    from .onboarding_sdk import MATRIX_COMMIT
+    from .onboarding_code_successor import sdk_parameters
+    from .onboarding_sdk import MATRIX_COMMIT, verify
     # Entry points verify every installed wheel byte before importing Matrix.
     # The offline body has a pinned installation receipt, not VCS direct_url.
     # Host/source invocation instead retains the exact installed VCS guard.
     manifest = code / 'sdk/sdk.json'
     if manifest.exists():
-        sdk = json.loads(onboarding_release.regular(manifest, uid=uid))
+        # The selected code was verified before this helper. Its explicit
+        # successor pins the replacement wheel as well as the commit; legacy
+        # code retains the fixed pin. Validating historical peer publication
+        # must not reject an otherwise qualified SDK solely for being newer.
+        parameters = sdk_parameters(code, uid=uid)
+        sdk = verify(code, uid=uid, **parameters)
         prefix = Path(sys.prefix)
         receipt = json.loads(onboarding_release.regular(prefix.parent / 'installation.json', uid=os.geteuid()))
         expected = dict(schema='cluster-onboarding-sdk-installation/v1', sdk_digest=digest(sdk),
-            matrix_commit=MATRIX_COMMIT, wheel_count=len(sdk['wheels']))
-        if (sdk['matrix_commit'] != MATRIX_COMMIT or prefix.name != 'venv'
+            matrix_commit=sdk['matrix_commit'], wheel_count=len(sdk['wheels']))
+        if (prefix.name != 'venv'
                 or prefix.parent.name != digest(sdk) or receipt != expected):
             raise OnboardingError('qualified_native_peer_sdk_required')
     else:
+        if sdk_parameters(code, uid=uid):
+            raise OnboardingError('qualified_native_peer_sdk_required')
         installed = json.loads(importlib.metadata.distribution('daimon-matrix').read_text('direct_url.json') or '{}')
         if installed.get('vcs_info', {}).get('commit_id') != MATRIX_COMMIT:
             raise OnboardingError('qualified_native_peer_sdk_required')
@@ -234,23 +242,45 @@ def observed_group(target, bundle: dict, *, socket_root: Path | None = None) -> 
     Called after ordinary receiving identity validation. It proves selection,
     not a model read or delivery, and never reconstructs archived pair routes.
     """
+    selected = _group_selection_from_bundle(target.root / 'tribe', bundle)
+    if selected is None:
+        return None
+    return dict(tribe_ref=selected['tribe_ref'], application=selected['directory'],
+        visibility=selected['visibility'], socket=str((target.package / 'runtime'
+            if socket_root is None else socket_root) / selected['socket']),
+        channel_id='tribe')
+
+
+def _group_selection_from_bundle(directory: Path, bundle: dict) -> dict | None:
+    """Verify the fixed receiving selector before opening private runtime state."""
     import time
     from daimon_matrix.canonical import unb64url
     from daimon_matrix.operator_rebirth import authority_from_runtime_bundle
     from daimon_matrix.messaging_config import _public_identity, verify_public_binding
-    directory = target.root / 'tribe'
     if not (directory / 'selection.json').exists():
         return None
     authority = authority_from_runtime_bundle(bundle)
     identity = _public_identity(authority, bundle['local_origin'], bundle['runtime_id'],
         bundle['runtime_label'], time.time_ns() // 1000000)
     key = unb64url(authority.credentials[identity['credential_id']]['body']['signing_key']['public'])
-    selected = _approved_group(directory, lambda value, binding:
+    return _approved_group(directory, lambda value, binding:
         verify_public_binding(identity, key, value, binding))
-    return dict(tribe_ref=selected['tribe_ref'], application=selected['directory'],
-        visibility=selected['visibility'], socket=str((target.package / 'runtime'
-            if socket_root is None else socket_root) / selected['socket']),
-        channel_id='tribe')
+
+
+def approved_group_authorities(runtime_root: Path, group_root: Path, bundle: dict) -> dict:
+    """Recover the owner-approved group's Root closure without pair enrollment.
+
+    Matrix verifies the selected signed publication against the current local
+    bundle and preserves any already-known authority history. No peer discovery,
+    native bundle mutation or private custody access is performed here.
+    """
+    selected = _group_selection_from_bundle(group_root, bundle)
+    if selected is None:
+        return {}
+    import time
+    from daimon_matrix.messaging_config import read_application_authorities
+    return read_application_authorities(runtime_root, 'runtime.json',
+        Path(selected['directory']), at_ms=time.time_ns() // 1000000)
 
 
 def augmented(target, original: dict, bundle: dict) -> tuple[dict, bool]:

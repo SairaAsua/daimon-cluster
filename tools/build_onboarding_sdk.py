@@ -67,7 +67,7 @@ def build(checkout: Path, output: Path) -> dict:
                        "PIP_CONFIG_FILE": os.devnull, "PIP_DISABLE_PIP_VERSION_CHECK": "1"}
         result = subprocess.run([sys.executable, "-m", "pip", "wheel", "--only-binary=:all:",
                                  "--constraint", str(ROOT / "constraints.txt"),
-                                 "--wheel-dir", str(wheels), str(source)],
+                                 "--wheel-dir", str(wheels), str(source), "websockets==15.0.1"],
                                 env=environment, capture_output=True, timeout=300, check=False)
         if result.returncode:
             raise OnboardingError("pinned_matrix_wheel_build_refused")

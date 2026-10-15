@@ -1,8 +1,167 @@
-# Readable Tribu SDK successor
+# Receiver-compatible Matrix updates
 
-Parent: [Matrix #287](https://github.com/AlterMundi/daimon-matrix/issues/287).
-Rendering and signed presentation installation are owned by Matrix. Cluster
-selects the exact executable SDK and maintained helper on the existing bodies.
+Current coordination: [Matrix #336](https://github.com/AlterMundi/daimon-matrix/issues/336),
+[Cluster #232](https://github.com/nicoechaniz/daimon-cluster/issues/232).
+The original readable-presentation increment is retained under
+[Matrix #287](https://github.com/AlterMundi/daimon-matrix/issues/287).
+Matrix owns signed messaging and presentation; Cluster selects the exact
+executable SDK and receiving helpers on the existing bodies.
+The current source candidate pins Matrix `0dc0b555939b16a1150a220a366a6911a5ae9c28`.
+The three-body production selection remains its separately recorded predecessor
+until receiving adoption succeeds.
+
+## Execute from the next missing effect
+
+Use one current operation and one reusable integrated receiving scenario. Keep
+its candidate, completed effects, reusable evidence and next missing effect in
+the existing work record. Dated trial scripts are evidence, not deployment entrypoints.
+
+| Maintained API | Responsibility |
+| --- | --- |
+| `prepare_sdk` / `preflight` | Prepare exact code and compatible installed SDK |
+| `SourceBootstrapController` | Resume the same Source lifecycle operation |
+| `prepare_guest_bootstrap` / `GuestBootstrapController.execute` | Resume the same guest root/owner operation |
+| `CohortController` | Select qualified required receivers and verify the cohort |
+
+These responsibilities distinguish evidence; they do not require another manual
+check, review, backup, report or fixture for every label. Reuse completed effects
+and valid tests. A routine software correction does not require a new identity,
+credential publication, signed authority transition or unrelated service restart.
+
+Finish a coherent source delta, run its affected checks once and publish it.
+Reuse existing builds/reviews/CI where their inputs are unchanged. After a code
+change, qualify the affected behavior and its integrated receiving path; do not
+repeat unaffected historical journeys or create a fresh fixture for each stage.
+Unknown shared-code deltas keep broader coverage. Correct a missing CI scope
+mapping when the existing selected job already exercises the changed contract.
+A content-verified literal SDK pin update combined with an already recognized
+receiving change composes their existing tests, including the full SDK contract.
+It does not trigger unrelated full-suite/physical workflows merely because both
+changes belong in one release. Executable drift in a pin file or unknown/sensitive
+remaining changes still selects broader coverage.
+
+On failure, inspect the exact controller stage, retained result and current
+process. Resume that operation through the maintained controller. A timeout
+alone authorizes neither replay nor a new identity. Do not benchmark unrelated
+substeps, build a parallel diagnostic runner, or repeat preparation to make an
+uncertain outcome look successful. Persist a successful effect before optional
+follow-up checks; an auxiliary retry probe must not silently shorten the supported
+operation budget. Resolve service/socket/process names from the retained binding,
+not a guessed conventional name. Use existing bounded diagnostics to resolve
+the concrete missing fact, then continue from it. An early missing socket is
+not a reason to restart a process whose exit has not been observed.
+For a `Type=simple` synthetic baseline, wait for its actual native socket while
+pinning the same service process before freezing the predecessor. A successful
+systemd start is not socket readiness. Capture the existing bounded CLI diagnostic
+on the failing call before coupled cleanup removes that process; a later call
+against a stopped fixture cannot diagnose the earlier live refusal.
+Keep the same finite synthetic service/admission scope alive across a pending
+startup observation. Baseline preparation may finish before freezing its owner
+deadline; individual native observations retain their supported bounds. Re-poll
+the retained start through the controller while its exact manager/process and
+original operation remain valid. Clean up on completion, an actual refusal or
+the outer fixture deadline, rather than stopping a still-loading process merely
+because one observation window expired. Cleanup must still stop owned native
+units before retiring their finite admission producer.
+Bounded native guest observation also waits for initial socket publication within
+its original remaining deadline. That wait starts no process and grants no
+readiness: the same-connection responder, admission parent, selected unit and
+loaded code are still verified afterwards. Ordinary status without a deadline
+keeps its immediate missing-socket refusal. Do not replay a retained native start
+or mint another controller because its first socket observation raced startup.
+
+Use the selected SDK for both the observer and receiver; validate that binding
+before lifecycle effects. Keep lifecycle journals on their actual owners.
+Root reads Source lifecycle proof through `SourceGroupClient(lifecycle_journal=...)`
+and its existing owner CLI/UID drop, never a copied journal row or private custody.
+Within one activation invocation, the controller reuses that exact owner/recipe's
+retained lifecycle projection; another invocation reads it again. Live process,
+identity, admission, roster and credential validity are still observed each round.
+A completed selection retry compares the gate already returned by the same
+qualified all-required observation, avoiding another cold status helper per body.
+Neither reuse extends the observation window or caches receiving readiness.
+Preparation's barrier also reuses the process/gate authenticated by that same
+all-required adoption round. Do not launch a second cold status helper for the
+same proof. The original freshness window, exact process/head checks and native
+roster CAS still apply; later invocations observe again.
+Positive controls use `prepare_apply_control`: one qualified owner invocation
+retains and applies the same exact request under the existing private lock.
+Expiry between those effects refuses application; a lost reply retains the exact
+request for reconciliation. Separate prepare/apply verbs remain for recovery.
+No proof-window or credential horizon is widened to compensate for setup cost.
+
+Prepare expiring fixture controls immediately before their use. If an unrelated
+urgent repair intervenes, preserve the scenario and completed effects instead
+of discarding them. Do not extend an expired frozen authorization; recover using
+the supported procedure for the exact retained state, not a new birth ceremony.
+The #355 successor separates the controller grant lifetime from the finite
+update deadline. Freeze selects `issue` when absent, `preserve` when still live,
+or `renew` only for an expired active-status optional V8 controller with valid
+original owner roles. Renewal requires the qualified native SDK before any
+stop; the operation deadline must fit the remaining owner authorization horizon.
+It uses the existing owner/root transaction and lifecycle controllers, retaining
+identity, controller key/methods and credential history. It does not grant
+revoked roles, repair expired original roles or create automatic renewal.
+
+Keep the original expired operation and its actual load receipts unchanged. A
+new explicitly authorized recovery lifecycle links the retained body/process
+state; it does not extend the old frozen deadline or relabel its load.
+If that authenticated frozen Source was stopped after preparation, the existing
+preserve/renew controller observes its exact inactive unit, predecessor exit and
+writer fence directly. It records exit without inventing a stop request. Do not
+restart the predecessor only to stop it again; fresh publication still needs the
+original operation's unexpired owner authorization and unchanged inputs. Source
+renewal rebinds the existing base visibility installation to the new full runtime
+bundle, then qualifies an actual new receiving load. Guest normalization accepts
+an authenticated strictly advancing custody revision, rather than assuming only
+one controller issuance ever occurred. This is historical comparison, not
+control readiness; native transaction and owner/root journals retain the exact
+publication lineage. [Matrix #355](https://github.com/AlterMundi/daimon-matrix/issues/355)
+tracks integrated receiving acceptance. No routine rebirth is required.
+
+For source qualification against a Matrix successor, select that checkout for
+Python imports explicitly; do not silently test the installed production SDK.
+Use the repository's `tools/check_rc_types.py` typing boundary, which intentionally
+skips unrelated dependency implementation. A bare unrestricted mypy run changes
+that contract and can report failures in the old installed SDK or unrelated
+cryptography versions. Host ceremony fixtures require the exact VCS-pinned host
+installation; a closed receiving SDK has offline installation receipts instead
+of VCS provenance and is a different boundary. Use a matching host environment or
+the selected CI job. Never replace a live venv or manufacture direct_url metadata
+to prepare a source test.
+
+The guest-owner module really requires UID1000. CI maps its current disposable
+runner user to kernel UID/GID1000 in a user namespace, retaining the same interpreter,
+SDK and filesystem ownership. The CI-only `tools/ci_guest_owner.py` parent maps
+host root to0 and the actual runner to1000 through its child's kernel UID/GID maps,
+then drops the child to1000. Mapping only the runner leaves ancestor root ownership
+unmapped and correctly fails protected-path validation. `newuidmap` would instead
+require unrelated subordinate-ID grants. Do not change accounts or ownership to
+work around either failure. The regular test pass deselects that module; its
+canonical-owner pass runs it once. Do not change the runtime owner guard or fake
+geteuid to make it pass. Slow-daemon tests delay the actual pinned child process;
+a forwarding proxy changes SO_PEERCRED and is not the same native responder.
+Changes to the already-covered code-successor test module keep receiving coverage;
+they must not select unrelated physical/archive qualification. The receiving SDK
+suite previously took804 seconds before the newly enabled canonical-owner pass;
+its combined job has a20-minute ceiling rather than an impossible15-minute bound.
+Qualified `sdk-prepare` installs and verifies the closed runtime import tree before
+returning ready. Do this dependency preparation before freezing a finite owner
+operation or stopping a receiver; the first import-tree construction must not
+consume the bounded live observation budget. Subsequent calls verify and reuse
+that immutable tree. A failed preparation is not a reason to recreate custody,
+relax file durability or increase the live-control deadline.
+Own a finite synthetic admission producer and its named synthetic native unit in
+the same qualification scope. Stop that unit before retiring the producer; on
+interruption reconcile and close the unit as part of the same cleanup. Leaving
+its production-style restart policy running without admission repeatedly starts
+expensive SDK qualification. Preserve fixture files and receipts; this cleanup
+never means stopping real bodies or discarding an uncertain operation.
+
+Before a real communication-interrupting operation, prepare its exact candidate,
+required receiver readiness and recovery, and obtain scoped human authorization.
+Every global Stop independently requires fresh explicit human consent. These
+requirements remain; they are not permission for repeated approval rounds.
 
 ## Preserve the receiving context
 
@@ -38,7 +197,15 @@ An exact completed retry returns its original row; altered vectors, conflicting
 pending updates and degraded/compensated attempts cannot reopen effects. Apply
 and resume must use those retained vectors under actual selection/writer locks.
 Preparation itself does not select code, accept authority, load a receiver or
-enable egress; actual adapters and readiness/communication remain #232 work.
+enable egress. The maintained controllers own subsequent effects; their complete
+receiving/communication acceptance and live selection remain #232 work.
+After a failed cohort has confirmed every sender disabled and released its native
+reservations, the owning orchestrator must also close that abandoned journal
+operation through `OperationJournal.advance(..., 'compensated')`, preserving its
+observations and clear receipts. This compensates sender activation only; it
+never claims software or accepted authority was rolled back. An uncertain or
+partially disabled cohort stays open for reconciliation. Do not change the target
+or discard the journal merely to bypass its contradictory-operation guard.
 
 `onboarding_receiving_update.preflight` consumes that operation's approved external
 Matrix release manifest and exact receiving-code digest. It verifies the manifest
@@ -129,13 +296,100 @@ only from the original base must not select an older human-facing consumer.
 No re-export, enrollment, identity rotation, bot replacement or reset of native
 stores follows from this SDK upgrade.
 
-Source keeps the exact installed VCS-commit guard; receiving bodies keep the
-hash-locked wheelhouse and installation receipt. Both use the same declared
-Matrix commit. The native peer helper preserves upstream provenance and qualified receiving
+The existing production Source VCS installation retains its exact commit guard.
+Qualified Source receiving candidates also support the closed wheelhouse and
+installation-receipt profile used by guest candidates. Each selected profile
+keeps its own verified provenance; do not report an unselected candidate as
+deployed. Corresponding sender/receiver selections use the declared Matrix commit. The native peer helper preserves upstream provenance and qualified receiving
 extensions, with its exact maintained hash; the owner-client installer retains
 its own independent artifact provenance. The installer's existing `--refresh-guidance-plan` changes
 planned instruction bytes without replacing the connection's command, channels,
 capability or request history.
+
+## Existing controller software adoption
+
+Existing Codex tooling adoption is a receiving requirement, not first-install
+onboarding. Each cohort receiver explicitly selects `tooling`: either
+`{"profile":"matrix-only"}` for a body with no native harness, or a protected
+Codex recipe with `profile`, `attachment`, `codex_home`, `connections`,
+`native_endpoint`, `native_threads` and `tribe_channel`. Paths select existing owner-local
+resources; thread IDs select existing native contexts. Missing selection is an
+error, never implicit Matrix-only acceptance. No first-loaded-thread fallback,
+thread creation/resume or model turn qualifies a recipe.
+
+`CohortController` uses the existing owner route to reconcile tooling before its
+finite reader round. The installer retains the exact operation/file transition;
+the receiving journal retains its public result. Each subsequent qualified
+identity call checks native state in that same owner process. A drifted
+configuration, binding, selected SDK, endpoint/process, context or tool schema
+cannot reuse earlier acceptance. A server-only catalog is labelled separately
+from selected existing-context acceptance. Disabled/restricted roles stay intact
+and cannot count as usable tools. Source-qualified implementation alone is not
+actual receiving adoption; qualify the complete candidate before deployment.
+Do not rerun `OwnerClient.install` over personalized AGENTS or treat a selected
+Matrix daemon as proof that the harness selected its matching tools.
+Reuse the existing installer history and receiving operation for exact connection
+and native-role command successors. Preserve binding/capabilities, request IDs,
+personal guidance and every optional native setting, including disabled intent.
+Use the supported native config writer for command/args only and the qualified
+closed SDK launcher. Prepare expensive catalog work before the receiver freshness
+round; retain bound evidence and check drift rather than repeating cold discovery.
+Use `prepare_apply_control` for revoke, replacement, selection and repair controls.
+They retain the same durable request under one owner lock. Splitting preparation
+and application across cold qualified owner processes can age a new request beyond
+its native authentication window before its first dispatch; do not increase that
+window or regenerate an uncertain request to conceal the delay.
+For an explicitly selected, already prepared qualified guest candidate, status,
+identity and control calls enter its existing closed SDK interpreter directly.
+The host derives its owner-private generation path from the verified public SDK;
+Target still validates installed dependencies, startup context and receiving state.
+SDK preparation/observation and bootstrap retain their original system-interpreter
+route. Missing preparation refuses without installation or fallback. This removes
+duplicate setup; it neither extends freshness nor proves a timeout's lower cause.
+All-required identity rounds overlap at most three independent receiver queries.
+Lifecycle/preflight preparation and all validation stay on the coordinator;
+every started query is joined before controls, journal writes or failure repair.
+The whole round shares one deadline. A failed query stops further submission,
+and later queries never obtain a fresh window. Sender controls remain sequential.
+`config/mcpServer/reload` refreshes only the addressed App Server's threads.
+A fresh config-only catalog probe cannot prove existing sessions reloaded.
+Keep unavailable native-instance routes explicit; neither console fallback nor
+another service restart establishes native-tool acceptance. Native MCP metadata
+binds the actual qualified code/SDK and attachment; identical tool names from an
+old process do not prove the successor loaded. The selected Tribe binding leg
+(single `tribe` or explicit Multi alias) must resolve to this authenticated
+receiver/runtime and group socket; an archived bilateral leg cannot substitute. The SDK wheelhouse includes pinned
+`websockets==15.0.1` under its existing manifest/hash lock. Codex's CLI proxy only
+relays bytes; shared control sockets require WebSocket framing. Reuse the library,
+not a new hand-written protocol or an historical task dependency directory.
+
+Inspect a catalog with the same closed SDK/import tree that launched its tools.
+A development interpreter may expose different contracts and manufacture a
+catalog mismatch. Inspect the actual tool names, schemas and implementation
+version before classifying a refusal as a product defect; do not alter the
+candidate to accommodate a mismatched diagnostic environment. Codex's advertised
+endpoint may be an owner-controlled symlink: pin its resolved socket and peer,
+and refuse a changed selector or target during the observation.
+
+Freeze controller `mode` before any interruption. `issue` retains the original
+first-controller stage/publication and its exact recovery; absent mode in old
+operations still means `issue`. A retry never switches branches because its own
+publication made a controller appear.
+
+`preserve` requires an already authenticated controller and pins immutable runtime,
+custody and client bytes, signed group inputs and the existing visibility. Check
+its finite authorization before stopping. An expired controller cannot qualify
+control in `preserve` mode; use the explicit optional-controller `renew` route
+above when its original roles remain valid. Expired original roles remain refused.
+Under native parent/writer ownership,
+after predecessor exits, validate the unchanged runtime in the native isolated
+clone and retain a full quiescent inventory as `owner_preserved`. This does not
+stage/publish authority, increment custody, reissue visibility or claim readiness.
+Source and guest use the existing selected-unit/start/load observations; a lost
+start reply observes that process rather than stopping it again. Database activity
+after genuine startup is reconciled through its loaded proof, not by comparing
+mutable stores against the pre-start inventory. A replacement still needs its
+own empty gate/revoke before the cohort can activate positive readers.
 
 ## Qualification and live selection
 
@@ -156,9 +410,10 @@ its existing supervisor, and inspect actual readiness. Keep private credentials
 and proof keys outside shared correlation metadata. Do not restart the owner's
 Telegram consumer merely to change Matrix presentation.
 
-Rollback selects the preserved preceding executable environment and signed
-installation together, preserving subsequent receiving writes and all native
-journals. A checkout test, published package or installed wheel is not live
+Rollback selects a preserved executable environment compatible with the current
+accepted authority, custody and signed installation. Never restore old authority
+or custody to accommodate an incompatible observer. Preserve subsequent receiving
+writes and all native journals. A checkout test, published package or installed wheel is not live
 readiness. The owning Matrix epic records actual cohort acceptance, confirmed
 Telegram replies and native receipts after the authorized bounded demonstration.
 

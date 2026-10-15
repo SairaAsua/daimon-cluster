@@ -6,6 +6,78 @@ from tools.ci_scope import ONBOARDING_CONTRACTS, select
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_owner_attachment_and_receiving_changes_compose_covered_profiles(tmp_path):
+    from tools.ci_scope import (
+        LOADED_STARTUP_FILES, LOADED_STARTUP_TESTS,
+        OWNER_CLIENT_FILES, OWNER_CLIENT_TESTS,
+    )
+    host_files = {'clusterctl/onboarding_host.py', 'tests/test_onboarding_host.py'}
+    changed = sorted(LOADED_STARTUP_FILES | (OWNER_CLIENT_FILES - host_files))
+    profile, tests = select(changed, ROOT)
+    assert profile == 'peer'
+    assert set(LOADED_STARTUP_TESTS) | set(OWNER_CLIENT_TESTS) == set(tests)
+    assert len(tests) == len(set(tests))
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    for extra in ('requirements-weave.txt', 'clusterctl/onboarding_custody.py',
+                  'unknown.py', 'support/matrix-agent-chat/other.py'):
+        assert select([*changed, extra], ROOT) == ('full', ['tests'])
+
+
+def test_receiving_metadata_scope_requires_exact_host_content_and_keeps_all_receiving_tests(monkeypatch):
+    import subprocess
+    from tools.ci_scope import LOADED_STARTUP_FILES, LOADED_STARTUP_TESTS
+    name='clusterctl/onboarding_host.py'
+    current=(ROOT/name).read_text()
+    addition="set(value) - {'group', 'receiving_controller'} != {\"phase\", \"request\", \"receipt\"}"
+    original=current.replace(addition,'set(value) != {"phase", "request", "receipt"}')
+    assert original!=current
+    monkeypatch.setattr('tools.ci_scope.subprocess.run',lambda *_args,**_kwargs:
+        subprocess.CompletedProcess([],0,original.encode()))
+    changed=sorted(LOADED_STARTUP_FILES | {'tools/ci_scope.py','tests/test_ci_scope.py',name,'tests/test_onboarding_host.py'})
+    profile,tests=select(changed,ROOT,base='a'*40)
+    assert profile=='peer' and set(LOADED_STARTUP_TESTS)<=set(tests)
+    assert {'tests/test_onboarding_host.py','tests/test_onboarding_host_ownership.py',
+            'tests/test_onboarding_managed.py'}<=set(tests)
+    assert select(changed,ROOT)!=('peer',tests)
+    for extra in ('requirements-weave.txt','clusterctl/onboarding_custody.py','unknown.py'):
+        assert select([*changed,extra],ROOT,base='a'*40)!=('peer',tests)
+    read_bytes=Path.read_bytes
+    with monkeypatch.context() as newline:
+        newline.setattr(Path,'read_bytes',lambda path:
+            current.replace('\n','\r\n').encode() if path==ROOT/name else read_bytes(path))
+        assert select(changed,ROOT,base='a'*40)!=('peer',tests)
+    monkeypatch.setattr('tools.ci_scope.subprocess.run',lambda *_args,**_kwargs:
+        subprocess.CompletedProcess([],0,('unrelated source change\n'+original).encode()))
+    assert select(changed,ROOT,base='a'*40)!=('peer',tests)
+
+
+def test_loaded_startup_covers_actual_processes_and_preserves_broader_boundaries(tmp_path):
+    from tools.ci_scope import LOADED_STARTUP_FILES, LOADED_STARTUP_TESTS
+    changed = sorted(LOADED_STARTUP_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py'})
+    assert select(changed, ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    assert select(['clusterctl/onboarding_service.py', 'tests/test_source_bootstrap.py'], ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    assert select(['clusterctl/onboarding_target.py', 'tests/test_source_bootstrap.py',
+        'tests/test_onboarding_code_successor.py'], ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    assert select(['clusterctl/onboarding_service.py', 'tests/test_onboarding_service.py',
+        'clusterctl/owner_process.py', 'tests/test_receiving_process_observation.py'], ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    assert select(['clusterctl/onboarding_peer.py', 'tests/test_onboarding_peer.py',
+        'tests/test_source_bootstrap.py'], ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    native_only_profile, native_only_tests = select(
+        ['clusterctl/onboarding_peer.py', 'tests/test_onboarding_peer.py'], ROOT)
+    assert native_only_profile == 'peer' and 'tests/test_onboarding_peer.py' in native_only_tests
+    assert 'tests/test_onboarding_peer.py' in LOADED_STARTUP_TESTS
+    assert select(['clusterctl/onboarding_service.py', 'tests/test_source_bootstrap.py',
+        'tests/test_receiving_update_selection.py'], ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    assert {'tests/test_receiving_process_observation.py', 'tests/test_onboarding_sdk.py',
+            'tests/test_onboarding_runtime.py', 'tests/test_onboarding_source.py',
+            'tests/test_matrix_host_process.py'} <= set(LOADED_STARTUP_TESTS)
+    for other in ('requirements-weave.txt', 'clusterctl/onboarding_admission.py',
+                  'clusterctl/onboarding_custody.py', 'clusterctl/onboarding_host.py',
+                  'clusterctl/production_fences.py', 'unknown.py'):
+        assert select([*changed, other], ROOT) != ('peer', list(LOADED_STARTUP_TESTS))
+
+
 def test_launcher_keeps_the_existing_home_authority_and_browser_boundary():
     from tools.ci_scope import HOME_TESTS
     changed=['clusterctl/homes/service.py','clusterctl/homes/homemaker.py',
@@ -110,6 +182,45 @@ def test_pin_only_qualification_checks_code_content(monkeypatch, tmp_path):
     path.write_text(path.read_text().replace('return True', 'return False'))
     assert not sdk_pin_only(tmp_path, 'a' * 40, changed)
     assert not sdk_pin_only(tmp_path, 'a' * 40, changed + ['clusterctl/onboarding_custody.py'])
+
+
+def test_literal_sdk_successor_composes_receiving_tests_without_unrelated_full_jobs(monkeypatch, tmp_path):
+    import subprocess
+    import json
+    from clusterctl.onboarding_sdk import MATRIX_COMMIT
+    from tools.ci_scope import LOADED_STARTUP_TESTS, SDK_TESTS
+    pins = {'requirements-weave.txt', 'clusterctl/onboarding_sdk.py', 'clusterctl/matrix_host.py'}
+    metadata = 'support/matrix-onboarding/PROVENANCE.json'
+    changes = sorted(pins | {'clusterctl/onboarding_receiving_update.py', 'clusterctl/onboarding_target.py',
+        'tests/test_guest_owner_bootstrap.py', 'tests/test_guest_bootstrap_controller.py',
+        'tests/test_source_bootstrap.py', 'docs/runbooks/tribu-sdk-successor.md'})
+    def show(argv, **_kwargs):
+        path = argv[2].split(':', 1)[1]
+        assert path in pins | {metadata}
+        return subprocess.CompletedProcess(argv, 0, (ROOT / path).read_bytes().replace(MATRIX_COMMIT.encode(), b'a' * 40))
+    monkeypatch.setattr('tools.ci_scope.subprocess.run', show)
+    profile, tests = select(changes, ROOT, base='a' * 40)
+    assert profile == 'sdk' and set(tests) == set(LOADED_STARTUP_TESTS) | set(SDK_TESTS)
+    assert len(tests) == len(set(tests))
+    assert select([*changes, metadata], ROOT, base='a' * 40) == (profile, tests)
+    def changed_tool(argv, **kwargs):
+        result = show(argv, **kwargs)
+        if argv[2].endswith(metadata):
+            value = json.loads(result.stdout)
+            value['sha256'] = 'f' * 64
+            return subprocess.CompletedProcess(argv, 0, json.dumps(value).encode())
+        return result
+    with monkeypatch.context() as altered:
+        altered.setattr('tools.ci_scope.subprocess.run', changed_tool)
+        assert select([*changes, metadata], ROOT, base='a' * 40) == ('full', ['tests'])
+    for extra in ('clusterctl/onboarding_custody.py', 'unknown.py', 'constraints.txt'):
+        assert select([*changes, extra], ROOT, base='a' * 40) == ('full', ['tests'])
+    assert select(changes, tmp_path, base='a' * 40) == ('full', ['tests'])
+    def changed_code(argv, **kwargs):
+        result = show(argv, **kwargs)
+        return subprocess.CompletedProcess(argv, 0, result.stdout + b'\n# executable drift\n')
+    monkeypatch.setattr('tools.ci_scope.subprocess.run', changed_code)
+    assert select(changes, ROOT, base='a' * 40) == ('full', ['tests'])
 
 
 def test_receiving_presentation_and_readiness_keep_native_admission_without_archive_jobs(tmp_path):
@@ -497,3 +608,107 @@ def test_context_pages_stay_documentation_without_executable_changes():
     assert select(sorted(RUNBOOK_DOCS), ROOT) == ('docs', [])
     assert select([*sorted(RUNBOOK_DOCS), 'clusterctl/onboarding_host.py'], ROOT)[0] != 'docs'
     assert select([*sorted(RUNBOOK_DOCS), 'unknown-contract.json'], ROOT)[0] == 'full'
+
+
+def test_exact_candidate_host_scope_covers_legacy_peer_and_rejects_other_bytes(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    from tools import ci_scope
+    name = 'clusterctl/onboarding_host.py'
+    # The scope job reads the actual base; the unit test job has a shallow
+    # checkout. Model the retained qualified hash pair as stable inputs; a
+    # legitimate new host implementation must not require a golden-hash edit
+    # merely to pass this selector-policy test. Unknown bytes still select full.
+    original = b'explicit retained baseline fixture\n'
+    candidate = b'explicit retained qualified candidate fixture\n'
+    sha256 = ci_scope.hashlib.sha256
+    monkeypatch.setattr(ci_scope.hashlib, 'sha256', lambda raw:
+        SimpleNamespace(hexdigest=lambda: '742fb3e396d4619369152cde4c3811c22df18504e504d7012e99c99772040c59')
+        if raw == original else SimpleNamespace(hexdigest=lambda: '0ec24cc2096f5b88b498d1e49578810404c2248b0a8309d027c30d28d5f2daee')
+        if raw == candidate else sha256(raw))
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *_args, **_kwargs:
+        subprocess.CompletedProcess([], 0, original))
+    actual_read = Path.read_bytes
+    monkeypatch.setattr(Path, 'read_bytes', lambda path: candidate if path == ROOT / name else actual_read(path))
+    changed = sorted(ci_scope.LOADED_STARTUP_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py',
+        name, 'tests/test_onboarding_host.py'})
+    selected, tests = ci_scope.select(changed, ROOT, base='a' * 40)
+    assert selected == 'peer' and 'tests/test_onboarding_peer_host.py' in tests
+    read = Path.read_bytes
+    for change in (lambda raw: raw + b'# future host change\n', lambda raw: raw.replace(b'\n', b'\r\n')):
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, 'read_bytes', lambda path: change(read(path)) if path == ROOT / name else read(path))
+            assert ci_scope.select(changed, ROOT, base='a' * 40)[0] != 'peer'
+    for extra in ('requirements-dev.txt', 'clusterctl/onboarding_custody.py', 'unknown.py'):
+        assert ci_scope.select(changed + [extra], ROOT, base='a' * 40)[0] != 'peer'
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *_args, **_kwargs:
+        subprocess.CompletedProcess([], 0, original + b'# different baseline\n'))
+    assert ci_scope.select(changed, ROOT, base='a' * 40)[0] != 'peer'
+
+
+def test_controlled_software_update_and_its_runbook_keep_receiving_coverage():
+    from tools.ci_scope import LOADED_STARTUP_TESTS
+    changed = ['clusterctl/onboarding_receiving_update.py', 'tests/test_source_bootstrap.py',
+        'tests/test_guest_owner_bootstrap.py', 'tests/test_guest_bootstrap_controller.py',
+        'tests/test_receiving_cohort_control.py', 'docs/runbooks/tribu-sdk-successor.md',
+        'clusterctl/onboarding_peer.py', 'clusterctl/onboarding_source.py',
+        'clusterctl/onboarding_runtime.py', 'tests/test_onboarding_group_authorities.py',
+        'docs/design/onboarding-jobs.md', 'tools/ci_scope.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py', '.github/workflows/tests.yml']
+    assert select(changed, ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    assert 'tests/test_onboarding_group_authorities.py' in LOADED_STARTUP_TESTS
+    assert select([*changed, 'clusterctl/onboarding_custody.py'], ROOT)[0] == 'full'
+    assert select([*changed, 'docs/unclassified-contract.md'], ROOT)[0] == 'full'
+
+
+def test_native_tooling_capture_composes_owner_sdk_and_receiving_coverage():
+    changed = ['clusterctl/onboarding_owner_client.py', 'clusterctl/onboarding_chat_native.py',
+        'clusterctl/onboarding_code_successor.py', 'tools/build_onboarding_code.py',
+        'support/matrix-agent-chat/TOOLING-PROVENANCE.json',
+        'tests/test_onboarding_owner_client.py', 'tests/test_onboarding_code_successor.py',
+        'tests/test_source_bootstrap.py', 'tools/ci_scope.py', 'tests/test_ci_scope.py']
+    profile, tests = select(changed, ROOT)
+    assert profile == 'peer'
+    assert {'tests/test_onboarding_owner_client.py', 'tests/test_onboarding_sdk.py',
+        'tests/test_onboarding_code_successor.py', 'tests/test_onboarding_release.py',
+        'tests/test_source_bootstrap.py'} <= set(tests)
+    assert select([*changed, 'clusterctl/onboarding_custody.py'], ROOT)[0] == 'full'
+
+
+def test_reviewed_receiving_helpers_keep_scope_exact_and_qualify_default_callers(monkeypatch):
+    import hashlib
+    import subprocess
+    from tools import ci_scope
+    names = set(ci_scope.RECEIVING_SUPPORT_HASHES)
+    # Exercise the retained-pair policy with stable fixture bytes. Legitimate
+    # current source changes must not require updating a production allowlist
+    # merely to keep this policy test green. Unknown bytes still select full.
+    originals = {name:('retained baseline: '+name).encode() for name in names}
+    candidates = {name:('retained qualified candidate: '+name).encode() for name in names}
+    monkeypatch.setattr(ci_scope, 'RECEIVING_SUPPORT_HASHES', {
+        name:(hashlib.sha256(originals[name]).hexdigest(),
+              hashlib.sha256(candidates[name]).hexdigest()) for name in names})
+    actual_read = Path.read_bytes
+    monkeypatch.setattr(Path, 'read_bytes', lambda path:
+        candidates[path.relative_to(ROOT).as_posix()] if path.is_relative_to(ROOT)
+        and path.relative_to(ROOT).as_posix() in candidates else actual_read(path))
+    def source(argv, **_kwargs):
+        name = argv[-1].split(':',1)[1]
+        return subprocess.CompletedProcess(argv,0,originals[name])
+    monkeypatch.setattr(ci_scope.subprocess,'run',source)
+    changed = sorted(ci_scope.LOADED_STARTUP_FILES | names | ci_scope.CI_FILES)
+    profile, tests = ci_scope.select(changed, ROOT, base='a'*40)
+    assert profile == 'peer'
+    assert set(ci_scope.LOADED_STARTUP_TESTS) <= set(tests)
+    assert 'tests/test_being_seed.py' in tests
+    assert ci_scope.select(changed, ROOT) != ('peer', tests)
+    for unrelated in ('clusterctl/onboarding_custody.py', 'requirements-weave.txt', 'unknown.py'):
+        assert ci_scope.select([*changed, unrelated], ROOT, base='a'*40) != ('peer', tests)
+    read_bytes = Path.read_bytes
+    for name in names:
+        with monkeypatch.context() as changed_byte:
+            changed_byte.setattr(Path,'read_bytes', lambda path:
+                read_bytes(path)+b'\n' if path == ROOT/name else read_bytes(path))
+            assert ci_scope.select(changed, ROOT, base='a'*40) != ('peer', tests)
+    monkeypatch.setattr(ci_scope.subprocess,'run',lambda argv, **_kwargs:
+        subprocess.CompletedProcess(argv,0,originals[argv[-1].split(':',1)[1]]+b'\n'))
+    assert ci_scope.select(changed, ROOT, base='a'*40) != ('peer', tests)
