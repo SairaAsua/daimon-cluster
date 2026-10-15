@@ -178,6 +178,9 @@ class MatrixGuestService(MatrixUserService):
         self._unit_uid = 0
         self._required_execution = dict(User='agent', Group='agent')
 
+    def enable(self, *, deadline_ns: int) -> None:
+        self._execute([*self._manager_prefix, '--no-reload', 'enable', self.unit.name], deadline_ns)
+
     def start(self, *, deadline_ns: int | None = None,
               pre_start: Callable[[], None] | None = None) -> None:
         self._execute([*self._manager_prefix, 'daemon-reload'], deadline_ns)
@@ -186,6 +189,24 @@ class MatrixGuestService(MatrixUserService):
         if pre_start is not None:
             pre_start()
         self._execute([*self._manager_prefix, '--no-block', 'start', self.unit.name], deadline_ns)
+
+    def initial_state(self, *, deadline_ns: int) -> dict:
+        """Observe an actual absent/inactive unit without inventing a process."""
+        content = (onboarding_release.regular(self.unit, uid=self._unit_uid)
+                   if self.unit.exists() or self.unit.is_symlink() else None)
+        raw = self._execute([*self._manager_prefix, 'list-units', '--all', '--no-pager',
+            '--output=json', '--', self.unit.name], deadline_ns)
+        loaded = json.loads(raw)
+        if (not isinstance(loaded, list) or len(loaded) > 1
+                or loaded and (not isinstance(loaded[0], dict) or loaded[0].get('unit') != self.unit.name)):
+            raise OnboardingError('receiving_matrix_service_scope_required')
+        service = None
+        if loaded:
+            if content is None or loaded[0].get('load') != 'loaded':
+                raise OnboardingError('receiving_matrix_service_scope_required')
+            service = self.inspect(deadline_ns=deadline_ns)
+        return dict(unit_sha256=None if content is None else hashlib.sha256(content).hexdigest(),
+                    service=service)
 
     def bind_admitted_process(self, observed: dict, inspected: dict) -> dict:
         """Associate the manager's parent with the authenticated native child.
@@ -356,6 +377,128 @@ class GuestServiceBootstrap:
             presence.verify()
         return process
 
+    def _initial(self, action: str, request: dict, *, deadline_ns: int) -> dict:
+        """Retain a genuine first unit/start, with no predecessor exit receipt."""
+        from .owner_process import PresenceError
+        if (set(request) != {'schema', 'operation_id', 'plan_digest', 'predecessor', 'argv'}
+                or request['schema'] != 'cluster-guest-service-initial/v1'
+                or request['predecessor'] is not None or action == 'quiesce'
+                or str(uuid.UUID(request['operation_id'])) != request['operation_id']
+                or re.fullmatch('[0-9a-f]{64}', request['plan_digest']) is None):
+            raise OnboardingError('receiving_guest_service_request_required')
+        candidate = unit_content(request['argv'])
+        fingerprint = hashlib.sha256(candidate).hexdigest()
+        selection = private_directory(self.manager.unit.parent / ('.' + self.manager.unit.name + '.selection'))
+        operations = private_directory(selection / 'operations', create=True)
+        root = private_directory(operations / request['operation_id'], create=True)
+        self._record(root / 'request.json', request)
+
+        def owned() -> None:
+            if (not self.manager.unit.exists() or
+                    onboarding_release.regular(self.manager.unit, uid=self.manager._unit_uid) != candidate):
+                raise OnboardingError('receiving_guest_service_candidate_changed')
+
+        def inactive(*, require_loaded: bool = False) -> dict:
+            if require_loaded:
+                service = self.manager.inspect(deadline_ns=deadline_ns)
+                state = dict(unit_sha256=service['unit_sha256'], service=service)
+            else:
+                state = self.manager.initial_state(deadline_ns=deadline_ns)
+            if state['unit_sha256'] not in {None, fingerprint}:
+                raise OnboardingError('receiving_guest_service_candidate_changed')
+            service = state['service']
+            if service is not None:
+                values = service['manager']
+                if (values['ActiveState'] != 'inactive' or values['SubState'] != 'dead'
+                        or values['MainPID'] != '0' or values['InvocationID']):
+                    raise OnboardingError('receiving_guest_service_initial_inactive_required')
+            return state
+
+        prepared = self._retained(root, 'initial-prepared')
+        if action == 'validate':
+            if prepared is None:
+                prepared = self._record(root / 'initial-prepared.json', dict(
+                    schema='cluster-guest-service-initial-candidate/v1', candidate_sha256=fingerprint,
+                    initial_service=inactive(), receiving_readiness='unobserved'))
+            elif self._retained(root, 'selected') is not None:
+                owned()
+            else:
+                inactive()
+            self._budget(deadline_ns)
+            return prepared
+        if prepared is None or prepared['candidate_sha256'] != fingerprint:
+            raise OnboardingError('receiving_guest_service_initial_preparation_required')
+        if action == 'select':
+            retained = self._retained(root, 'selected')
+            if retained is not None:
+                owned()
+            else:
+                inactive()
+                publish(self.manager.unit, candidate)
+                self.manager.enable(deadline_ns=deadline_ns)
+                retained = self._record(root / 'selected.json', dict(
+                    selected_sha256=fingerprint, receiving_readiness='unobserved'))
+            self._budget(deadline_ns)
+            return retained
+        selected = self._retained(root, 'selected')
+        if selected is None or selected['selected_sha256'] != fingerprint:
+            raise OnboardingError('receiving_guest_service_selection_required')
+        owned()
+        started = self._retained(root, 'initial-started')
+        if started is not None:
+            current = self.manager.inspect(deadline_ns=deadline_ns)
+            if (current != started['service'] or current['manager']['ActiveState'] != 'active'
+                    or self._parent(current['manager']) != started['admission_parent']):
+                raise OnboardingError('receiving_guest_service_started_process_changed')
+            self._budget(deadline_ns)
+            return started
+        intent = self._retained(root, 'initial-start-intent')
+        if intent is None:
+            inactive()
+            def before_start() -> None:
+                owned()
+                observed = inactive(require_loaded=True)
+                self._record(root / 'initial-start-intent.json', dict(
+                    selected_sha256=fingerprint, launch_precondition=observed))
+                self._budget(deadline_ns)
+            self.manager.start(deadline_ns=deadline_ns, pre_start=before_start)
+            intent = self._retained(root, 'initial-start-intent')
+        precondition = None if intent is None else intent.get('launch_precondition')
+        launch = precondition.get('service') if isinstance(precondition, dict) else None
+        if (intent is None or intent.get('selected_sha256') != fingerprint
+                or not isinstance(launch, dict) or launch.get('unit_sha256') != fingerprint):
+            raise OnboardingError('receiving_guest_service_initial_start_uncertain')
+        pending = self._retained(root, 'initial-pending-parent')
+        while True:
+            self._budget(deadline_ns)
+            owned()
+            current = self.manager.inspect(deadline_ns=deadline_ns)
+            if (current['unit_sha256'] != launch['unit_sha256']
+                    or current.get('dropins', {}) != launch.get('dropins', {})):
+                raise OnboardingError('receiving_guest_service_candidate_changed')
+            values = current['manager']
+            if values['ActiveState'] == 'active':
+                association = {key: values[key] for key in ('MainPID', 'InvocationID', 'ControlGroup')}
+                if pending is not None and association != pending:
+                    raise OnboardingError('receiving_guest_service_started_process_changed')
+                pending = self._record(root / 'initial-pending-parent.json', association)
+                try:
+                    parent = self._parent(values)
+                except PresenceError:
+                    pass  # Observe this same Type=simple invocation's UID switch.
+                else:
+                    result = self._record(root / 'initial-started.json', dict(
+                        schema='cluster-guest-service-initial-start/v1', service=current,
+                        initial_service=prepared['initial_service'],
+                        admission_parent=parent, receiving_readiness='unobserved'))
+                    self._budget(deadline_ns)
+                    return result
+            elif values['ActiveState'] != 'activating' or pending is not None:
+                # An intent alone does not prove StartUnit absent. Never repeat
+                # it after a dead/failed/unknown first invocation to clear doubt.
+                raise OnboardingError('receiving_guest_service_initial_start_uncertain')
+            time.sleep(min(0.05, max(0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)))
+
     def execute(self, action: str, request: dict, *, deadline_ns: int) -> dict:
         from .owner_process import PresenceError, ProcessPresence, observe_process_exit
         from contextlib import ExitStack
@@ -363,6 +506,8 @@ class GuestServiceBootstrap:
             raise OnboardingError('receiving_guest_service_request_required')
         self._budget(deadline_ns)
         with selection_lock(self.manager.unit):
+            if request.get('schema') == 'cluster-guest-service-initial/v1':
+                return self._initial(action, request, deadline_ns=deadline_ns)
             root, previous, candidate = self._request(request)
             self._budget(deadline_ns)
             if action == 'validate':
@@ -640,6 +785,16 @@ def command(code: Path, *, receive_only: bool, visibility: Path | None = None,
     return code_command(Path('/usr/bin/python3'), runtime_code or code, 'clusterctl.onboarding_target', arguments)
 
 
+def unit_content(argv: list[str]) -> bytes:
+    """Render the maintained guest unit for both initial and legacy install."""
+    template = ('[Unit]\nDescription=Admitted native onboarding body\nAfter=network-online.target\n'
+           'Wants=network-online.target\n[Service]\nType=simple\nUser=agent\nGroup=agent\n'
+           'Environment=HOME=/home/agent\nUMask=0077\nRestart=on-failure\nRestartSec=5\n'
+           'KillMode=control-group\nTimeoutStopSec=30\nExecStart=/prepared\n'
+           '[Install]\nWantedBy=multi-user.target\n').encode()
+    return entrypoint(template, argv)
+
+
 def install(code: Path, *, receive_only: bool, visibility: Path | None = None,
             runtime_code: Path | None = None, runtime_digest: str | None = None,
             messaging_application: Path | None = None,
@@ -651,13 +806,7 @@ def install(code: Path, *, receive_only: bool, visibility: Path | None = None,
         raise OnboardingError('onboarding_service_directory_rejected')
     argv = command(code, receive_only=receive_only, visibility=visibility,
                    runtime_code=runtime_code, runtime_digest=runtime_digest, messaging_application=messaging_application)
-    # systemd's ExecStart syntax, not a shell command. Escape substitutions.
-    encoded = ' '.join(json.dumps(arg.replace('%', '%%').replace('$', '$$')) for arg in argv)
-    raw = ('[Unit]\nDescription=Admitted native onboarding body\nAfter=network-online.target\n'
-           'Wants=network-online.target\n[Service]\nType=simple\nUser=agent\nGroup=agent\n'
-           'Environment=HOME=/home/agent\nUMask=0077\nRestart=on-failure\nRestartSec=5\n'
-           'KillMode=control-group\nTimeoutStopSec=30\nExecStart=' + encoded +
-           '\n[Install]\nWantedBy=multi-user.target\n').encode()
+    raw = unit_content(argv)
     with selection_lock(directory / UNIT):
         publish(directory / UNIT, raw)
         execute = run or _run

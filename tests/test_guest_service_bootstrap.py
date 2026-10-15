@@ -138,6 +138,147 @@ def fixture(tmp_path, monkeypatch):
     return GuestServiceBootstrap(manager), manager, request
 
 
+@pytest.fixture
+def initial(fixture):
+    controller, manager, request = fixture
+    manager.unit.unlink()
+    manager.state = 'inactive'
+    manager.invocation = ''
+    manager.loaded = False
+    manager.enables = 0
+    inspect = manager.inspect
+    def inspect_loaded(**options):
+        if not manager.loaded:
+            raise OnboardingError('receiving_matrix_service_scope_required')
+        return inspect(**options)
+    manager.inspect = inspect_loaded
+    def initial_state(**_):
+        return dict(unit_sha256=(hashlib.sha256(manager.unit.read_bytes()).hexdigest()
+                                if manager.unit.exists() else None),
+                    service=manager.inspect() if manager.loaded else None)
+    def enable(**_):
+        manager.enables += 1
+    start = manager.start
+    def start_loaded(**options):
+        manager.loaded = True  # The actual start reloads before its callback.
+        return start(**options)
+    manager.initial_state = initial_state
+    manager.enable = enable
+    manager.start = start_loaded
+    return controller, manager, {**request, 'schema': 'cluster-guest-service-initial/v1', 'predecessor': None}
+
+
+def test_initial_service_recovers_lost_start_reply_without_fake_exit_or_second_start(initial):
+    controller, manager, request = initial
+    prepared = controller.execute('validate', request, deadline_ns=deadline())
+    assert prepared['initial_service'] == dict(unit_sha256=None, service=None)
+    controller.execute('select', request, deadline_ns=deadline())
+    assert manager.enables == 1 and manager.starts == manager.stops == 0
+    manager.lose = 'start'
+    with pytest.raises(OSError, match='lost start'):
+        controller.execute('start', request, deadline_ns=deadline())
+    result = controller.execute('start', request, deadline_ns=deadline())
+    assert result['schema'] == 'cluster-guest-service-initial-start/v1'
+    assert result['initial_service'] == prepared['initial_service']
+    assert not {'exits', 'exit_observed', 'quiesced', 'predecessor'} & set(result)
+    assert result['admission_parent']['pid'] == 222
+    assert controller.execute('validate', request, deadline_ns=deadline()) == prepared
+    controller.execute('select', request, deadline_ns=deadline())
+    assert controller.execute('start', request, deadline_ns=deadline()) == result
+    assert manager.enables == manager.starts == 1 and manager.stops == 0
+    records = list(manager.unit.parent.glob('.*.selection/operations/*/*.json'))
+    assert not any(path.stem in {'quiesced', 'process-exited', 'admission_parent-exited'} for path in records)
+
+
+@pytest.mark.parametrize('evidence', ['unseen-stopped', 'pending', 'started'])
+def test_initial_start_never_replays_a_dead_or_replaced_invocation(initial, monkeypatch, evidence):
+    controller, manager, request = initial
+    controller.execute('validate', request, deadline_ns=deadline())
+    controller.execute('select', request, deadline_ns=deadline())
+    if evidence == 'unseen-stopped':
+        manager.lose = 'start'
+        with pytest.raises(OSError):
+            controller.execute('start', request, deadline_ns=deadline())
+        manager.state = 'inactive'
+        manager.invocation = ''
+        error = 'initial_start_uncertain'
+    elif evidence == 'pending':
+        def lost(_values):
+            raise OSError('synthetic lost parent observation')
+        monkeypatch.setattr(controller, '_parent', lost)
+        with pytest.raises(OSError, match='parent observation'):
+            controller.execute('start', request, deadline_ns=deadline())
+        manager.invocation = 'replacement'
+        error = 'started_process_changed'
+    else:
+        controller.execute('start', request, deadline_ns=deadline())
+        manager.invocation = 'replacement'
+        error = 'started_process_changed'
+    with pytest.raises(OnboardingError, match=error):
+        controller.execute('start', request, deadline_ns=deadline())
+    assert manager.starts == manager.enables == 1 and manager.stops == 0
+
+
+def test_initial_service_preserves_foreign_unit_and_rechecks_reload_before_dispatch(initial):
+    controller, manager, request = initial
+    foreign = b'[Service]\nUser=agent\nGroup=agent\nExecStart=/foreign\n'
+    manager.unit.write_bytes(foreign)
+    manager.unit.chmod(0o600)
+    with pytest.raises(OnboardingError, match='candidate_changed'):
+        controller.execute('validate', request, deadline_ns=deadline())
+    assert manager.unit.read_bytes() == foreign and manager.starts == manager.enables == 0
+    manager.unit.unlink()
+    controller.execute('validate', request, deadline_ns=deadline())
+    controller.execute('select', request, deadline_ns=deadline())
+    candidate = manager.unit.read_bytes()
+    start = manager.start
+    def changed_reload(**options):
+        manager.unit.write_bytes(foreign)
+        return start(**options)
+    manager.start = changed_reload
+    with pytest.raises(OnboardingError, match='candidate_changed'):
+        controller.execute('start', request, deadline_ns=deadline())
+    assert manager.starts == manager.stops == 0
+    manager.unit.write_bytes(candidate)
+    manager.start = start
+    controller.execute('start', request, deadline_ns=deadline())
+    assert manager.starts == 1
+    with pytest.raises(OnboardingError, match='request_required'):
+        controller.execute('quiesce', request, deadline_ns=deadline())
+    assert manager.stops == 0
+
+
+def test_initial_start_requires_effective_unit_inspection_before_dispatch(initial):
+    controller, manager, request = initial
+    controller.execute('validate', request, deadline_ns=deadline())
+    controller.execute('select', request, deadline_ns=deadline())
+    # Model daemon-reload returning without an inspectable effective unit. The
+    # absent view is valid before installation, never a start precondition.
+    manager.start = lambda **options: type(manager).start(manager, **options)
+    with pytest.raises(OnboardingError, match='service_scope_required'):
+        controller.execute('start', request, deadline_ns=deadline())
+    assert manager.starts == manager.stops == 0
+    assert not list(manager.unit.parent.glob('.*.selection/operations/*/initial-start-intent.json'))
+
+
+def test_initial_start_retains_allowed_dropins_across_lost_reply(initial):
+    controller, manager, request = initial
+    controller.execute('validate', request, deadline_ns=deadline())
+    controller.execute('select', request, deadline_ns=deadline())
+    # This path is a supported guest addition, so normal inspect() alone does
+    # not reject its removal. Pin the exact effective vector before StartUnit.
+    manager.reload_dropins = {'/run/systemd/system/service.d/zzz-lxc-service.conf': 'a' * 64}
+    manager.lose = 'start'
+    with pytest.raises(OSError, match='lost start'):
+        controller.execute('start', request, deadline_ns=deadline())
+    manager.dropins = {}
+    with pytest.raises(OnboardingError, match='candidate_changed'):
+        controller.execute('start', request, deadline_ns=deadline())
+    assert manager.starts == manager.enables == 1 and manager.stops == 0
+    assert manager.dropins == {}
+    assert not list(manager.unit.parent.glob('.*.selection/operations/*/initial-started.json'))
+
+
 def test_reload_exposes_changed_dropin_before_actual_start(fixture):
     controller, manager, request = fixture
     controller.execute('quiesce', request, deadline_ns=deadline())

@@ -600,6 +600,35 @@ compatible group artifacts. Old terminated memberships/grants and archived pair
 defaults are not an operational rollback. Historical messages remain readable;
 exact expired retries return their retained outcome without new transmission.
 
+### First guest service publication and start
+
+The existing root `GuestServiceBootstrap` accepts an explicit
+`cluster-guest-service-initial/v1` request with the same operation ID, plan digest
+and approved argv, and `predecessor=null`. It uses the existing named Matrix unit,
+selection lock, immutable operation records and root CLI. It never manufactures
+a predecessor process or exit receipt; `quiesce` rejects this variant.
+
+`validate` retains actual absent/inactive manager state. `select` publishes the
+maintained unit and enables it without starting. Immediately after reload, before
+the first StartUnit, the controller must inspect the effective exact unit,
+execution identity and supported drop-ins, require inactive/dead with no PID or
+invocation, and durably retain that launch configuration. A missing effective
+view after reload cannot authorize execution. Every first-start observation
+compares the unit and exact drop-in vector with that retained configuration.
+
+After a lost start reply, resume observation through the same operation; never
+dispatch another start from an ambiguous retained intent. Retain the first
+observed invocation before observing its actual parent process and cgroup.
+A dead or replaced invocation remains uncertain or changed, rather than being
+silently restarted. A completed retry requires the same actual service snapshot
+and pinned parent. Ordinary rendering and legacy installation remain unchanged.
+
+This is the physical first-service primitive. Manager/process test seams do not
+qualify an actual systemd deployment, native child/application load, receiving
+controller, default-disabled sender gate or cohort adoption. The ManagedRuntime
+and distinct-cohort integration still belongs to #227. These future-admission
+changes are independent of the frozen current-member rollout candidate.
+
 ### Public authority histories for future group admission
 
 The source reader also accepts `cluster-onboarding-group-selection/v2`. It adds

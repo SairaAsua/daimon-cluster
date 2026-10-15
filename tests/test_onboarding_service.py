@@ -43,6 +43,31 @@ def test_guest_manager_uses_existing_system_unit_and_root_owned_fragment(tmp_pat
         MatrixUserService(unit, run=execute)
 
 
+def test_guest_initial_state_keeps_absence_distinct_from_a_loaded_unit(tmp_path):
+    import json
+    import os
+    import time
+    from clusterctl.onboarding_service import MatrixGuestService
+    calls = []
+    rows = []
+    def run(argv):
+        calls.append(argv)
+        return json.dumps(rows)
+    manager = MatrixGuestService(tmp_path / UNIT, run=run)
+    manager._unit_uid = os.geteuid()
+    assert manager.initial_state(deadline_ns=time.monotonic_ns()+1_000_000_000) == dict(
+        unit_sha256=None, service=None)
+    assert calls == [['systemctl', 'list-units', '--all', '--no-pager', '--output=json', '--', UNIT]]
+    rows.append({'unit': 'another.service', 'load': 'loaded'})
+    with pytest.raises(OnboardingError, match='scope_required'):
+        manager.initial_state(deadline_ns=time.monotonic_ns()+1_000_000_000)
+    rows[:] = [{'unit': UNIT, 'load': 'loaded'}]
+    with pytest.raises(OnboardingError, match='scope_required'):
+        manager.initial_state(deadline_ns=time.monotonic_ns()+1_000_000_000)
+    manager.enable(deadline_ns=time.monotonic_ns()+1_000_000_000)
+    assert calls[-1] == ['systemctl', '--no-reload', 'enable', UNIT]
+
+
 def test_matrix_stop_uses_remaining_local_budget_and_retains_timeout_uncertainty(tmp_path, monkeypatch):
     import time
     import subprocess
