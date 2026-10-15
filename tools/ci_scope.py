@@ -439,13 +439,14 @@ def receiving_support_only(root: Path, base: str, names: set[str]) -> bool:
 
 def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
     pins = {'requirements-weave.txt', 'clusterctl/onboarding_sdk.py', 'clusterctl/matrix_host.py'}
-    if pins < set(changed) and sdk_pin_only(root, base, sorted(pins)):
-        remaining = sorted(set(changed) - pins)
+    detached_pins = pins - {'clusterctl/onboarding_sdk.py'}
+    if pins < set(changed) and sdk_pin_files_only(root, base, detached_pins):
+        remaining = sorted(set(changed) - detached_pins)
         profile, tests = select(remaining, root, base=base)
         if profile == 'peer' and all((root / path).is_file() for path in SDK_TESTS):
             # Compose existing receiving coverage with the full SDK contract.
-            # Every pin file was proven literal-only above; unknown/sensitive
-            # remaining edits still take their original broader fallback.
+            # Detached files were proven literal-only. Keep SDK source changes
+            # in receiving qualification; unknown/sensitive edits stay broader.
             return 'sdk', list(dict.fromkeys((*tests, *SDK_TESTS)))
     host_files={'clusterctl/onboarding_host.py','tests/test_onboarding_host.py'}
     # A receiving release also installs its native owner attachment. Compose
@@ -706,6 +707,14 @@ def sdk_pin_only(root: Path, base: str, changed: list[str]) -> bool:
                                  'tests/test_clusterd.py'}
     if not pins <= set(changed) or not set(changed) <= allowed:
         return False
+    return (sdk_pin_files_only(root, base, pins)
+            and all((root / path.split('::', 1)[0]).is_file() for path in SDK_PIN_TESTS))
+
+
+def sdk_pin_files_only(root: Path, base: str, pins: set[str]) -> bool:
+    """Prove only the selected detached files contain pin-literal changes."""
+    if not pins or not pins <= {'requirements-weave.txt', 'clusterctl/onboarding_sdk.py', 'clusterctl/matrix_host.py'}:
+        return False
     for name in sorted(pins):
         before = subprocess.run(['git', 'show', base + ':' + name], cwd=root,
                                  capture_output=True, check=False)
@@ -724,7 +733,7 @@ def sdk_pin_only(root: Path, base: str, changed: list[str]) -> bool:
         new, new_count = re.subn(pattern, r'\1<PIN>', current)
         if old_count != 1 or new_count != 1 or old != new:
             return False
-    return all((root / path.split('::', 1)[0]).is_file() for path in SDK_PIN_TESTS)
+    return True
 
 
 def scope_base(root: Path, base: str, head: str) -> str:

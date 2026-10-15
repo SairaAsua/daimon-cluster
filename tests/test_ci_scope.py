@@ -184,16 +184,16 @@ def test_pin_only_qualification_checks_code_content(monkeypatch, tmp_path):
 
 def test_literal_sdk_successor_composes_receiving_tests_without_unrelated_full_jobs(monkeypatch, tmp_path):
     import subprocess
+    from clusterctl.onboarding_sdk import MATRIX_COMMIT
     from tools.ci_scope import LOADED_STARTUP_TESTS, SDK_TESTS
     pins = {'requirements-weave.txt', 'clusterctl/onboarding_sdk.py', 'clusterctl/matrix_host.py'}
     changes = sorted(pins | {'clusterctl/onboarding_receiving_update.py', 'clusterctl/onboarding_target.py',
         'tests/test_guest_owner_bootstrap.py', 'tests/test_guest_bootstrap_controller.py',
         'tests/test_source_bootstrap.py', 'docs/runbooks/tribu-sdk-successor.md'})
-    current_pin = '0dc0b555939b16a1150a220a366a6911a5ae9c28'
     def show(argv, **_kwargs):
         path = argv[2].split(':', 1)[1]
         assert path in pins
-        return subprocess.CompletedProcess(argv, 0, (ROOT / path).read_bytes().replace(current_pin.encode(), b'a' * 40))
+        return subprocess.CompletedProcess(argv, 0, (ROOT / path).read_bytes().replace(MATRIX_COMMIT.encode(), b'a' * 40))
     monkeypatch.setattr('tools.ci_scope.subprocess.run', show)
     profile, tests = select(changes, ROOT, base='a' * 40)
     assert profile == 'sdk' and set(tests) == set(LOADED_STARTUP_TESTS) | set(SDK_TESTS)
