@@ -77,7 +77,12 @@ revoked roles, repair expired original roles or create automatic renewal.
 
 Keep the original expired operation and its actual load receipts unchanged. A
 new explicitly authorized recovery lifecycle links the retained body/process
-state; it does not extend the old frozen deadline or relabel its load. Source
+state; it does not extend the old frozen deadline or relabel its load.
+If that authenticated frozen Source was stopped after preparation, the existing
+preserve/renew controller observes its exact inactive unit, predecessor exit and
+writer fence directly. It records exit without inventing a stop request. Do not
+restart the predecessor only to stop it again; fresh publication still needs the
+original operation's unexpired owner authorization and unchanged inputs. Source
 renewal rebinds the existing base visibility installation to the new full runtime
 bundle, then qualifies an actual new receiving load. Guest normalization accepts
 an authenticated strictly advancing custody revision, rather than assuming only

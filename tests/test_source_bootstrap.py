@@ -148,6 +148,46 @@ def test_renewal_checks_expiry_at_stop_but_retains_exit_after_expiry(fixture, mo
     assert digest(journal.get(row['operation_id'])['expected_precondition']) == digest(before)
 
 
+@pytest.mark.parametrize('changed', [None, 'invocation', 'unit', 'preimage', 'live-process'])
+def test_frozen_owner_recovers_external_stop_without_starting_or_stopping_again(fixture, monkeypatch, changed):
+    from clusterctl import onboarding_receiving_update as updates, owner_process
+    source, manager, journal, identifier, locked = fixture
+    original = journal.get(identifier)
+    before, after = copy.deepcopy(original['expected_precondition']), copy.deepcopy(original['intended_transition'])
+    frozen = before['source_bootstrap']
+    preservation = dict(runtime_sha256=frozen['bundle_sha256'], origin=frozen['predecessor']['server'])
+    frozen.update(mode='renew', preservation=preservation)
+    after['source_bootstrap']['qualification'] = {'group': {}}
+    row = plan_update(journal, manifest_digest='a' * 64, target='source:external-stop',
+        expected_precondition=before, intended_transition=after, audit_identity={'actor': 'fixture'})
+    controller = SourceBootstrapController(journal, row['operation_id'], source, manager)
+    monkeypatch.setattr(controller, '_qualify_candidate', lambda *_: {})
+    monkeypatch.setattr(updates, 'controller_preservation', lambda *_: preservation)
+    monkeypatch.setattr(updates, 'renewal_authorization', lambda *_: pytest.fail('exit observation is not a new stop'))
+    manager.live = False
+    if changed == 'invocation':
+        manager.invocation = 'another-invocation'
+    elif changed == 'unit':
+        previous = manager.unit.with_name(manager.unit.name + '.' + frozen['service']['unit_sha256'] + '.previous')
+        previous.write_bytes(manager.unit.read_bytes())
+        manager.unit.write_bytes(b'[Service]\nExecStart=/foreign/loader\n')
+    elif changed == 'preimage':
+        monkeypatch.setattr(updates, 'controller_preservation', lambda *_: {'foreign': True})
+    elif changed == 'live-process':
+        monkeypatch.setattr(owner_process, 'observe_process_exit', lambda *_: False)
+    if changed:
+        with pytest.raises(OnboardingError):
+            controller.quiesce()
+        assert 'quiesced' not in (journal.get(row['operation_id'])['runtime_observation'] or {}).get('source_bootstrap', {})
+    else:
+        observed = controller.quiesce()
+        assert observed['exit_observed'] is True and observed['graceful_delivery'] == 'unobserved'
+        assert controller.quiesce() == observed
+        assert 'stop_intent' not in journal.get(row['operation_id'])['runtime_observation']['source_bootstrap']
+        assert len(locked) == 2
+    assert manager.stops == 0
+
+
 def test_lost_stop_reply_reconciles_exit_without_a_second_stop(fixture, monkeypatch):
     source, manager, journal, identifier, _ = fixture
     stop = manager.stop

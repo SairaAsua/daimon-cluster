@@ -1325,6 +1325,19 @@ class SourceBootstrapController:
                 # still prevents another publication or selection effect.
                 self._writer_quiesced()
                 return previous
+            if (frozen.get('mode') in {'preserve', 'renew'}
+                    and self.manager.inspect()['manager']['ActiveState'] == 'inactive'):
+                # The frozen, authenticated predecessor can have been stopped
+                # after preparation. Observe its actual exit/current unit and
+                # writer fence; never restart it just to request another stop.
+                stopped = self._stopped(frozen, candidate)
+                if not observe_process_exit(frozen['predecessor']['process']):
+                    raise OnboardingError('receiving_bootstrap_exit_unobserved')
+                self._writer_quiesced()
+                result = dict(process=frozen['predecessor']['process'], manager=stopped,
+                    exit_observed=True, writer_available=True, graceful_delivery='unobserved')
+                self._record('quiesced', result)
+                return result
             stop_intent = (row['runtime_observation'] or {}).get('source_bootstrap', {}).get('stop_intent')
             if stop_intent is not None:
                 if stop_intent != dict(scope=frozen['scope'], unit_sha256=frozen['service']['unit_sha256']):
