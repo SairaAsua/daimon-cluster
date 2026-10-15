@@ -201,7 +201,7 @@ class Backend:
 
 
 class Application:
-    def __init__(self, config, authority, sessions, *, backends=None, passkey_rp_id=None, client_example=False, style_provider=None, auth_origin=None, google_client=None, homemaker_source=None, homemaker_state=None):
+    def __init__(self, config, authority, sessions, *, backends=None, passkey_rp_id=None, client_example=False, style_provider=None, auth_origin=None, google_client=None, homemaker_source=None, homemaker_state=None, homemaker_home=None):
         self.styles = StyleConsumer(style_provider, authority, config["homes"]) if style_provider else None
         self.sso = None
         self.designs = None
@@ -240,6 +240,10 @@ class Application:
             self.sso = Login(self, auth_origin, Google(google_client) if google_client else None)
         elif google_client:
             raise ValueError('google_requires_shared_login')
+        if homemaker_home is not None and (
+                homemaker_home not in self.homes or not (homemaker_source and homemaker_state)):
+            raise ValueError('invalid_canonical_homemaker_home')
+        self.homemaker_home = homemaker_home
         if homemaker_source or homemaker_state:
             if not (homemaker_source and homemaker_state) or style_provider:
                 raise ValueError('one_canonical_homemaker_required')
@@ -1209,6 +1213,7 @@ def main():
     parser.add_argument('--google-client', help='Private optional Google OIDC client JSON file')
     parser.add_argument('--homemaker-source', help='Qualified immutable Homemaker source and public build')
     parser.add_argument('--homemaker-state', help='Private canonical Homemaker design state')
+    parser.add_argument('--homemaker-home', help='Registered home serving the owner-operated multi-pair application')
     args = parser.parse_args()
     from daimon_matrix.messaging_config import protected_read
 
@@ -1224,7 +1229,8 @@ def main():
     )
     app = Application(config, authority, sessions, passkey_rp_id=args.passkey_rp_id, client_example=args.client_example,
                       auth_origin=args.auth_origin, google_client=args.google_client,
-                      homemaker_source=args.homemaker_source, homemaker_state=args.homemaker_state)
+                      homemaker_source=args.homemaker_source, homemaker_state=args.homemaker_state,
+                      homemaker_home=args.homemaker_home)
     servers = [
         ThreadingHTTPServer(("127.0.0.1", config[key]), handler(app, owner=owner))
         for key, owner in (("viewer_port", False), ("owner_port", True))

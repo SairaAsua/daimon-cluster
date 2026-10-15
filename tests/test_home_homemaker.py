@@ -8,6 +8,7 @@ from clusterctl.homes.homemaker import Homemaker
 from clusterctl.homes.service import handler
 from tests.test_home_gateway import serving
 from tests.test_home_passkeys import system, approved
+from clusterctl.homes.policy import Actor
 
 
 def receiving(app):
@@ -27,6 +28,68 @@ def test_current_pair_permission_is_separate_from_visiting_another_home(system):
     assert provider.scope('one',visitor,'pair')[0]=={'kind':'being','ref':'owner'}
     app.authority.people['human']=replace(visitor,revision='changed')
     with pytest.raises(ValueError,match='denied'):provider.scope('one',visitor,'pair')
+
+
+def test_central_editor_resolves_each_current_pair_without_replacing_personal_scope(system):
+    app,_=system;provider=receiving(app);app.homemaker_home='two'
+    app.authority.people['owner-two']=Actor('owner-two','being','v1','Second owner')
+    app.homes['two']['owner_being_ref']='owner-two'
+    for actor, owner in (('human','owner'),('other','owner-two')):
+        subject=app.authority.actor(actor)
+        assert provider.scope('two',subject,'pair')[0]=={'kind':'being','ref':owner}
+        assert provider.scope('two',subject,'personal')[0]=={'kind':'human','ref':actor}
+    # This does not silently enable every visited home as a central editor.
+    with pytest.raises(ValueError,match='denied'):
+        provider.scope('one',app.authority.actor('other'),'pair')
+    app.authority.people['visitor']=Actor('visitor','human','v1','Visitor')
+    with pytest.raises(ValueError,match='context_unavailable'):
+        provider.scope('two',app.authority.actor('visitor'),'pair')
+    stale=app.authority.actor('human')
+    app.authority.people['human']=replace(stale,revision='new')
+    with pytest.raises(ValueError,match='denied'):provider.scope('two',stale,'pair')
+
+
+def test_central_pair_ambiguity_is_not_resolved_by_first_match_or_hostname(system):
+    app,_=system;provider=receiving(app);app.homemaker_home='two'
+    app.homes['three']={**app.homes['one'],'owner_being_ref':'third-owner'}
+    original=app.authority.paired_human
+    app.authority.paired_human=lambda home:'human' if home=='three' else original(home)
+    with pytest.raises(ValueError,match='context_unavailable'):
+        provider.scope('two',app.authority.actor('human'),'pair')
+
+
+def test_central_browser_baseline_and_save_use_verified_pair_under_the_same_origin(system):
+    import json
+    app,_=system;provider=receiving(app);app.designs=provider;app.homemaker_home='two'
+    app.authority.people['owner-two']=Actor('owner-two','being','v1','Second owner')
+    app.homes['two']['owner_being_ref']='owner-two'
+    calls=[]
+    class Canonical:
+        def editor_default(self,actor,**fields):
+            calls.append((actor,fields));return {'design_revision':0,'selection_revision':0}
+        def save_default(self,actor,**fields):
+            calls.append((actor,fields));return {'status':'saved'}
+    provider.authority=Canonical()
+    payload={'variant':'template-world','recipe':{'config':{'templateId':'world'}},
+             'expected_design_revision':0,'expected_selection_revision':0,'operation_id':'same-intent'}
+    with serving(handler(app)) as base:
+        conn=HTTPConnection(urlsplit(base).netloc)
+        for actor, owner in (('human','owner'),('other','owner-two')):
+            token,_=approved(app,home='two',actor=actor)
+            headers={'Host':'two.example.test','Cookie':'__Host-home='+token,
+                     'Origin':'https://two.example.test'}
+            conn.request('GET','/homemaker/api/default?variant=template-world',headers=headers)
+            response=conn.getresponse();response.read();assert response.status==200
+            assert calls[-1][0]==actor and calls[-1][1]['owner']=={'kind':'being','ref':owner}
+            conn.request('POST','/homemaker/api/default',body=json.dumps(payload),headers=headers)
+            response=conn.getresponse();response.read();assert response.status==200
+            assert calls[-1][0]==actor and calls[-1][1]['owner']=={'kind':'being','ref':owner}
+            for extra in ({'Origin':'null'},{'Authorization':'Bearer '+token}):
+                before=len(calls)
+                conn.request('POST','/homemaker/api/default',body=json.dumps(payload),headers={**headers,**extra})
+                response=conn.getresponse();response.read();assert response.status==403
+                assert len(calls)==before
+        conn.close()
 
 
 def test_reading_identity_does_not_authorize_another_persons_design_scope(system):

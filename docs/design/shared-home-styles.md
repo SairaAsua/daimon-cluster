@@ -145,3 +145,26 @@ live configuration or physical Telegram acceptance is implied.
 Preserve current artifacts/grants/recipe exports, body/native sessions, passkeys,
 source history and compatible rollback. Automatic package updates and autonomous
 attention stay outside this increment.
+
+## Owner-operated central entry preparation
+
+`--homemaker-home REGISTERED_HOME_REF` optionally selects the existing home whose
+trusted editor may resolve the authenticated human's own pair independently of
+that entry's hostname. It requires configured creator source/state and a registered
+home. The existing login must first establish that human's current browser session
+on the central origin; a launch URL does not supply identity or a write grant.
+
+At the selected entry, pair context resolves current pair bindings. No pair or
+multiple distinct paired beings refuses the operation instead of choosing the
+visited home's owner or the first match. Personal context remains that human's
+private scope. Other home editor routes retain their prior paired-human check.
+Native owner operations, the canonical store and consumer appearance resolution
+are unchanged. No request-supplied owner or actor is accepted.
+
+This setting prepares the receiving policy; it does not constitute the complete
+owner-operated application handoff. Homemaker's maintained application module,
+release ownership, permitted recovery/return operations and launch-link retirement
+remain part of the coordinated owner release. Keep the existing source/state and
+paths selected until that successor is qualified. A hostname change or this flag
+alone is not consolidation. Coordination: Matrix328 and the owning Homemaker
+`docs/CONSOLIDATION.md`.
