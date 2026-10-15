@@ -958,6 +958,7 @@ def freeze_guest_bootstrap(target, *, deadline_ns: int) -> dict:
     observed = target.running(admitted=True, deadline_ns=deadline_ns, bootstrap_base_only=True)
     bundle = target.document_bundle()
     if (observed['responder_association'] != 'same-connection'
+            or observed['runtime_sha256'] != digest(bundle)
             or observed['origin'] != bundle['local_origin']
             or observed['runtime_status'].get('being_ref') != bundle['manifest']['being_ref']
             or observed['runtime_status'].get('local_origin') != bundle['local_origin']

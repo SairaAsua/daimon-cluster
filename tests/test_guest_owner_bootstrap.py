@@ -272,6 +272,8 @@ def test_predecessor_freeze_uses_actual_base_and_admission_without_group_status(
         monkeypatch.setattr(native_client, 'LocalClient', LegacyGroupRestrictedClient)
         with pytest.raises(native_client.ClientError):
             target.running(admitted=True, deadline_ns=deadline())
+        monkeypatch.setattr(target, 'observe', lambda: pytest.fail(
+            'read-only predecessor observation reopened birth/custody or archived pairs'))
         observed = target.running(admitted=True, deadline_ns=deadline(), bootstrap_base_only=True)
         assert observed['process']['pid'] == presence['process']['pid']
         assert observed['admission_parent']['pid'] == os.getpid()
@@ -291,6 +293,50 @@ def test_predecessor_freeze_uses_actual_base_and_admission_without_group_status(
                 wrong.setattr(LegacyGroupRestrictedClient, 'runtime_status', wrong_identity)
                 with pytest.raises(OnboardingError, match='^receiving_identity_admission_conflict$'):
                     freeze_guest_bootstrap(target, deadline_ns=deadline())
+        scope = LegacyGroupRestrictedClient.scope_me
+        for field in ('credential_ref', 'incarnation_authorization_ref'):
+            def wrong_credential(self):
+                identifier, response = scope(self)
+                response = copy.deepcopy(response)
+                response['result'][field] = 'different-current-credential'
+                return identifier, response
+            with monkeypatch.context() as wrong:
+                wrong.setattr(LegacyGroupRestrictedClient, 'scope_me', wrong_credential)
+                with pytest.raises(OnboardingError, match='^receiving_identity_public_binding_conflict$'):
+                    freeze_guest_bootstrap(target, deadline_ns=deadline())
+        config = target.package/'runtime/client.json'
+        original = config.read_bytes()
+        def replace_client(self):
+            result = scope(self)
+            config.write_bytes(original+b'\n')
+            return result
+        try:
+            with monkeypatch.context() as changed:
+                changed.setattr(LegacyGroupRestrictedClient, 'scope_me', replace_client)
+                with pytest.raises(OnboardingError, match='^receiving_bootstrap_public_preimage_changed$'):
+                    freeze_guest_bootstrap(target, deadline_ns=deadline())
+        finally:
+            config.write_bytes(original)
+        binding = target.root/'plan.json'
+        original_binding = binding.read_bytes()
+        try:
+            being_seed._write(binding, {**target._binding(), 'genesis_digest': '0'*64})
+            with pytest.raises(OnboardingError, match='^onboarding_target_binding_conflict$'):
+                target.running(admitted=True, deadline_ns=deadline(), bootstrap_base_only=True)
+        finally:
+            binding.write_bytes(original_binding)
+        bundle = target.document_bundle()
+        def different_loaded_bundle(self):
+            identifier, response = status(self)
+            response = copy.deepcopy(response)
+            response['result']['loaded_runtime'] = dict(process_id=observed['process']['pid'],
+                runtime_bundle_sha256='0'*64, runtime_id=bundle['runtime_id'],
+                local_origin=bundle['local_origin'])
+            return identifier, response
+        with monkeypatch.context() as changed:
+            changed.setattr(LegacyGroupRestrictedClient, 'runtime_status', different_loaded_bundle)
+            with pytest.raises(OnboardingError, match='^onboarding_loaded_base_conflict$'):
+                freeze_guest_bootstrap(target, deadline_ns=deadline())
         assert actual_observe() == old and not (target.root / 'receiving-bootstrap').exists()
     finally:
         admitted.close()

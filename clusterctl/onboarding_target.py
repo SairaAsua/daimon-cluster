@@ -513,16 +513,38 @@ class Target:
                 raise OnboardingError('qualified_onboarding_deadline_client_required')
             if time.monotonic_ns() >= deadline_ns:
                 raise OnboardingError('onboarding_observation_deadline_expired')
-        prepared = self.observe()
-        if prepared["phase"] != "v8":
-            raise OnboardingError("current_onboarding_target_required")
         root = self.package / "runtime"
+        capture = {}
+        if bootstrap_base_only:
+            # A current read is not another birth or archived pair ceremony.
+            # Freeze only protected public/client preimages; actual native
+            # identity/admission below must authenticate that same selection.
+            for path in (self.root/'plan.json', root/'runtime.json', root/'client.json', root/'client.key'):
+                capture[path] = hashlib.sha256(onboarding_release.regular(
+                    path, uid=os.geteuid())).hexdigest()
+            if document(self.root/'plan.json') != self._binding():
+                raise OnboardingError('onboarding_target_binding_conflict')
+            bundle = self.document_bundle()
+            expected = bundle['local_origin']
+            group = None
+            runtime_sha256 = digest(bundle)
+        else:
+            prepared = self.observe()
+            if prepared["phase"] != "v8":
+                raise OnboardingError("current_onboarding_target_required")
+            expected = prepared['receipt']['origin']
+            group = prepared.get('group')
+            runtime_sha256 = prepared.get('receiving_controller', prepared['receipt'])['runtime_sha256']
         socket_identity = _socket_identity(root / "matrix.sock", deadline_ns)
         key = bytearray(onboarding_release.regular(root / "client.key", uid=os.geteuid()))
-        config = ClientConfig.load(root / "client.json", key)
+        try:
+            config = ClientConfig.load(root / "client.json", key)
+        finally:
+            key[:] = b'\0' * len(key)
+        public = self._bootstrap_public_identity(bundle, config) if bootstrap_base_only else None
         from .owner_process import ConnectedProcessObserver, ParentProcessPresence, ProcessPresence
         connected = 'connection_observer' in getattr(LocalClient, '__dataclass_fields__', {})
-        if require_loaded and not connected:
+        if (require_loaded or bootstrap_base_only) and not connected:
             raise OnboardingError('qualified_onboarding_client_required')
         with ExitStack() as stack:
             presence: ConnectedProcessObserver | ProcessPresence
@@ -556,14 +578,17 @@ class Target:
             client = LocalClient(root / "matrix.sock", config, timeout_seconds=40,
                                  **options)
             _, status = client.runtime_status()
-            expected = prepared["receipt"]["origin"]
             if status["ok"] is not True or any(status["server"].get(field) != value for field, value in expected.items()):
                 raise OnboardingError("onboarding_daemon_origin_conflict")
             loaded = status['result'].get('loaded_runtime')
             if connected and loaded is not None and (presence.process is None
                     or loaded.get('process_id') != presence.process['pid']):
                 raise OnboardingError('onboarding_daemon_responder_conflict')
-            group = prepared.get('group')
+            if public is not None and loaded is not None and (
+                    loaded.get('runtime_bundle_sha256') != runtime_sha256
+                    or loaded.get('runtime_id') != bundle['runtime_id']
+                    or loaded.get('local_origin') != expected):
+                raise OnboardingError('onboarding_loaded_base_conflict')
             group_status = None
             if connected and group is not None and not bootstrap_base_only:
                 from daimon_matrix.operator_capabilities import host_capability_profile
@@ -602,6 +627,11 @@ class Target:
                     raise OnboardingError('onboarding_admission_not_current')
                 from .onboarding_receiving_update import receiving_identity
                 identity = receiving_identity(observed, status['result'], status['server'])
+                if public is not None and any(identity[field] != public[selected] for field, selected in (
+                        ('being_ref', 'being_ref'), ('manifest_hash', 'manifest_hash'),
+                        ('credential_ref', 'credential_id'),
+                        ('incarnation_authorization_ref', 'incarnation_authorization_id'))):
+                    raise OnboardingError('receiving_identity_public_binding_conflict')
             parent = None
             if admitted and connected:
                 child_process = presence.process
@@ -614,16 +644,43 @@ class Target:
             presence.verify()
             if parent is not None:
                 parent.verify()
+            if capture and any(hashlib.sha256(onboarding_release.regular(
+                    path, uid=os.geteuid())).hexdigest() != fingerprint
+                    for path, fingerprint in capture.items()):
+                raise OnboardingError('receiving_bootstrap_public_preimage_changed')
             if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
                 raise OnboardingError('onboarding_observation_deadline_expired')
             return dict(schema="cluster-onboarding-runtime-presence/v1", plan_digest=digest(self.plan),
                 origin=expected, process=presence.process, runtime_id=config.runtime_id,
                 admission_parent=None if parent is None else parent.process,
-                runtime_sha256=prepared.get('receiving_controller', prepared['receipt'])["runtime_sha256"],
+                runtime_sha256=runtime_sha256,
                 runtime_status=status['result'], group=group, group_runtime_status=group_status,
                 receiving_identity=identity,
                 receiving_readiness='unobserved',
                 responder_association='same-connection' if connected else 'legacy-probe')
+
+    @staticmethod
+    def _bootstrap_public_identity(bundle: dict, config) -> dict:
+        """Bind a current authorized client, without custody or loaded claims."""
+        from daimon_matrix.operator_rebirth import authority_from_runtime_bundle
+        from daimon_matrix.messaging_config import _public_identity
+        from daimon_matrix.operator_capabilities import verify_operator_capability_binding
+        try:
+            authority = authority_from_runtime_bundle(bundle)
+            public = _public_identity(authority, bundle['local_origin'], bundle['runtime_id'],
+                bundle['runtime_label'], time.time_ns() // 1_000_000)
+            verify_operator_capability_binding(bundle['operator_capability_binding'],
+                runtime_id=bundle['runtime_id'], runtime_label=bundle['runtime_label'],
+                being_ref=public['being_ref'], origin=bundle['local_origin'],
+                signing_key=authority.credentials[public['credential_id']]['body']['signing_key'],
+                capability_rows=bundle['capabilities'])
+            if (config.expected_server != bundle['local_origin']
+                    or config.runtime_id != bundle['runtime_id'] or config.runtime_label != bundle['runtime_label']
+                    or not any(row['descriptor'] == config.capability.descriptor for row in bundle['capabilities'])):
+                raise ValueError
+        except (KeyError, ValueError, TypeError):
+            raise OnboardingError('receiving_bootstrap_public_binding_conflict') from None
+        return public
 
     def receiving_control(self, action: str, path: Path, *, command: dict | None = None,
                           deadline_ns: int | None = None) -> dict:

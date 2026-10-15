@@ -175,6 +175,16 @@ lock, then freeze the actual normalized manager state through the ordinary
 controller. Never fake an inspection, ignore a live override or add another
 override to out-sort the previous ones. Subsequent updates use the single unit.
 
+The read-only guest bootstrap observation verifies the current signed public
+bundle, operator/client binding, protected target plan/genesis and actual native
+status/admission on the same observed process. It does not reopen custody or
+reconstruct the archived bilateral enrollment. Protected input drift is refused;
+present loaded-base metadata must match the captured bundle. A legacy daemon
+without that metadata proves only authenticated predecessor presence, never a
+loaded candidate or receiving readiness. Mutation, publication, startup and
+historical inspection retain their original full validation. Keep the same
+bounded deadline rather than extending it to accommodate duplicate preparation.
+
 ## Preserve the receiving context
 
 The original SDK `196ec7219f954cf4e514a1f61ae72eb3451d851e` remains
