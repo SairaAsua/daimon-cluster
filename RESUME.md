@@ -23,6 +23,9 @@ evidence labels into additional manual procedures, reimplement completed stages,
 replay private trial scripts, repeat valid reviews or recreate identities/fixtures
 for routine software corrections. Prepare expiring controls only when needed. Close the receiving/update/compatible rollback gap first;
 I/O, status integration and future-member admission remain in the full milestone.
+Full CI uses one Python3.13.5 job with a30-minute limit. Run38728293267 exhausted
+the former20-minute cap at75% of the fail-fast suite without reporting a test
+failure. This job budget does not change any receiving/native freshness deadline.
 
 ## Current communication target — 2026-10-13
 
