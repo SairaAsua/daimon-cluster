@@ -7,72 +7,53 @@ The original readable-presentation increment is retained under
 Matrix owns signed messaging and presentation; Cluster selects the exact
 executable SDK and receiving helpers on the existing bodies.
 
-## Efficient execution of one update
+## Execute from the next missing effect
 
-Keep one current work record with the candidate, completed effects, reusable
-qualification and the next unresolved condition. Historical trial scripts and
-old checkpoints preserve evidence; they are not alternate deployment procedures.
-Use the maintained controllers below instead of composing another private
-sequence of root/owner lifecycle calls.
+Use one current operation and one reusable integrated receiving scenario. Keep
+its candidate, completed effects, reusable evidence and next missing effect in
+the existing work record. Dated trial scripts are evidence, not deployment entrypoints.
 
-| Maintained API | Evidence it owns |
+| Maintained API | Responsibility |
 | --- | --- |
-| `prepare_sdk` / `preflight` | Exact artifacts, installed interpreter and compatible reader; no loaded/readiness claim |
-| `SourceBootstrapController` | Source journal, actual predecessor exit, preservation/publication and exact start/load recovery |
-| `prepare_guest_bootstrap` / `GuestBootstrapController.execute` | Guest preparation and one journal-owned root/owner lifecycle operation |
-| `CohortController` | Required receiver adoption, fresh roster/proof barrier and positive reader selection |
+| `prepare_sdk` / `preflight` | Prepare exact code and compatible installed SDK |
+| `SourceBootstrapController` | Resume the same Source lifecycle operation |
+| `prepare_guest_bootstrap` / `GuestBootstrapController.execute` | Resume the same guest root/owner operation |
+| `CohortController` | Select qualified required receivers and verify the cohort |
 
-Finish a coherent source correction before publishing it. Reuse valid source
-reviews and checks when the relevant bytes/contracts are unchanged; revisit only
-a material new contract, a concrete finding or an actual repository requirement.
-Run the selected affected tests once, retain their result and use one CI run for
-the consolidated candidate. Do not restart CI for intermediate notes or a plan.
-Unknown shared-code changes retain broader CI; a reviewed narrow change must be
-recognized by actual content and include its affected default callers.
+These responsibilities distinguish evidence; they do not require another manual
+check, review, backup, report or fixture for every label. Reuse completed effects
+and valid tests. A routine software correction does not require a new identity,
+credential publication, signed authority transition or unrelated service restart.
 
-Freeze the executable candidate before creating a bounded qualification scenario.
-Prepare control capability lifetimes and the rollout's fresh authorization near
-the lifecycle operation, after builds/reviews/CI that can consume that lifetime.
-Do not extend expired frozen requests or turn a code-only update into a new
-identity/authority ceremony. Keep any expired fixture's history; a justified new
-synthetic fixture is separate evidence, never a successful retry of the old one.
+Finish a coherent source delta, run its affected checks once and publish it.
+Reuse existing builds/reviews/CI where their inputs are unchanged. After a code
+change, qualify the affected behavior and its integrated receiving path; do not
+repeat unaffected historical journeys or create a fresh fixture for each stage.
+Unknown shared-code deltas keep broader coverage. Correct a missing CI scope
+mapping when the existing selected job already exercises the changed contract.
 
-Select the observer's SDK explicitly before lifecycle effects. A development
-venv can still contain the production predecessor even when the service command
-selects a newer closed SDK. Run observation through the receiving owner's selected
-`runtime_command` (or its maintained Source/guest client), not an ambient import
-of `Source` or `LocalClient`. Verify the observer's closed startup context and
-required reader/client contract before dispatching a start or stop. An incompatible
-observer is a preparation refusal, not a transient startup condition to retry.
-Keep the actual observation and its imported SDK distinct from the serving boot
-proof; do not relabel a fixed fixture launcher as a production SDK defect.
+On failure, inspect the exact controller stage, retained result and current
+process. Resume that operation through the maintained controller. A timeout
+alone authorizes neither replay nor a new identity. Do not benchmark unrelated
+substeps, build a parallel diagnostic runner, or repeat preparation to make an
+uncertain outcome look successful. Use existing bounded diagnostics to resolve
+the concrete missing fact, then continue from it. An early missing socket is
+not a reason to restart a process whose exit has not been observed.
 
-Keep lifecycle journals on their actual owners. A root cohort coordinator uses
-`SourceGroupClient(lifecycle_journal=...)` to inspect a Source operation through
-the qualified owner CLI (`--receiving-lifecycle ID --operation-journal DIR`).
-The existing pre-exec UID/GID drop also applies to this read. Its projection binds
-the Source configuration and exact retained operation; it exports predecessor,
-public candidate location and observed quiescence/load only. Cohort adoption and
-replacement checks use that owner result, not a copied row in the root journal.
-An unavailable or conflicting owner read refuses activation without a fallback.
-Guest lifecycle rows remain in their existing host-owned journal. Do not share
-journal permissions, copy custody or fabricate lifecycle observations to assemble
-a mixed Source/guest cohort.
+Use the selected SDK for both the observer and receiver; validate that binding
+before lifecycle effects. Keep lifecycle journals on their actual owners.
+Root reads Source lifecycle proof through `SourceGroupClient(lifecycle_journal=...)`
+and its existing owner CLI/UID drop, never a copied journal row or private custody.
 
-After a dispatched start, observe that same process and retained operation.
-A missing early socket, observation timeout or unavailable status is not proof
-that the service stopped, that adoption failed, or that a new start is permitted.
-Use bounded observation/recovery through the existing controller; do not repeat
-completed mutations or generate new IDs to obtain a favorable result. Obtain a
-specific safe refusal stage before changing the candidate in response to an
-unclassified error. Local CLIs support opt-in `--diagnostics` on candidates that
-advertise it; normal stdout and the original operation remain unchanged.
+Prepare expiring fixture controls immediately before their use. If an unrelated
+urgent repair intervenes, preserve the scenario and completed effects instead
+of discarding them. Do not extend an expired frozen authorization; recover using
+the supported procedure for the exact retained state, not a new birth ceremony.
 
-Software qualification and live deployment are separate. Complete the current
-receiving update and compatible rollback before expanding unrelated roadmap work.
-Live communication-interrupting operations still require the prepared candidate,
-readiness/recovery and the human's scoped consent; every global Stop separately
-requires fresh explicit human consent. Efficiency does not remove these boundaries.
+Before a real communication-interrupting operation, prepare its exact candidate,
+required receiver readiness and recovery, and obtain scoped human authorization.
+Every global Stop independently requires fresh explicit human consent. These
+requirements remain; they are not permission for repeated approval rounds.
 
 ## Preserve the receiving context
 

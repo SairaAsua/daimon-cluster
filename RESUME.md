@@ -15,9 +15,10 @@ The existing three-body production group below stays selected.
 
 Use the current operation/PR evidence and the execution procedure in
 [the receiving update runbook](docs/runbooks/tribu-sdk-successor.md).
-Do not reimplement completed controller stages, replay private trial scripts,
-repeat qualified source reviews, or prepare expiring fixture controls before a
-candidate is ready. Close the receiving/update/compatible rollback gap first;
+Continue the same retained operation from its next missing effect. Do not turn
+evidence labels into additional manual procedures, reimplement completed stages,
+replay private trial scripts, repeat valid reviews or recreate identities/fixtures
+for routine software corrections. Prepare expiring controls only when needed. Close the receiving/update/compatible rollback gap first;
 I/O, status integration and future-member admission remain in the full milestone.
 
 ## Current communication target — 2026-10-13
