@@ -128,3 +128,14 @@ def test_ci_bubblewrap_install_is_cached_bounded_and_fail_closed() -> None:
     assert "Acquire::https::Timeout=15" in step
     assert "Dpkg::Lock::Timeout=30" in step
     assert "test -x /usr/bin/bwrap" in step
+
+
+def test_recovery_workflow_checks_out_the_fixtures_frozen_matrix_revision() -> None:
+    import re
+    root = Path(__file__).parents[1]
+    tree = ast.parse((root / 'tests/integration/test_recovery_rebirth_containers.py').read_text())
+    revision = next(node.value.value for node in tree.body if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == 'MATRIX_COMMIT' for target in node.targets))
+    workflow = (root / '.github/workflows/tests.yml').read_text().split('  recovery-rebirth-disposable-hosts:', 1)[1]
+    assert re.search(r'ref: ([0-9a-f]{40})', workflow).group(1) == revision
+    assert re.search(r'git -C matrix-source rev-parse HEAD.*?([0-9a-f]{40})', workflow, re.S).group(1) == revision

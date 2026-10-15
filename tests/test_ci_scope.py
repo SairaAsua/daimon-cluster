@@ -570,3 +570,14 @@ def test_exact_candidate_host_scope_covers_legacy_peer_and_rejects_other_bytes(m
     monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *_args, **_kwargs:
         subprocess.CompletedProcess([], 0, original + b'# different baseline\n'))
     assert ci_scope.select(changed, ROOT, base='a' * 40)[0] != 'peer'
+
+
+def test_controlled_software_update_and_its_runbook_keep_receiving_coverage():
+    from tools.ci_scope import LOADED_STARTUP_TESTS
+    changed = ['clusterctl/onboarding_receiving_update.py', 'tests/test_source_bootstrap.py',
+        'tests/test_guest_owner_bootstrap.py', 'tests/test_guest_bootstrap_controller.py',
+        'tests/test_receiving_cohort_control.py', 'docs/runbooks/tribu-sdk-successor.md',
+        'tools/ci_scope.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py', '.github/workflows/tests.yml']
+    assert select(changed, ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    assert select([*changed, 'clusterctl/onboarding_custody.py'], ROOT)[0] == 'full'
+    assert select([*changed, 'docs/unclassified-contract.md'], ROOT)[0] == 'full'
