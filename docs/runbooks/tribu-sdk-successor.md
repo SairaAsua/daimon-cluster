@@ -104,10 +104,12 @@ to prepare a source test.
 
 The guest-owner module really requires UID1000. CI maps its current disposable
 runner user to kernel UID/GID1000 in a user namespace, retaining the same interpreter,
-SDK and filesystem ownership. Use unprivileged `unshare --map-user=1000
---map-group=1000`: this maps only the invoking owner, without subordinate-ID
-allocation or a second setgroups call. A privileged multi-range mapping requires
-unrelated subuid grants and is the wrong mechanism. The regular test pass deselects that module; its
+SDK and filesystem ownership. The CI-only `tools/ci_guest_owner.py` parent maps
+host root to0 and the actual runner to1000 through its child's kernel UID/GID maps,
+then drops the child to1000. Mapping only the runner leaves ancestor root ownership
+unmapped and correctly fails protected-path validation. `newuidmap` would instead
+require unrelated subordinate-ID grants. Do not change accounts or ownership to
+work around either failure. The regular test pass deselects that module; its
 canonical-owner pass runs it once. Do not change the runtime owner guard or fake
 geteuid to make it pass. Slow-daemon tests delay the actual pinned child process;
 a forwarding proxy changes SO_PEERCRED and is not the same native responder.

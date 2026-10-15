@@ -14,7 +14,7 @@ import re
 import subprocess
 from pathlib import Path
 
-CI_FILES = {'.github/workflows/tests.yml', 'README.md', 'tools/ci_scope.py',
+CI_FILES = {'.github/workflows/tests.yml', 'README.md', 'tools/ci_scope.py', 'tools/ci_guest_owner.py',
             'tests/test_ci_scope.py', 'tests/test_ci_workflow.py'}
 # Closed documentation pages with no generated/runtime consumer. Unknown docs stay full.
 RUNBOOK_DOCS = {'docs/runbooks/tribu-sdk-successor.md', 'docs/design/shared-home-styles.md',
