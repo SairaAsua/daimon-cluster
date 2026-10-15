@@ -80,6 +80,10 @@ identity, admission, roster and credential validity are still observed each roun
 A completed selection retry compares the gate already returned by the same
 qualified all-required observation, avoiding another cold status helper per body.
 Neither reuse extends the observation window or caches receiving readiness.
+Preparation's barrier also reuses the process/gate authenticated by that same
+all-required adoption round. Do not launch a second cold status helper for the
+same proof. The original freshness window, exact process/head checks and native
+roster CAS still apply; later invocations observe again.
 
 Prepare expiring fixture controls immediately before their use. If an unrelated
 urgent repair intervenes, preserve the scenario and completed effects instead

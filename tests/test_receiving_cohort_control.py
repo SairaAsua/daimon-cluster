@@ -980,6 +980,20 @@ def test_completed_cohort_retry_observes_without_repreparing_native_controls(tmp
     assert observations == {name: 1 for name in owners}, 'reuse same-round qualified gate'
 
 
+def test_cohort_preparation_reuses_its_authenticated_round_for_barrier(tmp_path, monkeypatch):
+    controller, owners, _, _ = activation_fixture(tmp_path)
+    observations = {name: 0 for name in owners}
+    for name, owner in owners.items():
+        original = owner.status
+        def status(selected=name, query=original):
+            observations[selected] += 1
+            assert observations[selected] == 1, 'barrier must reuse the qualified gate'
+            return query()
+        monkeypatch.setattr(owner, 'status', status)
+    assert len(controller.prepare_activation()['readers']) == len(owners)
+    assert observations == {name: 1 for name in owners}
+
+
 def test_completed_cohort_retry_changed_gate_still_fences_forward(tmp_path):
     controller, owners, journal, identifier = activation_fixture(tmp_path)
     first = controller.activate()

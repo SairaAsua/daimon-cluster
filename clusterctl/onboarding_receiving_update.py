@@ -2242,7 +2242,9 @@ class CohortController:
         with self.journal.mutation_lock(self.operation_id):
             row = self._row()
             plan, manifest = self._activation(row)
-            records = {name: self._adoption(name, plan, manifest) for name in sorted(self.owners)}
+            observations: dict = {}
+            records = {name: self._adoption(name, plan, manifest, observations=observations)
+                       for name in sorted(self.owners)}
             now = time.time_ns() // 1_000_000
             if any(now - item['observed_at_ms'] > plan['observation_window_ms']
                    or item['reader']['expires_at_ms'] <= now for item in records.values()):
@@ -2253,7 +2255,7 @@ class CohortController:
                     (item['being_ref'], item['embodiment_id']) == (record['reader']['being_ref'], record['reader']['embodiment_id']))
                 if receiver['expected_selection_sha256'] != digest(frozen[name]):
                     raise OnboardingError('receiving_cohort_predecessor_changed')
-            row = self._activation_barrier(row, plan, records)
+            row = self._activation_barrier(row, plan, records, observations)
             now = time.time_ns() // 1_000_000
             if any(now - item['observed_at_ms'] > plan['observation_window_ms']
                    or item['reader']['expires_at_ms'] <= now for item in records.values()):
@@ -2272,7 +2274,7 @@ class CohortController:
                 expected_runtime_observation=row['runtime_observation'])
             return activation
 
-    def _activation_barrier(self, row: dict, plan: dict, records: dict) -> dict:
+    def _activation_barrier(self, row: dict, plan: dict, records: dict, current_observations: dict) -> dict:
         """Preserve old revocations and qualify an explicitly replaced sender.
 
         A lifecycle exit/load record is required before a new process may be
@@ -2292,7 +2294,11 @@ class CohortController:
                     or old['gate'].get('request_sha256') != old.get('request_sha256')):
                 raise OnboardingError('receiving_sender_barrier_changed')
             owner = self.owners[name]
-            current = owner.status()
+            # Adoption already authenticated this exact process/gate in the
+            # current bounded round. Another cold owner CLI spends freshness
+            # without adding proof; native preparation/selection still CASes
+            # the actual process/head and refuses intervening change.
+            current = current_observations[name]
             record = records[name]
             if current['process'] != record['process'] or current['server'] != record['server']:
                 raise OnboardingError('receiving_sender_barrier_changed')
