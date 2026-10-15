@@ -1,7 +1,8 @@
 """Owner-local native relationship requests for shared group admission.
 
-Only authenticated relationship frames/results are retained here. No transport,
-membership shortcut, background attention or running-admission claim is added.
+Authenticated relationship frames/results and their approved public authority
+context are retained here. No transport, membership shortcut, background
+attention or running-admission claim is added.
 Offline callers must hold the native runtime writer for the entire invocation.
 """
 from __future__ import annotations
@@ -74,6 +75,68 @@ def merge_authorities(current: dict, supplied: dict) -> dict:
             raise OnboardingError('approved_onboarding_group_history_conflict')
         result[ref] = authority
     return result
+
+
+def owner_authorities(runtime_root: Path, group_root: Path, journal: Path,
+                      value: dict, closure: dict) -> dict:
+    """Freeze the complete owner-approved closure before partial publication.
+
+    The caller holds the native writer. First use validates the actual serving
+    selector and preserves all its Roots. An exact retained operation can then
+    load a closed maintenance context even while that selector lags publication.
+    Normal serving and observation keep their strict application pins.
+    """
+    from . import onboarding_peer
+    selected = command(value)
+    bundle = being_seed._read(runtime_root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+    identity = dict(runtime_root=str(runtime_root), group_root=str(group_root),
+        runtime_bundle_sha256=digest(bundle),
+        ledger=check_retained_ledger(runtime_root, journal, selected))
+    approved = dict(schema='cluster-group-owner-context/v1',
+        operation_id=selected['operation_id'], identity=identity,
+        authority_closure=copy.deepcopy(closure))
+    authorities = public_authorities(bundle, closure)
+    # A self-consistent replacement chain cannot erase native known history.
+    onboarding_peer._group_authorities_with_history(bundle, authorities,
+        {ref: authority.active for ref, authority in authorities.items()})
+    private_directory(journal, create=True)
+    with being_seed._locked(journal):
+        operation = private_directory(journal / selected['operation_id'], create=True)
+        context = private_directory(operation / 'owner', create=True)
+        path = context / 'context.json'
+        if path.exists():
+            retained = being_seed._read(path, limit=being_seed.MAX_SELECTION)
+            predecessor = retained.get('predecessor_selection_sha256')
+            if (retained != {**approved, 'predecessor_selection_sha256': predecessor}
+                    or predecessor is not None
+                    and (not isinstance(predecessor, str) or re.fullmatch('[0-9a-f]{64}', predecessor) is None)):
+                raise OnboardingError('onboarding_group_owner_context_conflict')
+        else:
+            current = onboarding_peer.approved_group_authorities(runtime_root, group_root, bundle)
+            if not set(current) <= set(authorities):
+                raise OnboardingError('onboarding_group_owner_context_incomplete')
+            merge_authorities(current, authorities)
+            selection = group_root / 'selection.json'
+            predecessor = digest(being_seed._read(selection, limit=being_seed.MAX_SELECTION)) if selection.exists() else None
+            being_seed._write(path, {**approved, 'predecessor_selection_sha256': predecessor},
+                limit=being_seed.MAX_SELECTION)
+        # Retry the durability boundary even after a lost write/fsync reply.
+        # No native load or relationship dispatch precedes this boundary.
+        for parent in (context, operation, journal, journal.parent):
+            _sync(parent)
+    return authorities
+
+
+def load_owner_runtime(runtime_root: Path, reader, *, authorities: dict,
+                       qualified_startup: dict | None = None):
+    """Load only a closed owner context, never a serving selector or egress."""
+    from daimon_matrix import native_egress, runtime
+    def clock():
+        return time.time_ns() // 1_000_000
+    return runtime.load_runtime(runtime_root, 'runtime.json', reader, clock=clock,
+        relationship_authorities=authorities,
+        egress=native_egress.closed_visibility(clock=clock, catalog_mode='migrate'),
+        **({} if qualified_startup is None else {'qualified_startup': qualified_startup}))
 
 
 def _sync(directory: Path) -> None:

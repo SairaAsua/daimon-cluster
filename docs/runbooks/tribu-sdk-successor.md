@@ -657,6 +657,24 @@ RPC journal. They start no temporary daemon, group listener, model or transport.
 Supplied history self-consistency never substitutes for the protected owner's
 approval; current/native accepted histories cannot be silently replaced.
 
+Before the first offline request of an admission operation, supply its complete
+approved foreign Root/history closure, including every existing selected group
+authority. The owner retains this closure, the original bundle/ledger identity,
+fixed local paths and predecessor selector digest in that operation's private
+`owner/context.json`, and fsyncs it before loading or dispatch. Subsequent steps
+and exact retries must supply the same closure. Provision optional capabilities
+before freezing this bundle; a changed bundle or ledger requires explicit
+reassessment, not replacement of the retained context.
+
+This retained context permits closed offline maintenance if application
+publication has advanced while the serving selector still names its predecessor.
+Source's normal loader and Target's public observation continue rejecting that
+inconsistent selection. Target maintenance separately verifies its actual
+receiving identity/custody before loading. A fresh operation cannot bypass an
+already inconsistent selector; retain the context before publication. Recovery
+neither selects that partial application nor enables delivery. It must still
+finish the approved app/visibility/selector transaction and receiving acceptance.
+
 The owner journal binds exact intent and receiving identity and persists the
 authenticated frame before dispatch. It verifies native authenticated results
 before retaining them. A lost reply retries the same frame; completed local

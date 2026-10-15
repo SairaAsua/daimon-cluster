@@ -138,27 +138,19 @@ class Target:
     def group_relationship(self, value: dict, *, authority_closure: dict,
                            deadline_ns: int | None = None) -> dict:
         """Accept/ingest through native authentication before first managed start."""
-        from daimon_matrix import native_egress, runtime
-        from . import onboarding_peer
         from .onboarding_group_admission import (
-            check_retained_ledger, command, merge_authorities, public_authorities, relationship_request,
+            check_retained_ledger, command, load_owner_runtime, owner_authorities, relationship_request,
         )
         value = command(value)
         with self._runtime_writer():
             check_retained_ledger(self.package / 'runtime', self.root / 'group-admission', value)
-            if self.observe()['phase'] != 'v8':
+            if self._observe_receiving()['phase'] != 'v8':
                 raise OnboardingError('current_onboarding_target_required')
             root = self.package / 'runtime'
-            bundle = self.document_bundle()
-            authorities = merge_authorities(
-                onboarding_peer.approved_group_authorities(root, self.root / 'tribe', bundle),
-                public_authorities(bundle, authority_closure))
-            def clock():
-                return time.time_ns() // 1_000_000
-            hosted = runtime.load_runtime(root, 'runtime.json', self._reader, clock=clock,
-                relationship_authorities=authorities,
-                egress=native_egress.closed_visibility(clock=clock, catalog_mode='migrate'),
-                **({} if self.qualified_startup is None else {'qualified_startup': self.qualified_startup}))
+            authorities = owner_authorities(root, self.root / 'tribe', self.root / 'group-admission',
+                                            value, authority_closure)
+            hosted = load_owner_runtime(root, self._reader, authorities=authorities,
+                                        qualified_startup=self.qualified_startup)
             return relationship_request(root, self.root / 'group-admission', value,
                                         offline=hosted, deadline_ns=deadline_ns)
 
@@ -271,6 +263,14 @@ class Target:
             return self.observe()
 
     def observe(self) -> dict:
+        return self._observe_receiving(include_group=True)
+
+    def _observe_receiving(self, *, include_group: bool = False) -> dict:
+        """Validate receiving identity/custody independently of group selection.
+
+        Only retained offline owner maintenance uses this narrow observation.
+        Public observe() still validates the selected group's publication pins.
+        """
         if not self.root.exists() or not self.preparation.exists():
             return dict(phase="absent", request=None, receipt=None)
         if self.existing and (self.root / "request-renewal.json").exists():
@@ -320,7 +320,7 @@ class Target:
                 result = dict(phase="v8" if complete.exists() else "v8-published", request=request, receipt=current_receipt)
             if controller is not None:
                 result['receiving_controller'] = {**controller, 'historical_receipt_sha256': digest(result['receipt'])}
-            if result['phase'] == 'v8':
+            if include_group and result['phase'] == 'v8':
                 from .onboarding_peer import observed_group
                 group = observed_group(self, bundle)
                 if group is not None:

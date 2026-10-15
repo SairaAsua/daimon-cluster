@@ -38,6 +38,122 @@ def invitation(source, peer_bundle):
     return dict(operation_id=str(uuid.uuid4()), step='invite', method='tribe.invite', params=dict(payload=payload))
 
 
+@pytest.mark.parametrize('profile', ['source', 'target'])
+def test_retained_owner_context_recovers_lagging_selector_without_relaxing_serving(group_source, profile):
+    from daimon_matrix.canonical import canonical_bytes
+    from daimon_matrix.keystore import _atomic_write
+    from daimon_matrix.messaging_config import config_digest, create_binding, read_publication, validate_shape
+    from daimon_matrix.operator_messaging import _publication
+    source, target, _peer, peer_bundle, _old = group_source
+    base = source._load(signed=False)
+    request = invitation(source, peer_bundle)
+    group = source.outputs / 'tribe'
+    journal = source.outputs / 'group-admission'
+    if profile == 'target':
+        destination = target.root / 'tribe'
+        group.rename(destination)
+        group = destination
+        selected = being_seed._read(group / 'selection.json')['document']
+        selected.update(directory=str(group / 'application'),
+                        visibility=str(group / 'visibility/installation.json'))
+        being_seed._write(group / 'selection.json',
+            dict(document=selected, binding=create_binding(base, selected)))
+        journal = target.root / 'group-admission'
+
+    def submit(value, authorities):
+        if profile == 'source':
+            return source.group_relationship(value, offline=True, authority_closure=authorities)
+        return target.group_relationship(value, authority_closure=authorities)
+
+    def observe():
+        return source._load(signed=False) if profile == 'source' else target.observe()
+
+    supplied = closure(peer_bundle)
+    first = submit(request, supplied)
+    assert first['status'] == 'recorded'
+    context = journal / request['operation_id'] / 'owner/context.json'
+    retained = context.read_bytes()
+    events = base.service.ledger.events()
+    selector = (group / 'selection.json').read_bytes()
+    before = {name: (source.root / name).read_bytes() for name in ('runtime.json', 'custody.json')}
+
+    # Inject a genuine owner-signed application drift, leaving its selector
+    # behind. SDK additive-publication correctness is qualified separately;
+    # this isolates the owner-loader recovery boundary using real signatures.
+    app, metadata = read_publication(base, group / 'application')
+    predecessor = config_digest(app)
+    app['tribe']['policy']['max_ttl_ms'] -= 1
+    validate_shape(app)
+    _atomic_write(metadata / 'application.json', canonical_bytes(app))
+    _atomic_write(metadata / 'binding.json', canonical_bytes(create_binding(base, app)))
+    _atomic_write(group / 'application/publication.json', _publication(base, app, '.', predecessor))
+    assert read_publication(base, group / 'application')[0] == app
+    with pytest.raises(OnboardingError, match='approved_onboarding_group_required'):
+        observe()
+
+    assert submit(request, supplied) == first
+    assert context.read_bytes() == retained and base.service.ledger.events() == events
+    assert (group / 'selection.json').read_bytes() == selector
+    assert read_publication(base, group / 'application')[0] == app
+    assert {name: (source.root / name).read_bytes() for name in before} == before
+    with pytest.raises(OnboardingError, match='owner_context_conflict'):
+        submit(request, {})
+    fresh = {**request, 'operation_id': str(uuid.uuid4())}
+    with pytest.raises(OnboardingError, match='approved_onboarding_group_required'):
+        submit(fresh, supplied)
+    assert not (journal / fresh['operation_id'] / 'owner/context.json').exists()
+    with pytest.raises(OnboardingError, match='approved_onboarding_group_required'):
+        observe()
+
+
+def test_owner_context_requires_complete_approved_closure_before_private_load(group_source, monkeypatch):
+    source, _target, _peer, peer_bundle, _old = group_source
+    request = invitation(source, peer_bundle)
+    monkeypatch.setattr(source, '_reader', lambda: pytest.fail('incomplete closure reached custody'))
+    with pytest.raises(OnboardingError, match='owner_context_incomplete'):
+        source.group_relationship(request, offline=True, authority_closure={})
+    journal = source.outputs / 'group-admission' / request['operation_id']
+    assert not (journal / 'owner/context.json').exists()
+    assert not (journal / 'invite.json').exists()
+
+
+def test_owner_context_lost_durability_reply_resumes_before_native_dispatch(group_source, monkeypatch):
+    from clusterctl import onboarding_group_admission as admission
+    source, _target, _peer, peer_bundle, _old = group_source
+    request = invitation(source, peer_bundle)
+    base = source._load(signed=False)
+    events = base.service.ledger.events()
+    original_sync = admission._sync
+    original_reader = source._reader
+
+    def lost_reply(path):
+        original_sync(path)
+        raise OSError('synthetic lost owner-context durability reply')
+
+    monkeypatch.setattr(admission, '_sync', lost_reply)
+    monkeypatch.setattr(source, '_reader', lambda: pytest.fail('owner context was not durable'))
+    with pytest.raises(OSError, match='owner-context durability'):
+        source.group_relationship(request, offline=True, authority_closure=closure(peer_bundle))
+    path = source.outputs / 'group-admission' / request['operation_id'] / 'owner/context.json'
+    retained = path.read_bytes()
+    assert base.service.ledger.events() == events
+    synced = []
+
+    def observed_sync(path):
+        original_sync(path)
+        synced.append(path)
+
+    monkeypatch.setattr(admission, '_sync', observed_sync)
+    def reader():
+        assert path.parent in synced
+        return original_reader()
+    monkeypatch.setattr(source, '_reader', reader)
+    assert source.group_relationship(request, offline=True,
+        authority_closure=closure(peer_bundle))['status'] == 'recorded'
+    assert path.read_bytes() == retained
+    assert len(base.service.ledger.events()) == len(events) + 1
+
+
 def test_source_and_offline_newcomer_record_real_membership_without_running_group(group_source, tmp_path):
     from daimon_matrix.relationships import MEMBERSHIP_ACCEPTANCE_SCHEMA
     source, first, _peer_authority, peer_bundle, _old = group_source

@@ -92,7 +92,9 @@ class Source:
                            authority_closure: dict | None = None,
                            deadline_ns: int | None = None) -> dict:
         """The qualified owner route supplies approval; no peer text grants it."""
-        from .onboarding_group_admission import check_retained_ledger, command, public_authorities, relationship_request
+        from .onboarding_group_admission import (
+            check_retained_ledger, command, load_owner_runtime, owner_authorities, relationship_request,
+        )
         value = command(value)
         journal = self.outputs / 'group-admission'
         if not offline:
@@ -101,9 +103,10 @@ class Source:
             return relationship_request(self.root, journal, value, deadline_ns=deadline_ns)
         with self.writer():
             check_retained_ledger(self.root, journal, value)
-            bundle = being_seed._read(self.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
-            authorities = public_authorities(bundle, authority_closure or {})
-            hosted = self._load(signed=False, relationship_authorities=authorities)
+            authorities = owner_authorities(self.root, self.outputs / 'tribe', journal,
+                                            value, authority_closure or {})
+            hosted = load_owner_runtime(self.root, self._reader, authorities=authorities,
+                                        qualified_startup=self.qualified_startup)
             return relationship_request(self.root, journal, value, offline=hosted, deadline_ns=deadline_ns)
 
     def offer(self, plan_digest: str, peer: dict, endpoints: list[str]) -> dict:
