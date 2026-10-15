@@ -472,7 +472,7 @@ def test_host_forwards_owner_bootstrap_only_as_guest_owner(tmp_path, monkeypatch
     backend._target_call(value, 'receiving-bootstrap-' + phase, **options)
     argv, bounds = calls[0]
     assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
-    assert argv[argv.index('--') + 1] == '/usr/bin/python3'
+    assert argv[argv.index('--') + 1].endswith('/venv/bin/python')
     assert 0 < bounds['timeout_seconds'] <= 5
     assert '--bootstrap-timeout-seconds' in argv and '--observation-timeout-seconds' not in argv
     if phase != 'freeze':

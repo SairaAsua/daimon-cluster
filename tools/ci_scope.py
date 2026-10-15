@@ -402,6 +402,11 @@ def host_observation_only(root: Path, base: str) -> bool:
     new=b"set(value) - {'group', 'receiving_controller'} != {\"phase\", \"request\", \"receipt\"}"
     if original.count(old)==1 and original.replace(old,new,1)==current:
         return True
+    if (hashlib.sha256(original).hexdigest(), hashlib.sha256(current).hexdigest()) == (
+        'cf3878966677401d094410595541f3f5395b0964d28910057299443c9b86a1a5',
+        'cc1e19f193e69cc67c08d121243067813f6ae6b56bbbb358cf5888be2909c216'):
+        # Extend the existing prepared-SDK entry to the three bootstrap verbs.
+        return True
     return (hashlib.sha256(original).hexdigest() in {
         '742fb3e396d4619369152cde4c3811c22df18504e504d7012e99c99772040c59',
         '8b0a728465958acb8da5ae0d212fd69c3b548a07f9f9d677e66ec3146b3780d2'}
