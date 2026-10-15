@@ -10,6 +10,16 @@ The current source candidate pins Matrix `0dc0b555939b16a1150a220a366a6911a5ae9c
 The three-body production selection remains its separately recorded predecessor
 until receiving adoption succeeds.
 
+For a separate qualified SDK candidate, run `.venv/bin/python -m tools.build_onboarding_sdk
+--matrix-commit <exact-40-hex-revision>` archives that explicit source and seals
+its actual wheel hashes. The existing `seal(..., matrix_commit=...)` API can also
+reuse an already qualified wheel/dependency set. A nondefault revision still
+requires the existing explicit revision **and** Matrix-wheel hash when verified
+for receiving; its label alone cannot relax the default install guard. Freeze
+that selection in the protected qualified successor/receiving recipe. This does
+not change the host's default VCS dependency, snapshot-contract pin, base SDK or
+already prepared rollout, and does not qualify an installed body by itself.
+
 ## Execute from the next missing effect
 
 Use one current operation and one reusable integrated receiving scenario. Keep
@@ -780,9 +790,12 @@ that obligation pending instead of launching further native control calls.
 `execute_initial` detects the retained handoff before old root validation/start
 and reobserves the same execution. A dead/replaced invocation is refused.
 
-This provides the same-operation steady handoff, not subsequent-cohort lifecycle
-provenance, portal sequencing or installed new-member acceptance. Those remain
-unfinished. Do not leave completed onboarding dependent on a startup-only guard.
+Later cohorts that change the selected application use the maintained
+`GuestBootstrapController` replacement path with the actual current service and
+process as predecessor. They must not borrow the earlier initial-load proof;
+no separate initial-proof reuse framework is required. The unfinished portal
+orchestration must derive that current lifecycle and qualify installed new-member
+acceptance. Do not leave completed onboarding dependent on a startup-only guard.
 
 ### Public authority histories for future group admission
 

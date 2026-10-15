@@ -39,6 +39,28 @@ def fixture(tmp_path, *, requirements=(), wheel_tag='py3-none-any'):
     return code, fingerprint, home
 
 
+def test_explicit_sdk_artifact_pin_does_not_relax_the_receiving_default(tmp_path):
+    code, _, _ = fixture(tmp_path)
+    selected = 'a' * 40
+    original = onboarding_sdk.MATRIX_COMMIT
+    value = seal(code / 'sdk', matrix_commit=selected)
+    matrix = next(row for row in value['wheels'] if row['distribution'] == 'daimon-matrix')
+    assert onboarding_sdk.MATRIX_COMMIT == original
+    with pytest.raises(OnboardingError, match='invalid_onboarding_sdk'):
+        onboarding_sdk.verify(code, uid=os.geteuid(), matrix_commit=selected)
+    assert onboarding_sdk.verify(code, uid=os.geteuid(), matrix_commit=selected,
+        matrix_wheel_sha256=matrix['sha256']) == value
+
+
+@pytest.mark.parametrize('revision', ['main', '--output=/foreign', 'a' * 39, 'A' * 40])
+def test_sdk_builder_requires_exact_revision_before_creating_artifacts(tmp_path, revision):
+    from tools.build_onboarding_sdk import build
+    output = tmp_path / 'sdk'
+    with pytest.raises(OnboardingError, match='pinned_matrix_revision_required'):
+        build(tmp_path, output, matrix_commit=revision)
+    assert not output.exists()
+
+
 def test_actual_offline_install_retry_and_changed_completed_code_are_observed(tmp_path):
     code, fingerprint, home = fixture(tmp_path)
     venv = onboarding_sdk.install(home, code, fingerprint, code_uid=os.geteuid())
