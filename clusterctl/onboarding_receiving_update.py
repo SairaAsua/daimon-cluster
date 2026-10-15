@@ -1934,16 +1934,19 @@ class CohortController:
             effects = lifecycle['runtime_observation'] or {}
             if recipe['profile'] == 'source':
                 previous = lifecycle['expected_precondition'].get('source_bootstrap', {}).get('predecessor', {})
+                previous_server = previous.get('server')
                 exited = effects.get('source_bootstrap', {}).get('quiesced', {})
                 closed = exited.get('exit_observed') is True and exited.get('writer_available') is True
             else:
-                previous = lifecycle['expected_precondition'].get('guest_bootstraps', {}).get(name, {}).get('owner', {}).get('predecessor', {})
+                frozen_owner = lifecycle['expected_precondition'].get('guest_bootstraps', {}).get(name, {}).get('owner', {})
+                previous = frozen_owner.get('predecessor', {})
+                previous_server = frozen_owner.get('origin')
                 exited = effects.get('guest_bootstraps', {}).get(name, {}).get('quiesced', {})
                 closed = (exited.get('schema') == 'cluster-guest-service-quiescence/v1'
                     and exited.get('exits') == {'process': True, 'admission_parent': True}
                     and exited.get('admission_parent') == previous.get('admission_parent'))
             if (not closed or previous.get('process') != old['process']
-                    or previous.get('server') != old['server'] or exited.get('process') != old['process']
+                    or previous_server != old['server'] or exited.get('process') != old['process']
                     or current['process'] == old['process']):
                 raise OnboardingError('receiving_sender_replacement_unobserved')
             if name not in replacements:

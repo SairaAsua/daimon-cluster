@@ -351,7 +351,8 @@ def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profi
             effects={'source_bootstrap':{'quiesced':dict(process=previous['process'],
                 exit_observed=exit_observed,writer_available=True),'controlled_loaded':loaded}}
         else:
-            precondition={'guest_bootstraps':{name:{'owner':{'predecessor':previous}}}}
+            precondition={'guest_bootstraps':{name:{'owner':{'origin':previous['server'],
+                'predecessor':{'process':previous['process'],'admission_parent':previous['admission_parent']}}}}}
             loaded['admission_parent']=owner.parent
             effects={'guest_bootstraps':{name:{'quiesced':dict(schema='cluster-guest-service-quiescence/v1',
                 process=previous['process'],admission_parent=previous['admission_parent'],
@@ -420,6 +421,22 @@ def test_replacement_without_old_exit_evidence_cannot_enable_any_sender(tmp_path
     with pytest.raises(OnboardingError,match='replacement_unobserved'):
         controller.activate()
     assert all(owner.effects==1 and owner.gate['phase']=='unselected' for owner in owners.values())
+
+
+
+def test_guest_replacement_requires_frozen_authenticated_origin(tmp_path):
+    controller, owners, journal, identifier = activation_fixture(tmp_path, replacement=True, profile='guest')
+    row = journal.get(identifier)
+    recipe = row['intended_transition']['cohort_activation']['receivers']['eko']
+    lifecycle = journal.get(recipe['lifecycle_operation_id'])
+    lifecycle['expected_precondition']['guest_bootstraps']['eko']['owner']['origin']['embodiment_id'] = 'different-body'
+    original = journal.get
+    def changed(operation_id):
+        return lifecycle if operation_id == recipe['lifecycle_operation_id'] else original(operation_id)
+    journal.get = changed
+    with pytest.raises(OnboardingError, match='replacement_unobserved'):
+        controller.activate()
+    assert all(owner.effects == 1 and owner.gate['phase'] == 'unselected' for owner in owners.values())
 
 
 def test_lost_replacement_revoke_reply_reconciles_exact_request(tmp_path,monkeypatch):
