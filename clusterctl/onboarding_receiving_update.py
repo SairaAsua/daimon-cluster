@@ -573,6 +573,121 @@ def freeze_senders(owners: Mapping[str, OwnerGroupClient | GuestGroupClient | So
     return senders
 
 
+
+def controller_preservation(root: Path, bundle: dict) -> dict | None:
+    """Pin immutable owner inputs without traversing live databases/sockets.
+
+    Native runtime validation under writer ownership separately establishes the
+    signed bundle/custody binding. No credential material leaves this function.
+    """
+    from daimon_matrix.client import ClientConfig
+    from daimon_matrix.operator_capabilities import host_capability_profile, operator_capability_profile
+    rows = bundle.get('capabilities', [])
+    if not any(row.get('profile', {}).get('role') == 'receiving-controller' for row in rows):
+        return None
+    controller_profile = host_capability_profile('receiving-controller')
+    controllers = [row for row in rows if row.get('profile') == controller_profile]
+    if len(controllers) != 1:
+        raise OnboardingError('receiving_controller_binding_conflict')
+    hashes = {}
+    for name in ('runtime.json', 'custody.json'):
+        hashes[name] = hashlib.sha256(onboarding_release.regular(root / name, uid=os.geteuid())).hexdigest()
+    for row in rows:
+        profile = row['profile']
+        role = profile['role']
+        maintained = (host_capability_profile(role) if profile['schema'] == controller_profile['schema']
+                      else operator_capability_profile(role))
+        if profile != maintained:
+            raise OnboardingError('receiving_controller_binding_conflict')
+        directory = root / maintained['client_directory']
+        key_path = directory / maintained['client_key_filename']
+        config_path = directory / maintained['client_config_filename']
+        key = bytearray(onboarding_release.regular(key_path, uid=os.geteuid()))
+        key_sha256 = hashlib.sha256(key).hexdigest()
+        try:
+            config = ClientConfig.load(config_path, key)
+            if (config.capability.descriptor != row['descriptor']
+                    or config.expected_server != bundle['local_origin']
+                    or config.runtime_id != bundle['runtime_id'] or config.runtime_label != bundle['runtime_label']):
+                raise OnboardingError('receiving_controller_binding_conflict')
+            hashes[str(key_path.relative_to(root))] = key_sha256
+        finally:
+            key[:] = b'\0' * len(key)
+        hashes[str(config_path.relative_to(root))] = hashlib.sha256(
+            onboarding_release.regular(config_path, uid=os.geteuid())).hexdigest()
+    return dict(schema='cluster-receiving-controller-preservation/v1',
+        immutable_sha256=digest(hashes), runtime_sha256=digest(bundle),
+        runtime_bytes_sha256=hashes['runtime.json'], counter=bundle['keystore']['counter'],
+        controller_id=controllers[0]['descriptor']['capability_id'], origin=bundle['local_origin'],
+        not_before_ms=max(row['descriptor']['not_before_ms'] for row in rows),
+        not_after_ms=min(row['descriptor']['not_after_ms'] for row in rows),
+        active=all(row['descriptor']['status'] == 'active' for row in rows))
+
+
+
+def preservation_authorization(expected: dict, expires_at_ms: int) -> None:
+    now = time.time_ns() // 1_000_000
+    if (not expected['active'] or type(expires_at_ms) is not int or not expected['not_before_ms'] <= now < expires_at_ms
+            or expires_at_ms > expected['not_after_ms']):
+        raise OnboardingError('receiving_preservation_authorization_expired')
+
+
+def preservation_result(upgrade, root: Path, expected: dict, *, password: bytearray,
+                        operation_id: str, request_sha256: str, expires_at_ms: int, retained: dict | None = None) -> dict:
+    """Verify unchanged native authority while the caller owns native locks."""
+    try:
+        if retained is None:
+            preservation_authorization(expected, expires_at_ms)
+        bundle = being_seed._read(root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+        if controller_preservation(root, bundle) != expected:
+            raise OnboardingError('receiving_controller_preservation_changed')
+        if retained is None:
+            upgrade._forward_authorization(bundle, expires_at_ms)
+        from daimon_matrix.keystore import EncryptedKeystore
+        custody = EncryptedKeystore(root / 'custody.json').open(lambda: bytearray(password),
+            minimum_counter=expected['counter'], required_control_head=bundle['control_head'])
+        if custody.counter != expected['counter']:
+            raise OnboardingError('receiving_controller_counter_conflict')
+        before = upgrade.inventory_digest(root)
+        if retained is None:
+            upgrade._validate(root, Path(upgrade.__file__).resolve().parent.parent, bytes(password))
+        if (upgrade.inventory_digest(root) != before
+                or controller_preservation(root, bundle) != expected):
+            raise OnboardingError('receiving_controller_preservation_changed')
+        result = dict(schema='cluster-receiving-owner-preserved/v1', operation_id=operation_id,
+            request_sha256=request_sha256, mode='preserve', preservation=expected, inventory_sha256=before,
+            runtime_sha256=expected['runtime_sha256'], runtime_bytes_sha256=expected['runtime_bytes_sha256'],
+            counter_after=expected['counter'], receiving_readiness='unobserved')
+        if retained is None:
+            preservation_authorization(expected, expires_at_ms)
+        elif any(retained.get(key) != value for key, value in result.items()):
+            raise OnboardingError('receiving_controller_preservation_changed')
+        return result
+    finally:
+        password[:] = b'\0' * len(password)
+
+
+def bootstrap_effects(observations: dict, *, source: bool, mode: str) -> tuple[str, str | None]:
+    """Resolve exactly one genuine publication or preservation branch."""
+    preserved = observations.get('owner_preserved')
+    published = observations.get('capability_published' if source else 'owner_published')
+    visibility = observations.get('visibility_published')
+    if (mode == 'preserve') != (preserved is not None):
+        raise OnboardingError('receiving_bootstrap_effect_conflict')
+    if preserved is not None:
+        if published is not None or source and visibility is not None:
+            raise OnboardingError('receiving_bootstrap_effect_conflict')
+        return (preserved['runtime_bytes_sha256'] if source else preserved['runtime_sha256'],
+                preserved.get('visibility_sha256'))
+    if published is None or source and visibility is None:
+        raise OnboardingError('receiving_bootstrap_publication_required')
+    if source:
+        if not isinstance(visibility, dict):
+            raise OnboardingError('receiving_bootstrap_publication_required')
+        return published['runtime_sha256'], visibility['installation_sha256']
+    return published['runtime_sha256'], None
+
+
 def freeze_source_bootstrap(source, manager) -> dict:
     """Freeze the Source's existing identity and actual Matrix manager scope."""
     with OwnerGroupClient(source.root, source.root / 'matrix.sock') as owner:
@@ -585,7 +700,11 @@ def freeze_source_bootstrap(source, manager) -> dict:
                     bundle['manifest']['being_ref'], bundle['local_origin']['embodiment_id'])):
             raise OnboardingError('receiving_bootstrap_identity_conflict')
         visibility = onboarding_release.regular(source.visibility, uid=os.geteuid())
-        return dict(settings_sha256=digest(source.settings), unit=str(manager.unit),
+        preservation = controller_preservation(source.root, bundle)
+        if preservation is not None and (predecessor['runtime_status'].get('loaded_runtime') or {}).get(
+                'runtime_bundle_sha256') != preservation['runtime_bytes_sha256']:
+            raise OnboardingError('receiving_controller_loaded_bundle_conflict')
+        return dict(mode='preserve' if preservation is not None else 'issue', preservation=preservation, settings_sha256=digest(source.settings), unit=str(manager.unit),
             service=service, scope=scope, predecessor=predecessor,
             bundle_sha256=digest(bundle), visibility_sha256=hashlib.sha256(visibility).hexdigest(),
             visibility_envelope=json.loads(visibility))
@@ -729,8 +848,13 @@ def freeze_guest_bootstrap(target, *, deadline_ns: int) -> dict:
         raise OnboardingError('receiving_guest_bootstrap_identity_required')
     group = bootstrap_group(target, bundle)
     GuestServiceBootstrap._budget(deadline_ns)
+    preservation = controller_preservation(target.package / 'runtime', bundle)
+    if preservation is not None and (observed['runtime_status'].get('loaded_runtime') or {}).get(
+            'runtime_bundle_sha256') != preservation['runtime_bytes_sha256']:
+        raise OnboardingError('receiving_controller_loaded_bundle_conflict')
     return dict(plan_digest=digest(target.plan), genesis_digest=digest(target.genesis),
         code_digest=target.code_digest, runtime_sha256=digest(bundle), group_sha256=digest(group),
+        mode='preserve' if preservation is not None else 'issue', preservation=preservation,
         being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'], group=group,
         observer_startup=target.qualified_startup,
         predecessor=dict(process=observed['process'], admission_parent=observed['admission_parent']))
@@ -749,7 +873,12 @@ class GuestOwnerBootstrap:
         from .owner_process import validate_process
         fields = {'schema', 'operation_id', 'plan_digest', 'genesis_digest', 'code_digest',
                   'runtime_sha256', 'group_sha256', 'predecessor', 'expires_at_ms'}
-        if (os.geteuid() != 1000 or set(request) != fields
+        if (os.geteuid() != 1000 or set(request) not in (fields, fields | {'mode', 'preservation'})
+                or request.get('mode', 'issue') not in {'issue', 'preserve'}
+                or (request.get('mode', 'issue') == 'preserve') != isinstance(request.get('preservation'), dict)
+                or request.get('mode') == 'preserve' and (
+                    request['runtime_sha256'] != request['preservation'].get('runtime_sha256')
+                    or request['preservation'].get('origin') != target.document_bundle()['local_origin'])
                 or request['schema'] != 'cluster-guest-owner-bootstrap/v1'
                 or str(uuid.UUID(request['operation_id'])) != request['operation_id']
                 or any(not isinstance(request[key], str) or re.fullmatch('[0-9a-f]{64}', request[key]) is None
@@ -874,6 +1003,23 @@ class GuestOwnerBootstrap:
             self._record('request', self.request)
             self._exits()
             self._group()
+            if self.request.get('mode', 'issue') == 'preserve':
+                if action != 'stage':
+                    raise OnboardingError('receiving_preservation_has_no_publication')
+                with upgrade._locks(self.runtime):
+                    for name in ('matrix.sock', 'tribe.sock', 'peer.sock'):
+                        _prepare_socket(self.runtime / name)
+                    self.target.observe()
+                    result = preservation_result(upgrade, self.runtime, self.request['preservation'],
+                        password=self.target._reader(), operation_id=self.operation_id,
+                        request_sha256=digest(self.request), expires_at_ms=self.request['expires_at_ms'],
+                        retained=self._observations().get('owner_preserved'))
+                    self._group()
+                    if 'owner_preserved' not in self._observations():
+                        preservation_authorization(self.request['preservation'], self.request['expires_at_ms'])
+                    self._record('owner_preserved', result)
+                    GuestServiceBootstrap._budget(deadline_ns)
+                    return result
             with self.target._runtime_writer():
                 # The exact parent/child exits and native writer establish safe
                 # cleanup of ephemeral runtime sockets, never private history.
@@ -932,6 +1078,12 @@ class SourceBootstrapController:
         if (not isinstance(frozen, dict) or not isinstance(candidate, dict)
                 or frozen.get('settings_sha256') != digest(self.source.settings)
                 or frozen.get('unit') != str(self.manager.unit)
+                or frozen.get('mode', 'issue') not in {'issue', 'preserve'}
+                or (frozen.get('mode', 'issue') == 'preserve') != isinstance(frozen.get('preservation'), dict)
+                or frozen.get('mode') == 'preserve' and (
+                    'qualification' not in candidate
+                    or frozen['preservation'].get('runtime_sha256') != frozen.get('bundle_sha256')
+                    or frozen['preservation'].get('origin') != frozen['predecessor'].get('server'))
                 or set(candidate) not in ({'transaction', 'expires_at_ms', 'argv'},
                     {'transaction', 'expires_at_ms', 'argv', 'qualification'})):
             raise OnboardingError('receiving_bootstrap_binding_conflict')
@@ -1090,6 +1242,10 @@ class SourceBootstrapController:
                 self._qualify_candidate(row, candidate)
             if row['state'] == 'planned':
                 self.journal.advance(self.operation_id, 'runtime-dispatching')
+            if frozen.get('mode', 'issue') == 'preserve':
+                bundle = being_seed._read(self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+                if controller_preservation(self.source.root, bundle) != frozen['preservation']:
+                    raise OnboardingError('receiving_controller_preservation_changed')
             previous = (row['runtime_observation'] or {}).get('source_bootstrap', {}).get('quiesced')
             if previous is not None:
                 self._stopped(frozen, candidate)
@@ -1116,6 +1272,8 @@ class SourceBootstrapController:
                         # A durable intent does not prove dispatch. Resume only
                         # this unchanged active unit; deactivating means await.
                         if values['ActiveState'] == 'active':
+                            if frozen.get('mode') == 'preserve':
+                                preservation_authorization(frozen['preservation'], candidate['expires_at_ms'])
                             try:
                                 self.manager.stop()
                             except (OnboardingError, OSError):
@@ -1139,6 +1297,8 @@ class SourceBootstrapController:
                     raise OnboardingError('receiving_bootstrap_predecessor_changed')
                 # Intent precedes stop; a lost CLI reply is not proof of failure.
                 self._record('stop_intent', dict(scope=scope, unit_sha256=inspected['unit_sha256']))
+                if frozen.get('mode') == 'preserve':
+                    preservation_authorization(frozen['preservation'], candidate['expires_at_ms'])
                 try:
                     self.manager.stop()
                 except (OnboardingError, OSError):
@@ -1169,6 +1329,34 @@ class SourceBootstrapController:
                 raise OnboardingError('receiving_bootstrap_exit_unobserved')
             self._stopped(frozen, candidate)
             self._visibility_current(frozen, observations)
+            if frozen.get('mode', 'issue') == 'preserve':
+                from daimon_matrix.daemon import _prepare_socket
+                with upgrade._locks(self.source.root):
+                    _prepare_socket(self.source.root / 'matrix.sock')
+                    current_visibility = self._visibility_current(frozen, {})
+                    if hashlib.sha256(current_visibility).hexdigest() != frozen['visibility_sha256']:
+                        raise OnboardingError('receiving_bootstrap_visibility_changed')
+                    result = preservation_result(upgrade, self.source.root, frozen['preservation'],
+                        password=self.source._reader(), operation_id=self.operation_id,
+                        request_sha256=digest(dict(frozen=frozen, candidate=candidate)),
+                        expires_at_ms=candidate['expires_at_ms'], retained=observations.get('owner_preserved'))
+                    if source_bootstrap_group(self.source, being_seed._read(
+                            self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)) != candidate['qualification']['group']:
+                        raise OnboardingError('receiving_bootstrap_group_changed')
+                    if hashlib.sha256(self._visibility_current(frozen, {})).hexdigest() != frozen['visibility_sha256']:
+                        raise OnboardingError('receiving_bootstrap_visibility_changed')
+                    result['visibility_sha256'] = frozen['visibility_sha256']
+                    if 'owner_preserved' not in observations:
+                        preservation_authorization(frozen['preservation'], candidate['expires_at_ms'])
+                    self._record('owner_preserved', result)
+                    stopped = self._stopped(frozen, candidate)
+                    if stopped['unit_sha256'] == frozen['service']['unit_sha256']:
+                        preservation_authorization(frozen['preservation'], candidate['expires_at_ms'])
+                    selected = select_entrypoint(self.manager.unit, candidate['argv'],
+                        previous_sha256=frozen['service']['unit_sha256'])
+                    self._record('unit_selected', selected)
+                return dict(schema='cluster-source-bootstrap-preservation/v1', operation_id=self.operation_id,
+                    preserved=True, loaded_readiness='unobserved')
             password = bytes(self.source._reader())
             transaction = Path(candidate['transaction'])
             ready_path = transaction / 'ready.json'
@@ -1259,10 +1447,9 @@ class SourceBootstrapController:
             checked = self._qualify_candidate(row, candidate)
             observations = (row['runtime_observation'] or {}).get('source_bootstrap', {})
             selected = observations.get('unit_selected')
-            if (not isinstance(selected, dict) or selected.get('selected') is not True
-                    or observations.get('capability_published') is None
-                    or observations.get('visibility_published') is None):
+            if not isinstance(selected, dict) or selected.get('selected') is not True:
                 raise OnboardingError('receiving_bootstrap_publication_required')
+            expected_runtime, expected_visibility = bootstrap_effects(observations, source=True, mode=frozen.get('mode', 'issue'))
             # Artifact verification precedes the lifecycle budget. Local file
             # hashing/fsync scheduling is not a hard realtime guarantee; check
             # the shared monotonic deadline before dispatch and acceptance.
@@ -1279,12 +1466,19 @@ class SourceBootstrapController:
                 if inspected['manager']['ActiveState'] == 'inactive':
                     self._stopped(frozen, candidate, deadline_ns=deadline_ns)
                     with self.source.writer():
+                        if frozen.get('mode', 'issue') == 'preserve':
+                            from daimon_matrix import operator_runtime_upgrade as upgrade
+                            preservation_authorization(frozen['preservation'], candidate['expires_at_ms'])
+                            bundle = being_seed._read(self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+                            if (controller_preservation(self.source.root, bundle) != frozen['preservation']
+                                    or upgrade.inventory_digest(self.source.root) != observations['owner_preserved']['inventory_sha256']):
+                                raise OnboardingError('receiving_controller_preservation_changed')
                         actual_bundle = hashlib.sha256(onboarding_release.regular(
                             self.source.root / 'runtime.json', uid=os.geteuid())).hexdigest()
                         actual_visibility = hashlib.sha256(onboarding_release.regular(
                             self.source.visibility, uid=os.geteuid())).hexdigest()
-                        if (actual_bundle != observations['capability_published']['runtime_sha256']
-                                or actual_visibility != observations['visibility_published']['installation_sha256']
+                        if (actual_bundle != expected_runtime
+                                or actual_visibility != expected_visibility
                                 or source_bootstrap_group(self.source, being_seed._read(
                                     self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION))
                                    != candidate['qualification']['group']):
@@ -1322,7 +1516,7 @@ class SourceBootstrapController:
                         group = candidate['qualification']['group']
                         if (any(startup.get(key) != value for key, value in expected.items())
                                 or startup.get('process_id') != actual['process']['pid']
-                                or base.get('runtime_bundle_sha256') != observations['capability_published']['runtime_sha256']
+                                or base.get('runtime_bundle_sha256') != expected_runtime
                                 or actual.get('responder_association') != 'same-connection'
                                 or not isinstance(gate, dict) or gate.get('controlled') is not True
                                 or gate.get('process_id') != actual['process']['pid']):
@@ -1437,7 +1631,12 @@ class GuestBootstrapController:
         candidate = after['guest_bootstraps'][self.name]
         if (set(frozen) != {'plan', 'owner', 'root'} or frozen['plan']['name'] != self.name
                 or type(candidate['expires_at_ms']) is not int or candidate['expires_at_ms'] <= 0
+                or frozen['owner'].get('mode', 'issue') not in {'issue', 'preserve'}
+                or (frozen['owner'].get('mode', 'issue') == 'preserve') != isinstance(frozen['owner'].get('preservation'), dict)
                 or frozen['owner']['plan_digest'] != digest(frozen['plan'])
+                or frozen['owner'].get('mode') == 'preserve' and (
+                    frozen['owner']['preservation'].get('runtime_sha256') != frozen['owner']['runtime_sha256']
+                    or frozen['owner']['preservation'].get('origin') != frozen['owner']['origin'])
                 or candidate['runtime_digest'] != frozen['owner']['code_digest']
                 or (candidate['prepared']['being_ref'], candidate['prepared']['embodiment_id']) != (
                     frozen['owner']['being_ref'], frozen['owner']['origin']['embodiment_id'])
@@ -1495,6 +1694,8 @@ class GuestBootstrapController:
                 'plan_digest', 'genesis_digest', 'code_digest', 'runtime_sha256', 'group_sha256', 'predecessor')}
             owner_request.update(schema='cluster-guest-owner-bootstrap/v1', operation_id=self.operation_id,
                 expires_at_ms=candidate['expires_at_ms'])
+            if 'mode' in frozen['owner']:
+                owner_request.update(mode=frozen['owner']['mode'], preservation=frozen['owner']['preservation'])
             effects = (row['runtime_observation'] or {}).get('guest_bootstraps', {}).get(self.name, {})
             if row['state'] == 'planned':
                 self.journal.advance(self.operation_id, 'runtime-dispatching')
@@ -1512,6 +1713,8 @@ class GuestBootstrapController:
                 current = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
                     timeout_seconds=timeout_seconds)
                 if current['service']['manager']['ActiveState'] == 'active':
+                    if frozen['owner'].get('mode', 'issue') == 'preserve':
+                        preservation_authorization(frozen['owner']['preservation'], candidate['expires_at_ms'])
                     if (current['service'] != frozen['root']['service']
                             or candidate['expires_at_ms'] <= time.time_ns() // 1_000_000):
                         raise OnboardingError('receiving_guest_bootstrap_predecessor_or_expiry_changed')
@@ -1533,20 +1736,36 @@ class GuestBootstrapController:
                 self._record('quiesced', root_call('bootstrap-quiesce'))
             # Root rechecks current quiescence before every owner mutation; its
             # retained independent exits do not imply the unit stayed stopped.
-            if 'owner_ready' not in effects:
-                root_call('bootstrap-quiesce')
-                ready = owner_call('receiving-bootstrap-stage')
-                self._record('owner_ready', ready)
+            if owner_request.get('mode', 'issue') == 'preserve':
+                current = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
+                    timeout_seconds=timeout_seconds)
+                if 'owner_preserved' not in effects or current['service']['manager']['ActiveState'] == 'inactive':
+                    root_call('bootstrap-quiesce')
+                    preserved = owner_call('receiving-bootstrap-stage')
+                    if (preserved.get('mode') != 'preserve'
+                            or preserved.get('preservation') != owner_request['preservation']
+                            or preserved.get('request_sha256') != digest(owner_request)):
+                        raise OnboardingError('receiving_controller_preservation_changed')
+                    self._record('owner_preserved', preserved)
             else:
-                ready = effects['owner_ready']
-            if 'owner_published' not in effects:
-                root_call('bootstrap-quiesce')
-                published = owner_call('receiving-bootstrap-publish', bootstrap_ready_sha256=ready['ready_sha256'])
-                self._record('owner_published', published)
+                if 'owner_ready' not in effects:
+                    root_call('bootstrap-quiesce')
+                    ready = owner_call('receiving-bootstrap-stage')
+                    self._record('owner_ready', ready)
+                else:
+                    ready = effects['owner_ready']
+                if 'owner_published' not in effects:
+                    root_call('bootstrap-quiesce')
+                    published = owner_call('receiving-bootstrap-publish', bootstrap_ready_sha256=ready['ready_sha256'])
+                    self._record('owner_published', published)
             if 'unit_selected' not in effects:
+                if owner_request.get('mode') == 'preserve' and current['service']['unit_sha256'] == frozen['root']['service']['unit_sha256']:
+                    preservation_authorization(owner_request['preservation'], candidate['expires_at_ms'])
                 self._record('unit_selected', root_call('bootstrap-select'))
             # Reconcile the retained start, rather than reissuing it after a
             # lost ACK. Actual owner load/admission is checked independently.
+            if owner_request.get('mode') == 'preserve' and current['service']['manager']['ActiveState'] == 'inactive':
+                preservation_authorization(owner_request['preservation'], candidate['expires_at_ms'])
             self._record('started', root_call('bootstrap-start'))
             loaded = self._loaded(frozen, candidate, vector, timeout_seconds)
             self._record('controlled_loaded', loaded)
@@ -1559,6 +1778,7 @@ class GuestBootstrapController:
             timeout_seconds=timeout_seconds, owner_observation={key: observed[key]
                 for key in ('process', 'admission_parent')})
         effects = self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]
+        expected_runtime, _ = bootstrap_effects(effects, source=False, mode=frozen['owner'].get('mode', 'issue'))
         loaded = observed['runtime_status']['loaded_runtime']
         startup = loaded['qualified_startup']
         application = observed['group_runtime_status']['loaded_application']
@@ -1573,8 +1793,8 @@ class GuestBootstrapController:
                     sdk_digest=candidate['prepared']['sdk_digest'], reader=candidate['prepared']['reader'],
                     matrix_wheel_sha256=candidate['prepared']['matrix_wheel_sha256']).items())
                 or startup['process_id'] != observed['process']['pid']
-                or loaded['runtime_bundle_sha256'] != effects['owner_published']['runtime_sha256']
-                or observed['runtime_sha256'] != effects['owner_published']['runtime_sha256']
+                or loaded['runtime_bundle_sha256'] != expected_runtime
+                or observed['runtime_sha256'] != expected_runtime
                 or observed.get('responder_association') != 'same-connection'
                 or observed['origin'] != frozen['owner']['origin']
                 or observed['group'] != frozen['owner']['group']['selected']

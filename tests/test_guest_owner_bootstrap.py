@@ -305,3 +305,217 @@ def test_bootstrap_base_only_cannot_bypass_qualified_loaded_observation(monkeypa
     for options in ({}, {'admitted': True, 'require_loaded': True}):
         with pytest.raises(OnboardingError, match='invalid_receiving_bootstrap_observation'):
             Target.running(target, bootstrap_base_only=True, **options)
+
+
+@pytest.fixture
+def preserved_fixture(fixture):
+    target, request, group, exited = fixture
+    first = GuestOwnerBootstrap(target, request)
+    ready = first.execute('stage', deadline_ns=deadline())
+    first.execute('publish', deadline_ns=deadline(), ready_sha256=ready['ready_sha256'])
+    request = {**request, 'operation_id': str(uuid.uuid4()), 'mode': 'preserve',
+        'runtime_sha256': digest(target.document_bundle()),
+        'preservation': receiving_update.controller_preservation(first.runtime, target.document_bundle()),
+        'expires_at_ms': time.time_ns() // 1_000_000 + 60000}
+    return target, request, group, exited
+
+
+def test_existing_controller_is_preserved_without_native_publication(preserved_fixture, monkeypatch):
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    target, request, _, _ = preserved_fixture
+    owner = GuestOwnerBootstrap(target, request)
+    before, history = files(owner.runtime), files(target.credential)
+    def forbidden(**_kwargs):
+        pytest.fail('software preservation must not issue or publish authority')
+    monkeypatch.setattr(upgrade, 'stage_capabilities', forbidden)
+    monkeypatch.setattr(upgrade, 'publish', forbidden)
+    actual = owner.execute('stage', deadline_ns=deadline())
+    assert actual['mode'] == 'preserve' and actual['counter_after'] == request['preservation']['counter']
+    assert files(owner.runtime) == before and files(target.credential) == history
+    assert owner.execute('stage', deadline_ns=deadline()) == actual
+    assert 'capability_published' not in owner._observations() and not owner.transaction.exists()
+    with pytest.raises(OnboardingError, match='no_publication'):
+        owner.execute('publish', deadline_ns=deadline(), ready_sha256='a' * 64)
+
+
+def test_lost_preservation_reply_reconciles_exact_durable_record(preserved_fixture, monkeypatch):
+    target, request, _, _ = preserved_fixture
+    owner = GuestOwnerBootstrap(target, request)
+    record = owner._record
+    def lost(name, value):
+        actual = record(name, value)
+        if name == 'owner_preserved':
+            raise OSError('synthetic reply loss after durable preservation')
+        return actual
+    monkeypatch.setattr(owner, '_record', lost)
+    before = files(owner.runtime)
+    with pytest.raises(OSError):
+        owner.execute('stage', deadline_ns=deadline())
+    retained = owner._observations()['owner_preserved']
+    actual = GuestOwnerBootstrap(target, request).execute('stage', deadline_ns=deadline())
+    assert actual == retained and files(owner.runtime) == before
+
+
+@pytest.mark.parametrize('change', ['custody', 'client', 'bundle', 'expired', 'live'])
+def test_preservation_refuses_changed_inputs_or_unusable_authorization(preserved_fixture, change):
+    target, request, _, exited = preserved_fixture
+    owner = GuestOwnerBootstrap(target, request)
+    if change == 'custody':
+        path = owner.runtime / 'custody.json'
+        path.write_bytes(path.read_bytes() + b' ')
+    elif change == 'client':
+        path = owner.runtime / 'host-clients/receiving-controller/client.json'
+        path.write_bytes(path.read_bytes() + b' ')
+    elif change == 'bundle':
+        path = owner.runtime / 'runtime.json'
+        path.write_bytes(path.read_bytes() + b' ')
+    elif change == 'expired':
+        request['expires_at_ms'] = time.time_ns() // 1_000_000 - 1
+        owner = GuestOwnerBootstrap(target, request)
+    else:
+        exited[0] = False
+    before = files(owner.runtime)
+    with pytest.raises((OnboardingError, ValueError)):
+        owner.execute('stage', deadline_ns=deadline())
+    assert files(owner.runtime) == before and 'owner_preserved' not in owner._observations()
+
+
+@pytest.mark.parametrize('lost_reply', [False, True, 'selection_expiry'])
+def test_source_preserves_real_native_controller_and_visibility(preserved_fixture, tmp_path, monkeypatch, lost_reply):
+    from types import SimpleNamespace
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    from clusterctl.operation_journal import OperationJournal
+    from clusterctl.onboarding_code_successor import plan_update
+    from tests.test_source_bootstrap import FakeManager
+    target, request, group, _ = preserved_fixture
+    root = target.package / 'runtime'
+    visibility = tmp_path / 'visibility.json'
+    receiving_update.being_seed._write(visibility, {'fixture': 'signed visibility observation seam'})
+    unit = tmp_path / 'daimon-matrix-preservation.service'
+    unit.write_bytes(b'[Service]\nExecStart=/original/loader\nKillMode=control-group\n')
+    unit.chmod(0o600)
+    manager = FakeManager(unit)
+    service = manager.inspect()
+    manager.live = False
+    source = SimpleNamespace(root=root, settings={'fixture': 'source'}, visibility=visibility,
+        _reader=target._reader)
+    frozen = dict(mode='preserve', preservation=request['preservation'],
+        settings_sha256=digest(source.settings), unit=str(unit), service=service,
+        scope={'invocation_id': manager.invocation},
+        bundle_sha256=request['runtime_sha256'],
+        predecessor={'process': request['predecessor']['process'], 'server': request['preservation']['origin']},
+        visibility_sha256=receiving_update.hashlib.sha256(visibility.read_bytes()).hexdigest())
+    candidate = dict(transaction=str(root.parent / 'unneeded-software-transaction'),
+        expires_at_ms=request['expires_at_ms'], argv=['/qualified/new/loader'], qualification={'group': group})
+    journal = OperationJournal(tmp_path / 'source-journal')
+    row = plan_update(journal, manifest_digest='a' * 64, target='source:preservation-fixture',
+        expected_precondition={'source_bootstrap': frozen},
+        intended_transition={'source_bootstrap': candidate}, audit_identity={'actor': 'fixture'})
+    controller = receiving_update.SourceBootstrapController(journal, row['operation_id'], source, manager)
+    monkeypatch.setattr(controller, '_qualify_candidate', lambda *_: {'fixture': 'code qualification seam'})
+    monkeypatch.setattr(receiving_update, 'source_bootstrap_group', lambda *_: copy.deepcopy(group))
+    controller._record('quiesced', {'exit_observed': True})
+    before, visible = files(root), visibility.read_bytes()
+    def forbidden(**_kwargs):
+        pytest.fail('software selection must not publish authority or visibility')
+    monkeypatch.setattr(upgrade, 'stage_capabilities', forbidden)
+    monkeypatch.setattr(upgrade, 'publish', forbidden)
+    if lost_reply:
+        record = controller._record
+        def lost(name, value):
+            actual = record(name, value)
+            if name == 'owner_preserved' and lost_reply is True:
+                raise OSError('synthetic lost Source preservation reply')
+            if name == 'unit_selected' and lost_reply == 'selection_expiry':
+                monkeypatch.setattr(time, 'time_ns', lambda: (request['expires_at_ms'] + 1) * 1_000_000)
+                raise OSError('synthetic lost Source selection reply then expiry')
+            return actual
+        with monkeypatch.context() as fault:
+            fault.setattr(controller, '_record', lost)
+            with pytest.raises(OSError):
+                controller.publish()
+    result = controller.publish()
+    assert result['preserved'] is True and controller.publish() == result
+    effects = journal.get(row['operation_id'])['runtime_observation']['source_bootstrap']
+    assert not {'capability_published', 'visibility_published'} & effects.keys()
+    assert effects['owner_preserved']['counter_after'] == request['preservation']['counter']
+    assert files(root) == before and visibility.read_bytes() == visible
+    assert not Path(candidate['transaction']).exists()
+
+
+def test_preservation_requires_actual_native_writer_ownership(preserved_fixture):
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    target, request, _, _ = preserved_fixture
+    owner = GuestOwnerBootstrap(target, request)
+    before = files(owner.runtime)
+    with upgrade._locks(owner.runtime):
+        with pytest.raises(BlockingIOError):
+            owner.execute('stage', deadline_ns=deadline())
+    assert files(owner.runtime) == before and 'owner_preserved' not in owner._observations()
+
+
+def test_preservation_cannot_reclassify_a_changed_group(preserved_fixture):
+    target, request, group, _ = preserved_fixture
+    owner = GuestOwnerBootstrap(target, request)
+    group['hashes']['selection'] = 'd' * 64
+    with pytest.raises(OnboardingError, match='group_changed'):
+        owner.execute('stage', deadline_ns=deadline())
+    assert 'owner_preserved' not in owner._observations()
+
+
+def test_source_preservation_refuses_advanced_custody_with_older_bundle(preserved_fixture):
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    from daimon_matrix.keystore import EncryptedKeystore
+    target, request, _, _ = preserved_fixture
+    root = target.package / 'runtime'
+    bundle = target.document_bundle()
+    custody = EncryptedKeystore(root / 'custody.json')
+    custody.rotate(target._reader, target._reader, expected_counter=bundle['keystore']['counter'],
+        control_head=bundle['control_head'])
+    pins = receiving_update.controller_preservation(root, bundle)
+    before = files(root)
+    with upgrade._locks(root):
+        with pytest.raises(OnboardingError, match='counter_conflict'):
+            receiving_update.preservation_result(upgrade, root, pins, password=target._reader(),
+                operation_id=request['operation_id'], request_sha256=digest(request),
+                expires_at_ms=request['expires_at_ms'])
+    assert files(root) == before
+
+
+def test_fresh_preservation_cannot_cross_its_fixed_horizon(preserved_fixture, monkeypatch):
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    target, request, _, _ = preserved_fixture
+    owner = GuestOwnerBootstrap(target, request)
+    actual = upgrade._validate
+    clock = [time.time_ns()]
+    def late(*args):
+        result = actual(*args)
+        clock[0] = (request['expires_at_ms'] + 1) * 1_000_000
+        return result
+    monkeypatch.setattr(time, 'time_ns', lambda: clock[0])
+    monkeypatch.setattr(upgrade, '_validate', late)
+    before = files(owner.runtime)
+    with pytest.raises(OnboardingError, match='authorization_expired'):
+        owner.execute('stage', deadline_ns=deadline())
+    assert files(owner.runtime) == before and 'owner_preserved' not in owner._observations()
+
+
+def test_exact_historical_preservation_retry_after_expiry_does_not_readmit(preserved_fixture, monkeypatch):
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    target, request, _, _ = preserved_fixture
+    owner = GuestOwnerBootstrap(target, request)
+    first = owner.execute('stage', deadline_ns=deadline())
+    before = files(owner.runtime)
+    monkeypatch.setattr(time, 'time_ns', lambda: (request['expires_at_ms'] + 1) * 1_000_000)
+    def forbidden(*_args):
+        pytest.fail('historical preservation cannot readmit runtime with the current clock')
+    monkeypatch.setattr(upgrade, '_validate', forbidden)
+    assert owner.execute('stage', deadline_ns=deadline()) == first
+    assert files(owner.runtime) == before
+
+
+def test_preservation_requires_outer_runtime_binding_before_owner_effects(preserved_fixture):
+    target, request, _, _ = preserved_fixture
+    request['runtime_sha256'] = 'f' * 64
+    with pytest.raises(OnboardingError, match='request_required'):
+        GuestOwnerBootstrap(target, request)

@@ -491,3 +491,33 @@ def test_actual_prepared_command_is_rechecked_before_quiescence(tmp_path, fixtur
     with pytest.raises(OnboardingError, match=expected):
         SourceBootstrapController(journal, row['operation_id'], source, manager).quiesce()
     assert manager.stops == 0 and not marker.exists()
+
+
+@pytest.mark.parametrize('retained', [False, True])
+def test_source_preservation_expiry_distinguishes_new_stop_from_retained_quiescence(fixture, monkeypatch, retained):
+    import time
+    from clusterctl import onboarding_receiving_update as updates
+    source, manager, journal, identifier, _ = fixture
+    old = journal.get(identifier)
+    frozen = copy.deepcopy(old['expected_precondition']['source_bootstrap'])
+    now = time.time_ns() // 1_000_000
+    pins = dict(runtime_sha256=frozen['bundle_sha256'], origin=frozen['predecessor']['server'],
+        active=True, not_before_ms=now - 1000, not_after_ms=now + 7200000)
+    frozen.update(mode='preserve', preservation=pins)
+    candidate = {**old['intended_transition']['source_bootstrap'], 'expires_at_ms': now + 60000,
+        'qualification': {'fixture': 'qualified code seam'}}
+    row = plan_update(journal, manifest_digest='a' * 64, target='source:preserved-quiescence',
+        expected_precondition={'source_bootstrap': frozen}, intended_transition={'source_bootstrap': candidate},
+        audit_identity={'actor': 'fixture'})
+    controller = SourceBootstrapController(journal, row['operation_id'], source, manager)
+    monkeypatch.setattr(controller, '_qualify_candidate', lambda *_: {})
+    monkeypatch.setattr(updates, 'controller_preservation', lambda *_: copy.deepcopy(pins))
+    if retained:
+        first = controller.quiesce()
+    monkeypatch.setattr(time, 'time_ns', lambda: (candidate['expires_at_ms'] + 1) * 1_000_000)
+    if retained:
+        assert controller.quiesce() == first and manager.stops == 1
+    else:
+        with pytest.raises(OnboardingError, match='authorization_expired'):
+            controller.quiesce()
+        assert manager.live is True and manager.stops == 0

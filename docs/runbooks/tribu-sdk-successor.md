@@ -137,6 +137,26 @@ its own independent artifact provenance. The installer's existing `--refresh-gui
 planned instruction bytes without replacing the connection's command, channels,
 capability or request history.
 
+## Existing controller software adoption
+
+Freeze controller `mode` before any interruption. `issue` retains the original
+first-controller stage/publication and its exact recovery; absent mode in old
+operations still means `issue`. A retry never switches branches because its own
+publication made a controller appear.
+
+`preserve` requires an already authenticated controller and pins immutable runtime,
+custody and client bytes, signed group inputs and the existing visibility. Check
+its finite authorization before stopping. An expired controller cannot qualify
+control or be renewed by a software update. Under native parent/writer ownership,
+after predecessor exits, validate the unchanged runtime in the native isolated
+clone and retain a full quiescent inventory as `owner_preserved`. This does not
+stage/publish authority, increment custody, reissue visibility or claim readiness.
+Source and guest use the existing selected-unit/start/load observations; a lost
+start reply observes that process rather than stopping it again. Database activity
+after genuine startup is reconciled through its loaded proof, not by comparing
+mutable stores against the pre-start inventory. A replacement still needs its
+own empty gate/revoke before the cohort can activate positive readers.
+
 ## Qualification and live selection
 
 The SDK CI profile runs on the actual Python 3.13.5. Its closed file boundary

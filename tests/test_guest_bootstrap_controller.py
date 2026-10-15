@@ -362,3 +362,46 @@ def test_fresh_observer_pid_nonce_may_change_without_changing_guest_interpreter(
     backend._target_call = fresh
     assert controller.execute()['receiving_readiness'] == 'unobserved'
     assert backend.stops == backend.starts == 1
+
+
+@pytest.mark.parametrize('lost_phase', [None, 'stage', 'start'])
+def test_controlled_guest_software_adoption_preserves_authority_and_recovers_lost_reply(fixture, lost_phase):
+    controller, backend, calls, _ = fixture
+    original = controller.journal.get(controller.operation_id)
+    before = copy.deepcopy(original['expected_precondition'])
+    owner = before['guest_bootstraps']['eko']['owner']
+    owner.update(mode='preserve', preservation=dict(not_before_ms=time.time_ns() // 1_000_000 - 1000,
+        not_after_ms=time.time_ns() // 1_000_000 + 7200000, immutable_sha256='a' * 64,
+        runtime_sha256=owner['runtime_sha256'], origin=owner['origin'], active=True))
+    row = plan_update(controller.journal, manifest_digest='a' * 64, target='controlled-guest:fixture',
+        expected_precondition=before, intended_transition=original['intended_transition'],
+        audit_identity={'actor': 'fixture'})
+    controller = GuestBootstrapController(controller.journal, row['operation_id'], backend, 'eko')
+    target_call = backend._target_call
+    def controlled(plan, action, **options):
+        if action == 'receiving-bootstrap-freeze':
+            return copy.deepcopy(owner)
+        if action == 'receiving-bootstrap-stage':
+            calls.append(action)
+            assert not backend.active
+            if 'preserve' not in backend.done:
+                backend.stages += 1
+                backend.done.add('preserve')
+            return backend.lose('stage', dict(mode='preserve', preservation=owner['preservation'],
+                request_sha256=digest(options['bootstrap_request']), runtime_sha256=owner['runtime_sha256']))
+        assert action != 'receiving-bootstrap-publish'
+        result = target_call(plan, action, **options)
+        if action == 'admitted-running':
+            result['runtime_sha256'] = owner['runtime_sha256']
+            result['runtime_status']['loaded_runtime']['runtime_bundle_sha256'] = owner['runtime_sha256']
+        return result
+    backend._target_call = controlled
+    backend.fail = lost_phase
+    if lost_phase is not None:
+        with pytest.raises(OSError):
+            controller.execute()
+    result = controller.execute()
+    assert controller.execute() == result
+    assert backend.stages == backend.starts == backend.stops == 1 and backend.publications == 0
+    effects = controller.journal.get(row['operation_id'])['runtime_observation']['guest_bootstraps']['eko']
+    assert 'owner_preserved' in effects and not {'owner_ready', 'owner_published'} & effects.keys()
