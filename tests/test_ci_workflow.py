@@ -130,12 +130,19 @@ def test_ci_bubblewrap_install_is_cached_bounded_and_fail_closed() -> None:
     assert "test -x /usr/bin/bwrap" in step
 
 
-def test_recovery_workflow_checks_out_the_fixtures_frozen_matrix_revision() -> None:
+def test_recovery_workflow_uses_the_actual_host_matrix_contract_pin() -> None:
     import re
+    from clusterctl.matrix_host import MATRIX_CONTRACT_COMMIT
     root = Path(__file__).parents[1]
-    tree = ast.parse((root / 'tests/integration/test_recovery_rebirth_containers.py').read_text())
-    revision = next(node.value.value for node in tree.body if isinstance(node, ast.Assign)
-        and any(isinstance(target, ast.Name) and target.id == 'MATRIX_COMMIT' for target in node.targets))
-    workflow = (root / '.github/workflows/tests.yml').read_text().split('  recovery-rebirth-disposable-hosts:', 1)[1]
-    assert re.search(r'ref: ([0-9a-f]{40})', workflow).group(1) == revision
-    assert re.search(r'git -C matrix-source rev-parse HEAD.*?([0-9a-f]{40})', workflow, re.S).group(1) == revision
+    tree = ast.parse((root/'tests/integration/test_recovery_rebirth_containers.py').read_text())
+    assert any(isinstance(node, ast.ImportFrom) and node.module == 'clusterctl.matrix_host'
+               and any(alias.name == 'MATRIX_CONTRACT_COMMIT' for alias in node.names)
+               for node in tree.body)
+    assignments = [node for node in tree.body if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == 'MATRIX_COMMIT'
+                           for target in node.targets)]
+    assert len(assignments) == 1 and isinstance(assignments[0].value, ast.Name)
+    assert assignments[0].value.id == 'MATRIX_CONTRACT_COMMIT'
+    workflow = (root/'.github/workflows/tests.yml').read_text().split('  recovery-rebirth-disposable-hosts:', 1)[1]
+    assert re.search(r'ref: ([0-9a-f]{40})', workflow).group(1) == MATRIX_CONTRACT_COMMIT
+    assert re.search(r'git -C matrix-source rev-parse HEAD.*?([0-9a-f]{40})', workflow, re.S).group(1) == MATRIX_CONTRACT_COMMIT
