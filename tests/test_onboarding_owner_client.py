@@ -648,6 +648,14 @@ def test_native_server_version_binds_the_qualified_sdk_code_and_attachment(
         "pagination",
         "alias",
         "alias-drift",
+        "starting",
+        "stale-once",
+        "threadless",
+        "long-budget",
+        "lost-reload",
+        "mixed-starting",
+        "stale-config-drift",
+        "stale-alias-drift",
     ],
 )
 def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
@@ -666,7 +674,7 @@ def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
     with tempfile.TemporaryDirectory(prefix="dm-catalog-") as short:
         endpoint = Path(short) / "native.sock"
         selected_endpoint = endpoint
-        if fault in {'alias', 'alias-drift'}:
+        if fault in {'alias', 'alias-drift', 'stale-alias-drift'}:
             selected_endpoint = Path(short) / 'control.sock'
             selected_endpoint.symlink_to(endpoint.name)
         home = tmp_path / "codex"
@@ -676,6 +684,7 @@ def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
         config.chmod(0o600)
         config_sha = hashlib.sha256(config.read_bytes()).hexdigest()
         thread_id = str(uuid.uuid4())
+        second_thread = str(uuid.uuid4())
         startup = dict(
             code_digest="a" * 64,
             sdk_digest="b" * 64,
@@ -709,6 +718,18 @@ def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
             lambda *a: SimpleNamespace(_binding_fingerprint=lambda a, **kw: ({}, "e" * 64)),
         )
         requests = []
+        statuses = {}
+        reloads = []
+        deadlines = []
+        if fault == "long-budget":
+            import asyncio
+            real_timeout = asyncio.timeout
+
+            def timed(seconds):
+                deadlines.append(seconds)
+                return real_timeout(seconds)
+
+            monkeypatch.setattr(asyncio, "timeout", timed)
         release = threading.Event()
 
         def respond(connection):
@@ -730,15 +751,22 @@ def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
                     return
                 if method == "thread/loaded/list":
                     result = {
-                        "data": [] if fault == "unloaded" else [thread_id],
+                        "data": [] if fault == "unloaded" else [thread_id, second_thread],
                         "nextCursor": "repeated" if fault == "pagination" else None,
                     }
                 elif method == "mcpServerStatus/list":
-                    assert request["params"]["threadId"] == thread_id
+                    selected = request["params"].get("threadId")
+                    assert selected in (None, thread_id, second_thread)
+                    assert (selected is None) == (fault == "threadless")
+                    statuses[selected] = statuses.get(selected, 0) + 1
+                    starting = (fault == "starting" or fault == "mixed-starting" and selected == second_thread) and statuses[selected] == 1
+                    stale = fault in ("stale-once", "lost-reload", "mixed-starting", "stale-config-drift", "stale-alias-drift") and not reloads
+                    if fault == "mixed-starting" and selected == second_thread:
+                        stale = False
                     tools = {
                         n: {"name": n, "inputSchema": s} for n, s in expected.items()
                     }
-                    if fault == 'alias-drift':
+                    if fault in ('alias-drift', 'stale-alias-drift'):
                         replacement = selected_endpoint.with_suffix('.next')
                         replacement.symlink_to(str(endpoint))
                         os.replace(replacement, selected_endpoint)
@@ -750,18 +778,24 @@ def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
                                 "name": "matrix",
                                 "runtimeStatus": "disabled"
                                 if fault == "disabled"
-                                else "connected",
+                                else "starting" if starting else "connected",
                                 "tools": tools,
                                 "serverInfo": {
                                     "version": "old"
-                                    if fault == "old-sdk"
+                                    if fault == "old-sdk" or stale
                                     else owner.tooling_version(startup, "e" * 64)
                                 },
                             }
                         ]
                     }
-                    if fault == "config-drift":
+                    if fault in ("config-drift", "stale-config-drift"):
                         config.write_text("# Concurrent owner edit\n")
+                elif method == "config/mcpServer/reload":
+                    reloads.append(True)
+                    assert len(reloads) == 1
+                    if fault == "lost-reload":
+                        return
+                    result = {}
                 else:
                     result = {}
                 connection.send(json.dumps({"id": request["id"], "result": result}))
@@ -780,22 +814,37 @@ def test_native_catalog_pins_actual_peer_and_selected_context_without_turns(
                         startup=startup,
                         codex_home=home,
                         endpoint=selected_endpoint,
-                        threads=(thread_id,),
+                        threads=() if fault == "threadless" else (
+                            (thread_id, second_thread) if fault == "mixed-starting" else (thread_id,)
+                        ),
                         config_sha256=config_sha,
                         reload=True,
                         deadline_ns=time.monotonic_ns()
-                        + int((0.1 if fault == "stall" else 3) * 1e9),
+                        + int((0.1 if fault == "stall" else 45 if fault == "long-budget" else 3) * 1e9),
                     )
 
-                if fault in (None, 'alias'):
+                if fault == "lost-reload":
+                    from websockets.exceptions import ConnectionClosed
+                    with pytest.raises(ConnectionClosed):
+                        observe()
+                if fault in (None, 'alias', 'starting', 'stale-once', 'threadless', 'long-budget', 'lost-reload', 'mixed-starting'):
                     result = observe()
-                    assert result["acceptance"] == "selected-existing-contexts"
+                    assert result["acceptance"] == ("server-catalog-only" if fault == "threadless" else "selected-existing-contexts")
                     assert result["native_process"]["pid"] == os.getpid()
-                    assert result["contexts"][0]["thread_id"] == thread_id
+                    assert result["contexts"][0]["thread_id"] == (None if fault == "threadless" else thread_id)
                     assert result["model_turns_started"] == result["messages_sent"] == 0
                 else:
                     with pytest.raises((OnboardingError, TimeoutError)):
                         observe()
+                assert len(reloads) == (1 if fault in ("old-sdk", "stale-once", "lost-reload", "mixed-starting") else 0)
+                if fault in ("starting", "mixed-starting"):
+                    assert statuses[second_thread if fault == "mixed-starting" else thread_id] >= 2
+                    first_reload = next((i for i, r in enumerate(requests) if r["method"] == "config/mcpServer/reload"), len(requests))
+                    assert sum(r["method"] == "mcpServerStatus/list" for r in requests[:first_reload]) >= (4 if fault == "mixed-starting" else 2)
+                if fault == "long-budget":
+                    assert deadlines and deadlines[0] > 30
+                if fault == "threadless":
+                    assert sum(statuses.values()) == 1
                 assert all(
                     r["method"]
                     not in {

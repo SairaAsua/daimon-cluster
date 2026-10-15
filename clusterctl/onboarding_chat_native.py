@@ -109,9 +109,14 @@ def _sync_directory(path: Path) -> None:
 
 
 def _write_codex_role(
-    codex: str, home: Path, command: list[str], *, timeout_seconds: float = 30
+    codex: str,
+    home: Path,
+    command: list[str],
+    *,
+    timeout_seconds: float = 30,
+    startup_timeout_seconds: int | None = None,
 ) -> None:
-    """Edit only command/args with Codex's versioned native config writer.
+    """Edit the selected role with Codex's versioned native config writer.
 
     The caller supplies a private candidate home, never the active home.
     This config-only process receives no thread, turn or discovery request.
@@ -212,7 +217,18 @@ def _write_codex_role(
                         "value": command[1:],
                         "mergeStrategy": "replace",
                     },
-                ],
+                ]
+                + (
+                    []
+                    if startup_timeout_seconds is None
+                    else [
+                        {
+                            "keyPath": "mcp_servers.matrix.startup_timeout_sec",
+                            "value": startup_timeout_seconds,
+                            "mergeStrategy": "replace",
+                        }
+                    ]
+                ),
             },
         )
         completed = True
@@ -252,10 +268,15 @@ def _register_codex_mcp_locked(
         if existing.get("enabled", True) is not True:
             raise ValueError("agent_chat_codex_mcp_disabled")
         current = {key: existing.get(key) for key in wanted}
-        if current == wanted:
+        if current == wanted and (
+            "startup_timeout_sec" in existing or "startup_timeout_ms" in existing
+        ):
             _sync_directory(home)
             return {"status": "configured", "catalog_acceptance": "unobserved"}
-        if previous_sha256 != hashlib.sha256(canonical_bytes(current)).hexdigest():
+        if (
+            current != wanted
+            and previous_sha256 != hashlib.sha256(canonical_bytes(current)).hexdigest()
+        ):
             raise ValueError("agent_chat_codex_mcp_conflict")
     history = attachment / "codex-mcp-history" / str(uuid.uuid4())
     _put(history / "config.before.toml", before)
@@ -312,12 +333,19 @@ def _codex_candidate(
 
     old = tomllib.loads(before.decode())
     servers = old.get("mcp_servers", {})
+    role = servers.get("matrix", {})
+    startup_default = (
+        {}
+        if "startup_timeout_sec" in role or "startup_timeout_ms" in role
+        else {"startup_timeout_sec": 60}
+    )
     expected = {
         **old,
         "mcp_servers": {
             **servers,
             "matrix": {
-                **servers.get("matrix", {}),
+                **role,
+                **startup_default,
                 "command": command[0],
                 "args": command[1:],
             },
@@ -335,6 +363,7 @@ def _codex_candidate(
             codex,
             home,
             command,
+            **({"startup_timeout_seconds": 60} if startup_default else {}),
             **({} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}),
         )
         candidate = protected_read(config)
