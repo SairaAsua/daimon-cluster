@@ -124,3 +124,62 @@ def test_launcher_appearance_has_its_own_canonical_surface_without_new_store(sys
     # Existing authorized owner selection can target this built-in surface;
     # no launcher-specific preference database or selection write is added.
     assert Homemaker.surface(None,'one','apps')=='apps'
+
+
+def publish_owner_link(app, states, url):
+    entry = selected('d' * 32, 'public', title='Home Maker', kind='link', url=url)
+    entry.pop('revision')
+    entry['version_ref'] = version_digest(entry)
+    states['one']['entries'].append(entry)
+    app.registry.register(home='one', owner='owner', state=states['one'], expected_revision=1,
+                          known_actor=app.authority.actor, known_tribe=lambda _:False)
+    return entry
+
+
+def test_owner_web_app_requires_both_configured_application_and_current_publication(system):
+    from types import SimpleNamespace
+    app, _ = system
+    states = populated(app)
+    url = app.homes['two']['public_url'] + '/homemaker/miniapp.html'
+    entry = publish_owner_link(app, states, url)
+    assert 'Home Maker' not in {e['title'] for e in catalog(app, 'one', None, False)['apps']}
+    app.homemaker_home = 'two'
+    app.designs = SimpleNamespace(owner_application=None)
+    assert 'Home Maker' not in {e['title'] for e in catalog(app, 'one', None, False)['apps']}
+    app.designs.owner_application = object()
+    for home in ('one', 'two'):
+        if home == 'two':
+            app.homes[home]['ring'] = [{'name':'one', 'url':app.homes['one']['public_url']}]
+        result = catalog(app, home, None, False)
+        web = next(e for e in result['apps'] if e['title'] == 'Home Maker')
+        assert web['url'] == url and web['launch'] == 'web'
+        assert web['version_ref'] == entry['version_ref']
+        assert all(e['launch'] == 'telegram' for e in result['apps'] if e != web)
+    # The app link is withdrawn under the same existing publication/grant rules.
+    entry['visibility'] = 'human'
+    assert 'Home Maker' not in {e['title'] for e in catalog(app, 'two', None, False)['apps']}
+
+
+@pytest.mark.parametrize('suffix', [
+    '/homemaker/', '/homemaker/miniapp.html?target=other',
+    '/homemaker/miniapp.html#identity', '/view/' + 'd' * 32,
+    '/homemaker/miniapp.html/extra',
+])
+def test_owner_entry_does_not_promote_preview_or_identity_parameter_links(system, suffix):
+    from types import SimpleNamespace
+    app, _ = system
+    states = populated(app)
+    app.homemaker_home = 'two'
+    app.designs = SimpleNamespace(owner_application=object())
+    publish_owner_link(app, states, app.homes['two']['public_url'] + suffix)
+    assert 'Home Maker' not in {e['title'] for e in catalog(app, 'one', None, False)['apps']}
+
+
+def test_retired_local_workshop_link_is_not_a_canonical_web_app(system):
+    from types import SimpleNamespace
+    app, _ = system
+    states = populated(app)
+    app.homemaker_home = 'two'
+    app.designs = SimpleNamespace(owner_application=object())
+    publish_owner_link(app, states, app.homes['one']['public_url'] + '/homemaker/miniapp.html')
+    assert 'Home Maker' not in {e['title'] for e in catalog(app, 'one', None, False)['apps']}
