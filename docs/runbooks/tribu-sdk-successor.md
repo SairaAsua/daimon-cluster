@@ -55,6 +55,14 @@ pinning the same service process before freezing the predecessor. A successful
 systemd start is not socket readiness. Capture the existing bounded CLI diagnostic
 on the failing call before coupled cleanup removes that process; a later call
 against a stopped fixture cannot diagnose the earlier live refusal.
+Keep the same finite synthetic service/admission scope alive across a pending
+startup observation. Baseline preparation may finish before freezing its owner
+deadline; individual native observations retain their supported bounds. Re-poll
+the retained start through the controller while its exact manager/process and
+original operation remain valid. Clean up on completion, an actual refusal or
+the outer fixture deadline, rather than stopping a still-loading process merely
+because one observation window expired. Cleanup must still stop owned native
+units before retiring their finite admission producer.
 Bounded native guest observation also waits for initial socket publication within
 its original remaining deadline. That wait starts no process and grants no
 readiness: the same-connection responder, admission parent, selected unit and
@@ -284,6 +292,22 @@ capability or request history.
 
 ## Existing controller software adoption
 
+Existing Codex tooling adoption is a receiving requirement, not first-install
+onboarding. The current candidate does not yet reconcile that tooling; keep its
+adoption unobserved until the narrow installer/owner route is implemented.
+Do not rerun `OwnerClient.install` over personalized AGENTS or treat a selected
+Matrix daemon as proof that the harness selected its matching tools.
+Reuse the existing installer history and receiving operation for exact connection
+and native-role command successors. Preserve binding/capabilities, request IDs,
+personal guidance and every optional native setting, including disabled intent.
+Use the supported native config writer for command/args only and the qualified
+closed SDK launcher. Prepare expensive catalog work before the receiver freshness
+round; retain bound evidence and check drift rather than repeating cold discovery.
+`config/mcpServer/reload` refreshes only the addressed App Server's threads.
+A fresh config-only catalog probe cannot prove existing sessions reloaded.
+Keep unavailable native-instance routes explicit; neither console fallback nor
+another service restart establishes native-tool acceptance.
+
 Freeze controller `mode` before any interruption. `issue` retains the original
 first-controller stage/publication and its exact recovery; absent mode in old
 operations still means `issue`. A retry never switches branches because its own
@@ -292,7 +316,9 @@ publication made a controller appear.
 `preserve` requires an already authenticated controller and pins immutable runtime,
 custody and client bytes, signed group inputs and the existing visibility. Check
 its finite authorization before stopping. An expired controller cannot qualify
-control or be renewed by a software update. Under native parent/writer ownership,
+control in `preserve` mode; use the explicit optional-controller `renew` route
+above when its original roles remain valid. Expired original roles remain refused.
+Under native parent/writer ownership,
 after predecessor exits, validate the unchanged runtime in the native isolated
 clone and retain a full quiescent inventory as `owner_preserved`. This does not
 stage/publish authority, increment custody, reissue visibility or claim readiness.
@@ -321,9 +347,10 @@ its existing supervisor, and inspect actual readiness. Keep private credentials
 and proof keys outside shared correlation metadata. Do not restart the owner's
 Telegram consumer merely to change Matrix presentation.
 
-Rollback selects the preserved preceding executable environment and signed
-installation together, preserving subsequent receiving writes and all native
-journals. A checkout test, published package or installed wheel is not live
+Rollback selects a preserved executable environment compatible with the current
+accepted authority, custody and signed installation. Never restore old authority
+or custody to accommodate an incompatible observer. Preserve subsequent receiving
+writes and all native journals. A checkout test, published package or installed wheel is not live
 readiness. The owning Matrix epic records actual cohort acceptance, confirmed
 Telegram replies and native receipts after the authorized bounded demonstration.
 
