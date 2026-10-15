@@ -497,6 +497,81 @@ def test_target_sdk_observation_and_retry_do_not_load_body_custody(tmp_path, mon
     assert not list(home.rglob('custody.json'))
 
 
+
+@pytest.mark.parametrize('state', ['prepared', 'reexec', 'missing-tree', 'missing-receipt'])
+def test_qualified_target_checks_actual_imports_without_unused_installed_scan(tmp_path, monkeypatch, capsys, state):
+    import shutil
+    from clusterctl import onboarding_code_successor, onboarding_sdk, onboarding_target
+    from tests.test_onboarding import plan
+    base, original, source, _, sdk, home = sdk_generations(tmp_path)
+    output = tmp_path / 'qualified-successor'
+    parameters = dict(matrix_commit=onboarding_sdk.MATRIX_COMMIT,
+        matrix_wheel_sha256=onboarding_sdk.wheel(next((sdk / 'wheels').iterdir()), uid=os.geteuid())['sha256'])
+    result = build(base, original, source, ('onboarding_target.py',), output, sdk=sdk, **parameters)
+    venv = onboarding_sdk.install(home, output, result['runtime_digest'], code_uid=os.geteuid(), **parameters)
+    imports = onboarding_sdk.runtime_imports(venv, output, code_uid=os.geteuid(), **parameters)
+    receipt = imports.parent / 'runtime-imports.json'
+    if state == 'missing-tree':
+        shutil.rmtree(imports)
+    elif state == 'missing-receipt':
+        receipt.unlink()
+    before = {p.relative_to(home).as_posix(): p.read_bytes()
+        for p in home.rglob('*') if p.is_file() and not p.is_symlink()}
+    plan_path, genesis_path = tmp_path / 'plan.json', tmp_path / 'genesis.json'
+    being_seed._write(plan_path, {**plan(), 'release_digest': original})
+    being_seed._write(genesis_path, {})
+    selection, sdk_parameters = onboarding_code_successor.selection, onboarding_code_successor.sdk_parameters
+    regular, runtime_imports = onboarding_release.regular, onboarding_sdk.runtime_imports
+    monkeypatch.setattr(onboarding_code_successor, 'selection', lambda *a, **kw: selection(*a, uid=os.geteuid()))
+    monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda code, **kw: sdk_parameters(code, uid=os.geteuid()))
+    monkeypatch.setattr(onboarding_release, 'regular', lambda path, **kw:
+        regular(path, **{**kw, 'uid': os.geteuid()}) if path == output / 'sdk/sdk.json' else regular(path, **kw))
+    monkeypatch.setattr(sys, 'prefix', str(venv))
+    monkeypatch.setattr(onboarding_sdk, 'startup_context', lambda *a: state != 'reexec')
+    def unused_scan(*a, **kw):
+        raise AssertionError('qualified startup must not scan unused installed site-packages')
+    monkeypatch.setattr(onboarding_sdk, 'observe', unused_scan)
+    events = []
+    startup = {'qualified': True}
+    def qualify(actual_venv, actual_code, **kw):
+        assert actual_venv == venv and actual_code == output
+        assert kw == dict(code_digest=result['runtime_digest'], **parameters)
+        # Reuse the real closed-tree verifier; other SDK tests qualify the
+        # process's interpreter/context/origins rather than this dispatch seam.
+        assert runtime_imports(venv, output, code_uid=os.geteuid(), **parameters) == imports
+        events.append('qualified-startup')
+        return startup
+    monkeypatch.setattr(onboarding_sdk, 'qualified_startup', qualify)
+    monkeypatch.setattr(onboarding_sdk, 'runtime_imports', lambda *a, **kw:
+        runtime_imports(*a, code_uid=os.geteuid(), **kw))
+    class FakeTarget:
+        def __init__(self, *a, **kw):
+            assert events == ['qualified-startup'] and kw['qualified_startup'] is startup
+            events.append('owner-action')
+        def running(self, **kw):
+            return {'running': True}
+    monkeypatch.setattr(onboarding_target, 'Target', FakeTarget)
+    def execute(executable, command):
+        assert executable == venv / 'bin/python'
+        assert command[1:4] == ['-B', '-I', '-S']
+        assert str(imports) in command and str(output) in command
+        events.append('reexec')
+        raise RuntimeError('captured qualified reexec')
+    monkeypatch.setattr(os, 'execv', execute)
+    args = ['running', '--diagnostics', '--home', str(home), '--code', str(base), '--plan', str(plan_path),
+        '--genesis', str(genesis_path), '--runtime-code', str(output), '--runtime-digest', result['runtime_digest']]
+    result_code = onboarding_target.main(args)
+    captured = capsys.readouterr()
+    assert result_code == (0 if state == 'prepared' else 1), captured.err
+    if state.startswith('missing-'):
+        assert json.loads(captured.err)['stage'] == 'sdk-observation'
+    assert events == (['qualified-startup', 'owner-action'] if state == 'prepared'
+                      else ['reexec'] if state == 'reexec' else [])
+    assert before == {p.relative_to(home).as_posix(): p.read_bytes()
+        for p in home.rglob('*') if p.is_file() and not p.is_symlink()}
+    if state == 'prepared':
+        assert json.loads(captured.out) == {'running': True}
+
 def test_host_reconciles_missing_sdk_before_reading_existing_body(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from clusterctl.onboarding_host import HostBackend

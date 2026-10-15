@@ -811,33 +811,47 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(dict(ready=ready, matrix_commit=matrix_commit)))
             return 0
         stage = 'sdk-observation'
-        venv = onboarding_sdk.observe(args.home, runtime, **sdk_parameters)
-        imports = venv.parent / 'runtime-imports' if sdk_parameters else None
-        qualified_context = (imports is not None
-            and onboarding_sdk.startup_context(venv, imports, runtime))
-        if Path(sys.prefix) != venv or sdk_parameters and not qualified_context:
-            arguments = list(argv if argv is not None else sys.argv[1:])
-            if observation_deadline_ns is not None:
-                if time.monotonic_ns() >= observation_deadline_ns:
-                    raise OnboardingError('onboarding_observation_deadline_expired')
-                # Same process/guest monotonic clock across exec. Import/startup
-                # time must consume this budget rather than reset its duration.
-                arguments += ['--observation-deadline-ns', str(observation_deadline_ns)]
+        with ExitStack() as startup_lock:
             if sdk_parameters:
-                stage = 'sdk-imports'
-                imports = onboarding_sdk.runtime_imports(venv, runtime, **sdk_parameters)
-                command = onboarding_sdk.runtime_command(venv, imports, runtime,
-                    'clusterctl.onboarding_target', arguments)
+                # Selection already verified this protected V4 manifest. The
+                # qualified process excludes installed site-packages; validate
+                # its actual closed imports below, without scanning unused files.
+                sdk = json.loads(onboarding_release.regular(runtime / 'sdk/sdk.json', uid=0))
+                venv = args.home / '.local/share/daimon-matrix/sdk' / digest(sdk) / 'venv'
+                private_directory(venv.parent)
+                startup_lock.enter_context(being_seed._locked(venv.parent, shared=True))
+                imports = private_directory(venv.parent / 'runtime-imports')
+                document(venv.parent / 'runtime-imports.json')
+                # Keep read ownership through qualification so a missing tree
+                # or receipt never enters runtime_imports' construction branch.
             else:
-                launcher = ("import sys; sys.path.insert(0,sys.argv.pop(1)); "
-                            "from clusterctl.onboarding_target import main; raise SystemExit(main())")
-                command = [str(venv / "bin/python"), "-B", "-I", "-c", launcher,
-                           str(runtime), *arguments]
-            os.execv(venv / "bin/python", command)
-        stage = 'sdk-startup'
-        startup = (onboarding_sdk.qualified_startup(venv, runtime,
-            code_digest=args.runtime_digest or plan['release_digest'], **sdk_parameters)
-            if sdk_parameters else None)
+                venv = onboarding_sdk.observe(args.home, runtime, **sdk_parameters)
+                imports = None
+            qualified_context = (imports is not None
+                and onboarding_sdk.startup_context(venv, imports, runtime))
+            if Path(sys.prefix) != venv or sdk_parameters and not qualified_context:
+                arguments = list(argv if argv is not None else sys.argv[1:])
+                if observation_deadline_ns is not None:
+                    if time.monotonic_ns() >= observation_deadline_ns:
+                        raise OnboardingError('onboarding_observation_deadline_expired')
+                    # Same process/guest monotonic clock across exec. Import/startup
+                    # time must consume this budget rather than reset its duration.
+                    arguments += ['--observation-deadline-ns', str(observation_deadline_ns)]
+                if sdk_parameters:
+                    stage = 'sdk-imports'
+                    imports = onboarding_sdk.runtime_imports(venv, runtime, **sdk_parameters)
+                    command = onboarding_sdk.runtime_command(venv, imports, runtime,
+                        'clusterctl.onboarding_target', arguments)
+                else:
+                    launcher = ("import sys; sys.path.insert(0,sys.argv.pop(1)); "
+                                "from clusterctl.onboarding_target import main; raise SystemExit(main())")
+                    command = [str(venv / "bin/python"), "-B", "-I", "-c", launcher,
+                               str(runtime), *arguments]
+                os.execv(venv / "bin/python", command)
+            stage = 'sdk-startup'
+            startup = (onboarding_sdk.qualified_startup(venv, runtime,
+                code_digest=args.runtime_digest or plan['release_digest'], **sdk_parameters)
+                if sdk_parameters else None)
         stage = 'owner-action'
         target = Target(args.home, plan, document(args.genesis), code=runtime,
             code_digest=args.runtime_digest or plan['release_digest'], qualified_startup=startup)

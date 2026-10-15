@@ -70,6 +70,14 @@ loaded code are still verified afterwards. Ordinary status without a deadline
 keeps its immediate missing-socket refusal. Do not replay a retained native start
 or mint another controller because its first socket observation raced startup.
 
+Qualified V4 Target startup verifies the closed imports it actually executes,
+not the unused installed site-packages. Resolve the prepared generation from
+the just-verified SDK manifest, hold shared preparation ownership and require
+its existing imports/receipt before full startup qualification. Missing preparation
+refuses without rebuilding. Explicit `sdk-observe`, installation and legacy
+startup retain their installed-site checks. This removes duplicate work, not the
+closed-tree, dependency, interpreter, context or loaded-module checks.
+
 Use the selected SDK for both the observer and receiver; validate that binding
 before lifecycle effects. Keep lifecycle journals on their actual owners.
 Root reads Source lifecycle proof through `SourceGroupClient(lifecycle_journal=...)`
