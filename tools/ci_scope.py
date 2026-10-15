@@ -291,7 +291,7 @@ GROUP_TESTS = ('tests/test_onboarding_group.py', 'tests/test_onboarding_acceptan
 RECEIVING_RUNTIME_FILES = {'clusterctl/onboarding_peer.py', 'clusterctl/onboarding_runtime.py',
     'tests/test_onboarding_peer.py', 'tests/test_onboarding_runtime.py'}
 
-LOADED_STARTUP_FILES = {'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_target.py',
+LOADED_STARTUP_FILES = {'RESUME.md', 'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_target.py',
     'clusterctl/onboarding_service.py', 'tests/test_source_bootstrap.py',
     'clusterctl/onboarding_runtime.py', 'clusterctl/onboarding_source.py', 'clusterctl/owner_process.py',
     'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_cohort_control.py',
@@ -403,11 +403,51 @@ def host_observation_only(root: Path, base: str) -> bool:
         '45bb1547863ee1dfcbcdeac970a7a217a792e8755a52df9b63ffed152819c32c'})
 
 
+
+# Exact reviewed shared-helper deltas preserve unrelated behavior. Unknown bytes
+# retain full qualification; a filename or a passing narrower run is not enough.
+RECEIVING_SUPPORT_HASHES = {
+    'clusterctl/being_seed.py': (
+        '9abf29b0948a0bafc3d9ba89e761a0993f45d8b6e9d9a84749abed120356fc14',
+        'f3086cd0f148d9b89b7ff6c36d39d7ecd08d57d0f5af4495a29126649107b9f4'),
+    'clusterctl/onboarding.py': (
+        '22502def8f11549d6b0be262e131dadd95c2de9d897e295e2cfe5eb40e4b1e99',
+        'ba6c5eab4ea1c4397dff2e8cec2e47480800d142a8c2846db0d7c7a23a3bdc91'),
+    'tests/integration/test_recovery_rebirth_containers.py': (
+        'ea7100770ed295650a4c0a9ebf614e6df30d3d108fd91086de162b6e318fe282',
+        '85e2328f47736372ef2d71067dd390d240978a592aaf5fdca42f9ff33fdcab43'),
+}
+
+
+def receiving_support_only(root: Path, base: str, names: set[str]) -> bool:
+    if not re.fullmatch(r'[0-9a-f]{40}', base):
+        return False
+    for name in names:
+        before = subprocess.run(['git','show',base+':'+name],cwd=root,capture_output=True,check=False)
+        try:
+            actual = (hashlib.sha256(before.stdout).hexdigest(),
+                      hashlib.sha256((root/name).read_bytes()).hexdigest())
+        except OSError:
+            return False
+        if before.returncode or actual != RECEIVING_SUPPORT_HASHES[name]:
+            return False
+    return True
+
+
 def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
     host_files={'clusterctl/onboarding_host.py','tests/test_onboarding_host.py'}
     host_tests=(*LOADED_STARTUP_TESTS,'tests/test_onboarding_host.py',
                 'tests/test_onboarding_host_ownership.py','tests/test_onboarding_managed.py',
                 'tests/test_onboarding_peer_host.py')
+    support = set(changed) & RECEIVING_SUPPORT_HASHES.keys()
+    support_tests = (*host_tests, 'tests/test_being_seed.py')
+    if (support and set(changed) <= LOADED_STARTUP_FILES | CI_FILES | host_files
+            | RECEIVING_SUPPORT_HASHES.keys() | {'tests/test_being_seed.py'}
+            and all((root/path).is_file() for path in support_tests)
+            and receiving_support_only(root, base, support)
+            and (not (set(changed) & host_files)
+                 or host_files <= set(changed) and host_observation_only(root, base))):
+        return 'peer', list(dict.fromkeys(support_tests))
     if (host_files <= set(changed) and set(changed) <= LOADED_STARTUP_FILES | CI_FILES | host_files
             and all((root/path).is_file() for path in host_tests) and host_observation_only(root,base)):
         return 'peer',list(dict.fromkeys(host_tests))

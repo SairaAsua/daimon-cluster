@@ -4,6 +4,22 @@ Architecture/profile navigation is
 [Matrix current architecture](https://github.com/AlterMundi/daimon-matrix/blob/main/docs/current-architecture.md).
 Current selections below supersede the explicitly historical qualification.
 
+## Current milestone work
+
+Matrix [milestone6 / #336](https://github.com/AlterMundi/daimon-matrix/issues/336)
+is active. Cluster [PR242](https://github.com/nicoechaniz/daimon-cluster/pull/242)
+contains the maintained Source/guest/cohort update controllers and their current
+qualification record; Matrix [PR352](https://github.com/AlterMundi/daimon-matrix/pull/352)
+contains the corresponding SDK candidate. Neither draft is a live-selection receipt.
+The existing three-body production group below stays selected.
+
+Use the current operation/PR evidence and the execution procedure in
+[the receiving update runbook](docs/runbooks/tribu-sdk-successor.md).
+Do not reimplement completed controller stages, replay private trial scripts,
+repeat qualified source reviews, or prepare expiring fixture controls before a
+candidate is ready. Close the receiving/update/compatible rollback gap first;
+I/O, status integration and future-member admission remain in the full milestone.
+
 ## Current communication target — 2026-10-13
 
 CompAII, Eko and Oliva now use one signed membership group, demonstrated with

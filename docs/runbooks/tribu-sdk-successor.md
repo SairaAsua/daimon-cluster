@@ -1,8 +1,56 @@
-# Readable Tribu SDK successor
+# Receiver-compatible Matrix updates
 
-Parent: [Matrix #287](https://github.com/AlterMundi/daimon-matrix/issues/287).
-Rendering and signed presentation installation are owned by Matrix. Cluster
-selects the exact executable SDK and maintained helper on the existing bodies.
+Current coordination: [Matrix #336](https://github.com/AlterMundi/daimon-matrix/issues/336),
+[Cluster #232](https://github.com/nicoechaniz/daimon-cluster/issues/232).
+The original readable-presentation increment is retained under
+[Matrix #287](https://github.com/AlterMundi/daimon-matrix/issues/287).
+Matrix owns signed messaging and presentation; Cluster selects the exact
+executable SDK and receiving helpers on the existing bodies.
+
+## Efficient execution of one update
+
+Keep one current work record with the candidate, completed effects, reusable
+qualification and the next unresolved condition. Historical trial scripts and
+old checkpoints preserve evidence; they are not alternate deployment procedures.
+Use the maintained controllers below instead of composing another private
+sequence of root/owner lifecycle calls.
+
+| Maintained API | Evidence it owns |
+| --- | --- |
+| `prepare_sdk` / `preflight` | Exact artifacts, installed interpreter and compatible reader; no loaded/readiness claim |
+| `SourceBootstrapController` | Source journal, actual predecessor exit, preservation/publication and exact start/load recovery |
+| `prepare_guest_bootstrap` / `GuestBootstrapController.execute` | Guest preparation and one journal-owned root/owner lifecycle operation |
+| `CohortController` | Required receiver adoption, fresh roster/proof barrier and positive reader selection |
+
+Finish a coherent source correction before publishing it. Reuse valid source
+reviews and checks when the relevant bytes/contracts are unchanged; revisit only
+a material new contract, a concrete finding or an actual repository requirement.
+Run the selected affected tests once, retain their result and use one CI run for
+the consolidated candidate. Do not restart CI for intermediate notes or a plan.
+Unknown shared-code changes retain broader CI; a reviewed narrow change must be
+recognized by actual content and include its affected default callers.
+
+Freeze the executable candidate before creating a bounded qualification scenario.
+Prepare control capability lifetimes and the rollout's fresh authorization near
+the lifecycle operation, after builds/reviews/CI that can consume that lifetime.
+Do not extend expired frozen requests or turn a code-only update into a new
+identity/authority ceremony. Keep any expired fixture's history; a justified new
+synthetic fixture is separate evidence, never a successful retry of the old one.
+
+After a dispatched start, observe that same process and retained operation.
+A missing early socket, observation timeout or unavailable status is not proof
+that the service stopped, that adoption failed, or that a new start is permitted.
+Use bounded observation/recovery through the existing controller; do not repeat
+completed mutations or generate new IDs to obtain a favorable result. Obtain a
+specific safe refusal stage before changing the candidate in response to an
+unclassified error. Local CLIs support opt-in `--diagnostics` on candidates that
+advertise it; normal stdout and the original operation remain unchanged.
+
+Software qualification and live deployment are separate. Complete the current
+receiving update and compatible rollback before expanding unrelated roadmap work.
+Live communication-interrupting operations still require the prepared candidate,
+readiness/recovery and the human's scoped consent; every global Stop separately
+requires fresh explicit human consent. Efficiency does not remove these boundaries.
 
 ## Preserve the receiving context
 
@@ -38,7 +86,8 @@ An exact completed retry returns its original row; altered vectors, conflicting
 pending updates and degraded/compensated attempts cannot reopen effects. Apply
 and resume must use those retained vectors under actual selection/writer locks.
 Preparation itself does not select code, accept authority, load a receiver or
-enable egress; actual adapters and readiness/communication remain #232 work.
+enable egress. The maintained controllers own subsequent effects; their complete
+receiving/communication acceptance and live selection remain #232 work.
 
 `onboarding_receiving_update.preflight` consumes that operation's approved external
 Matrix release manifest and exact receiving-code digest. It verifies the manifest
@@ -129,9 +178,11 @@ only from the original base must not select an older human-facing consumer.
 No re-export, enrollment, identity rotation, bot replacement or reset of native
 stores follows from this SDK upgrade.
 
-Source keeps the exact installed VCS-commit guard; receiving bodies keep the
-hash-locked wheelhouse and installation receipt. Both use the same declared
-Matrix commit. The native peer helper preserves upstream provenance and qualified receiving
+The existing production Source VCS installation retains its exact commit guard.
+Qualified Source receiving candidates also support the closed wheelhouse and
+installation-receipt profile used by guest candidates. Each selected profile
+keeps its own verified provenance; do not report an unselected candidate as
+deployed. Corresponding sender/receiver selections use the declared Matrix commit. The native peer helper preserves upstream provenance and qualified receiving
 extensions, with its exact maintained hash; the owner-client installer retains
 its own independent artifact provenance. The installer's existing `--refresh-guidance-plan` changes
 planned instruction bytes without replacing the connection's command, channels,

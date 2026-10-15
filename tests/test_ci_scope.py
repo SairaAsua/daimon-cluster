@@ -584,3 +584,45 @@ def test_controlled_software_update_and_its_runbook_keep_receiving_coverage():
     assert 'tests/test_onboarding_group_authorities.py' in LOADED_STARTUP_TESTS
     assert select([*changed, 'clusterctl/onboarding_custody.py'], ROOT)[0] == 'full'
     assert select([*changed, 'docs/unclassified-contract.md'], ROOT)[0] == 'full'
+
+
+def test_reviewed_receiving_helpers_keep_scope_exact_and_qualify_default_callers(monkeypatch):
+    import hashlib
+    import subprocess
+    from tools import ci_scope
+    names = set(ci_scope.RECEIVING_SUPPORT_HASHES)
+    import re
+    originals = {name:(ROOT/name).read_text() for name in names}
+    name = 'clusterctl/being_seed.py'
+    originals[name] = originals[name].replace('def _locked(directory: Path, *, shared: bool = False):',
+        'def _locked(directory: Path):').replace('(fcntl.LOCK_SH if shared else fcntl.LOCK_EX)', 'fcntl.LOCK_EX')
+    name = 'clusterctl/onboarding.py'
+    originals[name] = re.sub(r'\n+# Explicit public operational codes only\..*?\ndef digest',
+        '\n\n\ndef digest', originals[name], flags=re.S)
+    name = 'tests/integration/test_recovery_rebirth_containers.py'
+    originals[name] = originals[name].replace('\nfrom clusterctl.matrix_host import MATRIX_CONTRACT_COMMIT\n', '').replace(
+        'MATRIX_COMMIT = MATRIX_CONTRACT_COMMIT', 'MATRIX_COMMIT = "4c64beac8fce816c2bd15abbcff005e842ff7a0c"')
+    originals = {name:source.encode() for name,source in originals.items()}
+    assert all(hashlib.sha256(data).hexdigest() == ci_scope.RECEIVING_SUPPORT_HASHES[name][0]
+               for name, data in originals.items())
+    def source(argv, **_kwargs):
+        name = argv[-1].split(':',1)[1]
+        return subprocess.CompletedProcess(argv,0,originals[name])
+    monkeypatch.setattr(ci_scope.subprocess,'run',source)
+    changed = sorted(ci_scope.LOADED_STARTUP_FILES | names | ci_scope.CI_FILES)
+    profile, tests = ci_scope.select(changed, ROOT, base='a'*40)
+    assert profile == 'peer'
+    assert set(ci_scope.LOADED_STARTUP_TESTS) <= set(tests)
+    assert 'tests/test_being_seed.py' in tests
+    assert ci_scope.select(changed, ROOT) != ('peer', tests)
+    for unrelated in ('clusterctl/onboarding_custody.py', 'requirements-weave.txt', 'unknown.py'):
+        assert ci_scope.select([*changed, unrelated], ROOT, base='a'*40) != ('peer', tests)
+    read_bytes = Path.read_bytes
+    for name in names:
+        with monkeypatch.context() as changed_byte:
+            changed_byte.setattr(Path,'read_bytes', lambda path:
+                read_bytes(path)+b'\n' if path == ROOT/name else read_bytes(path))
+            assert ci_scope.select(changed, ROOT, base='a'*40) != ('peer', tests)
+    monkeypatch.setattr(ci_scope.subprocess,'run',lambda argv, **_kwargs:
+        subprocess.CompletedProcess(argv,0,originals[argv[-1].split(':',1)[1]]+b'\n'))
+    assert ci_scope.select(changed, ROOT, base='a'*40) != ('peer', tests)
