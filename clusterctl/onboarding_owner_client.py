@@ -117,7 +117,8 @@ if payload['install']:
   exec(compile(chat['installer'],'<qualified-agent-chat-installer>','exec'),installer.__dict__)
   installer.install(argparse.Namespace(attachment=Path(chat['attachment']),socket=Path(chat['socket']),
    client_config=Path(chat['application'])/'client.json',client_key=Path(chat['application'])/'client.key',
-   incoming=chat.get('incoming_channels',['peer-in']),outgoing=chat.get('outgoing_channels',['peer-out']),hermes_home=None,skills_dir=None))
+   incoming=chat.get('incoming_channels',['peer-in']),outgoing=chat.get('outgoing_channels',['peer-out']),hermes_home=None,skills_dir=None,
+   register_codex_mcp=chat.get('codex_mcp',False)))
  for (path,data,mode),previous in zip(artifacts[:2],predecessors[:2]):publish(path,data,mode,previous)
 elif not all(present):
  print(json.dumps(dict(installed=False)));raise SystemExit(0)
@@ -146,6 +147,14 @@ if chat is not None:
  connection=json.loads(protected_read(attachment/'connection.json'))
  assert connection['command']==[sys.executable,'-I','-m','daimon_matrix.agent_chat','--binding',str(attachment/'binding.json')]
  assert connection['incoming_channels']==chat.get('incoming_channels',['peer-in'])
+ if chat.get('codex_mcp',False):
+  import tomllib
+  codex_config=Path(os.environ.get('CODEX_HOME',str(home/'.codex')))/'config.toml'
+  if not codex_config.exists():
+   print(json.dumps(dict(installed=False)));raise SystemExit(0)
+  role=tomllib.loads(protected_read(codex_config).decode()).get('mcp_servers',{}).get('matrix',{})
+  assert role.get('command')==connection['command'][0]
+  assert role.get('args')==connection['command'][1:]+['mcp'] and role.get('enabled',True) is True
  from daimon_matrix.mcp_server import MESSAGING_TOOL_CONTRACTS
  tools={tool['name']:tool for tool in connection['tools']}
  assert set(tools)=={'messaging_channels',*MESSAGING_TOOL_CONTRACTS}
@@ -245,7 +254,7 @@ class OwnerClient:
             )
             raw = onboarding_release.regular(installer, uid=0)
             expected_sha = (
-                "96e04442a343c59fd5036e6092ac1200f2afda52f33e86f72e438d616225446f"
+                "aaef1a28614722a1f52d4c32dbbd3add5f1abfcd6f766cfaf6b7cfa3073a9af9"
             )
             if hashlib.sha256(raw).hexdigest() != expected_sha:
                 raise OnboardingError("qualified_native_peer_tool_required")
@@ -257,6 +266,7 @@ class OwnerClient:
                     ("/runtime/tribe.sock" if group else "/runtime/peer.sock"),
                 installer=raw.decode(),
                 installer_sha256=expected_sha,
+                codex_mcp=True,
             )
             if group:
                 payload['chat'].update(incoming_channels=['tribe'], outgoing_channels=['tribe'])
@@ -264,14 +274,15 @@ class OwnerClient:
             payload["instructions"] += (
                 "\n# Native Matrix messaging\n\n"
                 f"The body-local connection is {attachment}/connection.json.\n"
-                "Read its command argv and append channels or call messaging_send, messaging_reply,\n"
-                "messaging_delivery or messaging_inbox only for the current human request.\n"
-                "Pass JSON parameters on stdin; preserve exact send_id and parameters across retries.\n"
+                "Use the registered native Matrix MCP messaging_send, messaging_reply,\n"
+                "messaging_delivery and messaging_inbox tools for human requests.\n"
+                "Missing native tools are an integration gap: report and repair it; do not silently use console messaging.\n"
+                "The connection command is for identified diagnosis/recovery. Preserve send_id and exact retry parameters.\n"
                 + ("Configured tribe is one membership group; every member participates without pair enrollment.\n"
                     if group else "This explicitly directed legacy attachment uses peer-in and peer-out.\n")
                 + "Require native receipts, not transport ACK or a claim that a model read.\n"
                 "Use the existing signed application and mandatory visibility. No direct Telegram fallback.\n"
-                "This manual helper starts no daemon, inbox polling, MCP service or model turn.\n"
+                "Native MCP registration starts no Matrix daemon, inbox polling or model turn.\n"
             )
         return payload
 

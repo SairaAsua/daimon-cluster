@@ -107,8 +107,9 @@ def invoke(payload):
     )
 
 
+@pytest.mark.parametrize("native_mcp", [False, True])
 def test_existing_owner_client_gains_native_peer_attachment_without_new_identity(
-    journey, tmp_path
+    journey, tmp_path, native_mcp, monkeypatch
 ):
     from hashlib import sha256
     from clusterctl import onboarding_peer
@@ -124,6 +125,27 @@ def test_existing_owner_client_gains_native_peer_attachment_without_new_identity
 
     _, sources, public, packet, _ = journey
     ceremony, target = sources[1]
+    if native_mcp:
+        # Emulate only the external Codex config-writer contract. Native Matrix
+        # authentication and the receiving-owner program remain real below.
+        codex_home = target.home / '.codex'
+        codex_home.mkdir(mode=0o700)
+        config = codex_home / 'config.toml'
+        config.write_text('model = "preserved"\n')
+        config.chmod(0o600)
+        binary = target.home / 'bin'
+        binary.mkdir(mode=0o700)
+        codex = binary / 'codex'
+        codex.write_text('#!'+sys.executable+'\n'+'''import sys,os,json
+from pathlib import Path
+assert sys.argv[1:5]==['mcp','add','matrix','--']
+p=Path(os.environ['CODEX_HOME'])/'config.toml'
+command=sys.argv[5:]
+p.write_text(p.read_text()+'\\n[mcp_servers.matrix]\\ncommand = '+json.dumps(command[0])+'\\nargs = '+json.dumps(command[1:])+'\\n')
+''')
+        codex.chmod(0o700)
+        monkeypatch.setenv('CODEX_HOME', str(codex_home))
+        monkeypatch.setenv('PATH', str(binary)+os.pathsep+os.environ['PATH'])
     sender = public[0]["document"]["authority"]["manifest"]["being_ref"]
     onboarding_peer.accept(target, packet, expected_being=sender)
     holder = ReceivingHolder(target)
@@ -200,6 +222,7 @@ def test_existing_owner_client_gains_native_peer_attachment_without_new_identity
             socket=str(root / "peer.sock"),
             installer=installer.decode(),
             installer_sha256=provenance["sha256"],
+            codex_mcp=native_mcp,
         ),
     }
     admitted = AdmittedDaemon(target, client)
@@ -229,6 +252,11 @@ def test_existing_owner_client_gains_native_peer_attachment_without_new_identity
         result = invoke(successor)
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout)["installed"] is True
+        if native_mcp:
+            import tomllib
+            configured = tomllib.loads(config.read_text())
+            assert configured['model']=='preserved'
+            assert configured['mcp_servers']['matrix']['args'][-1]=='mcp'
         assert (target.home / "Projects/being/AGENTS.md").read_text() == successor[
             "instructions"
         ]
