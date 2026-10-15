@@ -34,6 +34,11 @@ change, qualify the affected behavior and its integrated receiving path; do not
 repeat unaffected historical journeys or create a fresh fixture for each stage.
 Unknown shared-code deltas keep broader coverage. Correct a missing CI scope
 mapping when the existing selected job already exercises the changed contract.
+A content-verified literal SDK pin update combined with an already recognized
+receiving change composes their existing tests, including the full SDK contract.
+It does not trigger unrelated full-suite/physical workflows merely because both
+changes belong in one release. Executable drift in a pin file or unknown/sensitive
+remaining changes still selects broader coverage.
 
 On failure, inspect the exact controller stage, retained result and current
 process. Resume that operation through the maintained controller. A timeout
