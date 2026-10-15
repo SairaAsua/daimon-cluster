@@ -201,7 +201,7 @@ class Backend:
 
 
 class Application:
-    def __init__(self, config, authority, sessions, *, backends=None, passkey_rp_id=None, client_example=False, style_provider=None, auth_origin=None, google_client=None, homemaker_source=None, homemaker_state=None, homemaker_home=None):
+    def __init__(self, config, authority, sessions, *, backends=None, passkey_rp_id=None, client_example=False, style_provider=None, auth_origin=None, google_client=None, homemaker_source=None, homemaker_state=None, homemaker_home=None, homemaker_returns=()):
         self.styles = StyleConsumer(style_provider, authority, config["homes"]) if style_provider else None
         self.sso = None
         self.designs = None
@@ -244,6 +244,14 @@ class Application:
                 homemaker_home not in self.homes or not (homemaker_source and homemaker_state)):
             raise ValueError('invalid_canonical_homemaker_home')
         self.homemaker_home = homemaker_home
+        self.homemaker_returns = tuple(dict.fromkeys(
+            ([h['public_url'] + '/' for h in self.homes.values()] if homemaker_home else []) + list(homemaker_returns)))
+        for destination in self.homemaker_returns:
+            parsed = urlsplit(destination)
+            if (parsed.scheme != 'https' or parsed.username or parsed.password or
+                    parsed.netloc not in {urlsplit(h['public_url']).netloc for h in self.homes.values()} or
+                    any(ord(c) < 33 or c == '\\' for c in destination)):
+                raise ValueError('invalid_homemaker_return')
         if homemaker_source or homemaker_state:
             if not (homemaker_source and homemaker_state) or style_provider:
                 raise ValueError('one_canonical_homemaker_required')
@@ -1214,6 +1222,7 @@ def main():
     parser.add_argument('--homemaker-source', help='Qualified immutable Homemaker source and public build')
     parser.add_argument('--homemaker-state', help='Private canonical Homemaker design state')
     parser.add_argument('--homemaker-home', help='Registered home serving the owner-operated multi-pair application')
+    parser.add_argument('--homemaker-return', action='append', default=[], help='Additional exact registered consumer return URL')
     args = parser.parse_args()
     from daimon_matrix.messaging_config import protected_read
 
@@ -1230,7 +1239,7 @@ def main():
     app = Application(config, authority, sessions, passkey_rp_id=args.passkey_rp_id, client_example=args.client_example,
                       auth_origin=args.auth_origin, google_client=args.google_client,
                       homemaker_source=args.homemaker_source, homemaker_state=args.homemaker_state,
-                      homemaker_home=args.homemaker_home)
+                      homemaker_home=args.homemaker_home, homemaker_returns=args.homemaker_return)
     servers = [
         ThreadingHTTPServer(("127.0.0.1", config[key]), handler(app, owner=owner))
         for key, owner in (("viewer_port", False), ("owner_port", True))
