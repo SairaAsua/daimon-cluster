@@ -96,9 +96,11 @@ def test_actual_http_routes_preserve_origin_and_current_reader_boundaries(system
         for path in ('/apps/catalog.json','/apps/launcher.js'):
             with pytest.raises(HTTPError) as denied:get(path,Origin='https://other.example.test')
             assert denied.value.code==404
+            denied.value.close()
         for path in ('/apps/private.json','/apps/../registry.py','/apps/%2e%2e/registry.py'):
             with pytest.raises(HTTPError) as denied:get(path)
             assert denied.value.code==404
+            denied.value.close()
 
 
 def test_launcher_appearance_has_its_own_canonical_surface_without_new_store(system):
