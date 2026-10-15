@@ -2071,8 +2071,7 @@ class CohortController:
                     expected_head=gate['head'], operation_id=control_id, release_digest=release,
                     phase='revoke', readers=[])
                 path = owner.root / 'receiving-control' / (control_id + '-revoke.json')
-                owner.prepare_control(command, path)
-                result = owner.apply_control(path)
+                result = owner.prepare_apply_control(command, path)
                 row = self._record(row, name, result)
             return self.require_revocation_barrier()
 
@@ -2461,8 +2460,7 @@ class CohortController:
                     or replacement['exit_sha256'] != digest(exited)):
                 raise OnboardingError('receiving_sender_replacement_changed')
             path = owner.root / 'receiving-control' / (control_id + '-replacement-revoke.json')
-            owner.prepare_control(replacement['command'], path)
-            result = owner.apply_control(path)
+            result = owner.prepare_apply_control(replacement['command'], path)
             accepted = {key: result[key] for key in ('server', 'process', 'gate', 'request_sha256', 'command_sha256')}
             if (accepted['process'] != replacement['process'] or accepted['server'] != replacement['server']
                     or accepted['gate'].get('phase') != 'revoke' or accepted['gate'].get('readers') != []
@@ -2576,8 +2574,7 @@ class CohortController:
             try:
                 if repair['state'] == 'prepared':
                     path = owner.root / 'receiving-control' / (repair_id + '-revoke.json')
-                    owner.prepare_control(repair['command'], path)
-                    result = owner.apply_control(path)
+                    result = owner.prepare_apply_control(repair['command'], path)
                     if (result['process'] != repair['process'] or result['server'] != repair['server']
                             or result['gate'].get('phase') != 'revoke' or result['gate'].get('readers') != []
                             or result['gate'].get('operation_id') != repair_id
@@ -2595,8 +2592,7 @@ class CohortController:
                 # forward instead of being trapped behind this failed one.
                 clear = {**repair['command'], 'expected_head': repair['revoke_gate']['head'], 'phase': 'select'}
                 path = owner.root / 'receiving-control' / (repair_id + '-clear.json')
-                owner.prepare_control(clear, path)
-                result = owner.apply_control(path)
+                result = owner.prepare_apply_control(clear, path)
                 if (result['process'] != repair['process'] or result['server'] != repair['server']
                         or result['gate'].get('phase') != 'select' or result['gate'].get('readers') != []
                         or result['gate'].get('operation_id') != repair['command']['operation_id']

@@ -334,6 +334,11 @@ personal guidance and every optional native setting, including disabled intent.
 Use the supported native config writer for command/args only and the qualified
 closed SDK launcher. Prepare expensive catalog work before the receiver freshness
 round; retain bound evidence and check drift rather than repeating cold discovery.
+Use `prepare_apply_control` for revoke, replacement, selection and repair controls.
+They retain the same durable request under one owner lock. Splitting preparation
+and application across cold qualified owner processes can age a new request beyond
+its native authentication window before its first dispatch; do not increase that
+window or regenerate an uncertain request to conceal the delay.
 `config/mcpServer/reload` refreshes only the addressed App Server's threads.
 A fresh config-only catalog probe cannot prove existing sessions reloaded.
 Keep unavailable native-instance routes explicit; neither console fallback nor
