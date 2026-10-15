@@ -492,6 +492,14 @@ def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list
         return 'docs', []
     if set(changed) <= CI_FILES | RUNBOOK_DOCS:
         return 'ci', ['tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    if ({'clusterctl/onboarding_code_successor.py', 'tests/test_onboarding_code_successor.py'} <= set(changed)
+            and set(changed) <= {'clusterctl/onboarding_code_successor.py',
+                'tests/test_onboarding_code_successor.py'} | CI_FILES | RUNBOOK_DOCS
+            and all((root / path.split('::', 1)[0]).is_file() for path in UPDATE_SELECTION_TESTS)):
+        # Retained generation interpretation keeps SDK bytes, context, journal,
+        # actual receiving launchers and host selectors. No dependency, custody,
+        # archive or physical recovery implementation changed.
+        return 'update-selection', list(UPDATE_SELECTION_TESTS)
     if ({'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_host_selection.py'} <= set(changed)
             and set(changed) <= HOST_SELECTION_FILES | CI_FILES
             and all((root / path).is_file() for path in HOST_SELECTION_TESTS)):

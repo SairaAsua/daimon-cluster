@@ -123,6 +123,18 @@ def test_receiving_selection_keeps_actual_native_startup_and_unit_recovery(tmp_p
         assert select([*changed, other], ROOT)[0] != 'update-selection'
 
 
+def test_retained_generation_changes_keep_receiving_coverage_without_physical_jobs(tmp_path):
+    from tools.ci_scope import UPDATE_SELECTION_TESTS
+    changed = ['clusterctl/onboarding_code_successor.py',
+        'tests/test_onboarding_code_successor.py', 'RESUME.md',
+        'tools/ci_scope.py', 'tests/test_ci_scope.py']
+    assert select(changed, ROOT) == ('update-selection', list(UPDATE_SELECTION_TESTS))
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    for other in ('clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_custody.py',
+                  'requirements-weave.txt', 'clusterctl/production_fences.py', 'unknown.py'):
+        assert select([*changed, other], ROOT)[0] != 'update-selection'
+
+
 def test_sdk_bootstrap_keeps_exact_install_and_successor_contracts(tmp_path):
     from tools.ci_scope import SDK_BOOTSTRAP_FILES, SDK_BOOTSTRAP_TESTS
     changed = sorted(SDK_BOOTSTRAP_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py'})
