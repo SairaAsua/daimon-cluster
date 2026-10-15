@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="es" data-style-policy="inherit" data-style-surface="apps">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <title>DaimonMatrix · Apps</title>
+  <link rel="stylesheet" href="/apps/launcher.css">
+  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+  <script src="/home-style.js" defer></script>
+  <script src="/apps/launcher.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <svg class="mark" viewBox="0 0 48 48" fill="none" aria-hidden="true"><circle cx="24" cy="24" r="16"/><ellipse cx="24" cy="24" rx="22" ry="8" transform="rotate(-35 24 24)"/><path d="M5 25c6-14 10 14 17 0s11 14 21-2"/></svg>
+    <div><h1>DaimonMatrix</h1><p>Un espacio, muchas posibilidades.</p></div>
+    <button id="refresh" class="icon-button" aria-label="Actualizar aplicaciones" title="Actualizar">↻</button>
+  </header>
+  <main>
+    <div class="toolbar">
+      <label class="search"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="search" type="search" placeholder="Buscar una app" aria-label="Buscar aplicaciones" autocomplete="off"></label>
+      <button id="favorites" class="filter" aria-pressed="false">☆ <span>Favoritas</span></button>
+    </div>
+    <div class="section-line"><h2>Tus aplicaciones</h2><span id="count" aria-live="polite"></span></div>
+    <p id="notice" class="notice" role="status">Cargando aplicaciones…</p>
+    <ul id="apps" class="apps" aria-label="Aplicaciones"></ul>
+    <p id="empty" class="empty" hidden></p>
+    <footer><span class="style-note">Apariencia de Homemaker</span><a href="/homemaker/miniapp.html">Elegir estilo <span aria-hidden="true">↗</span></a></footer>
+  </main>
+</body>
+</html>

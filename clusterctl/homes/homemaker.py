@@ -82,7 +82,7 @@ class Homemaker:
                           {key:value for key,value in payload.items() if key != 'audience'})
 
     def surface(self, home, value):
-        if value in ('default', 'home', 'homemaker'):
+        if value in ('default', 'home', 'homemaker', 'apps'):
             return value
         if not isinstance(value, str) or not any(
                 entry['artifact_ref'] == value for entry in self.app.publication(home)['entries']):
