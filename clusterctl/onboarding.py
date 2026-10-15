@@ -66,6 +66,42 @@ class OnboardingError(ValueError):
     """Disclosure-safe worker refusal."""
 
 
+
+# Explicit public operational codes only. Exception strings, paths, payloads and
+# unknown future codes never become CLI diagnostics by matching a text pattern.
+_DIAGNOSTIC_CODES = frozenset({
+    'seed_operation_in_progress', 'qualified_runtime_module_required',
+    'qualified_runtime_imports_required', 'qualified_runtime_context_required',
+    'qualified_receiving_interpreter_required', 'private_onboarding_sdk_required',
+    'installed_onboarding_sdk_changed', 'onboarding_sdk_digest_mismatch',
+    'native_onboarding_sdk_refused', 'onboarding_observation_deadline_expired',
+    'onboarding_observation_deadline_exceeded', 'onboarding_runtime_not_ready',
+    'onboarding_admission_not_current', 'onboarding_daemon_origin_conflict',
+    'onboarding_daemon_responder_conflict', 'onboarding_loaded_base_conflict',
+    'qualified_onboarding_loaded_view_required', 'onboarding_service_operation_failed',
+    'existing_onboarding_service_preserved', 'receiving_controller_loaded_bundle_conflict',
+    'receiving_preservation_authorization_expired', 'receiving_matrix_deadline_expired',
+    'onboarding_runtime_channel_closed',
+    'onboarding_runtime_observation_unavailable', 'receiving_guest_bootstrap_identity_required',
+})
+
+
+def refusal_diagnostic(error: Exception, *, stage: str) -> dict:
+    """Opt-in local CLI detail; never serialize arbitrary exception contents."""
+    code = 'unclassified_refusal'
+    if isinstance(error, (OnboardingError, being_seed.SeedError)):
+        candidate = str(error)
+        if candidate in _DIAGNOSTIC_CODES:
+            code = candidate
+    elif isinstance(error, FileNotFoundError):
+        code = 'local_input_or_socket_missing'
+    elif isinstance(error, PermissionError):
+        code = 'local_access_refused'
+    elif isinstance(error, TimeoutError):
+        code = 'local_operation_timed_out'
+    return dict(schema='cluster-onboarding-refusal/v1', stage=stage, code=code)
+
+
 def digest(value: dict) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 

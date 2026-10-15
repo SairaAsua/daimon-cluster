@@ -546,6 +546,19 @@ source and receiving inventory. Contradictory files or changed source intent
 remain preserved and refused. One bad intake does not block other selected
 pairs, and an existing progress record exposes its verification failure.
 
+## Local receiving refusal diagnostics
+
+The receiving-owner `onboarding_target` CLI and public-root `onboarding_service`
+CLI accept `--diagnostics` for maintenance diagnosis. Their normal stdout,
+exit status and lifecycle behavior stay unchanged. On refusal, the selected
+option adds one bounded `cluster-onboarding-refusal/v1` JSON record to stderr,
+with the observed stage and an explicitly allowed operational code. Unknown
+errors remain unclassified; arbitrary exception strings, request contents,
+private paths, credentials and tracebacks are never included. A diagnostic is
+not a delivery receipt or permission to replay a partially completed operation.
+Older installed code must not be given this optional flag; select the exact
+candidate CLI that advertises it.
+
 ## Access readiness and real owner acceptance
 
 The access stage distinguishes `ssh_ready` from `ssh_verified`. An observed

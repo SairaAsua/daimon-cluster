@@ -14,6 +14,7 @@ import uuid
 
 import pytest
 
+from clusterctl import being_seed
 from clusterctl import onboarding_receiving_update as receiving_update
 from clusterctl.onboarding import OnboardingError, digest
 from clusterctl.onboarding_receiving_update import GuestOwnerBootstrap
@@ -519,3 +520,52 @@ def test_preservation_requires_outer_runtime_binding_before_owner_effects(preser
     request['runtime_sha256'] = 'f' * 64
     with pytest.raises(OnboardingError, match='request_required'):
         GuestOwnerBootstrap(target, request)
+
+
+@pytest.mark.parametrize('module_name', ['onboarding_target', 'onboarding_service'])
+@pytest.mark.parametrize('error, code', [
+    (OnboardingError('qualified_runtime_imports_required'), 'qualified_runtime_imports_required'),
+    (being_seed.SeedError('seed_operation_in_progress'), 'seed_operation_in_progress'),
+    (OnboardingError('SYNTHETIC_PRIVATE_PAYLOAD'), 'unclassified_refusal'),
+    (ValueError('qualified_runtime_imports_required'), 'unclassified_refusal'),
+    (FileNotFoundError(2, 'SYNTHETIC_PRIVATE_PAYLOAD', '/private/synthetic-path'), 'local_input_or_socket_missing'),
+])
+def test_cli_diagnostics_are_opt_in_bounded_and_never_echo_private_exceptions(monkeypatch, capsys, module_name, error, code):
+    import importlib
+    module = importlib.import_module('clusterctl.'+module_name)
+    def refuse(_value):
+        raise error
+    monkeypatch.setattr(module, 'validate_plan', refuse)
+    if module_name == 'onboarding_target':
+        monkeypatch.setattr(being_seed, '_read', lambda *_args, **_kwargs:{})
+        arguments = ['observe', '--home', '/unused', '--genesis', '/unused/genesis']
+        expected = {'error':'native_onboarding_target_refused'}
+    else:
+        monkeypatch.setattr(module.onboarding_release, 'regular', lambda *_args, **_kwargs:b'{}')
+        arguments = []
+        expected = {'installed':False, 'error':'onboarding_service_operation_failed'}
+    arguments += ['--code', '/unused/code', '--plan', '/unused/plan']
+    assert module.main(arguments) == 1
+    normal = capsys.readouterr()
+    assert json.loads(normal.out) == expected and normal.err == ''
+    assert module.main([*arguments, '--diagnostics']) == 1
+    detailed = capsys.readouterr()
+    assert json.loads(detailed.out) == expected
+    assert json.loads(detailed.err) == dict(schema='cluster-onboarding-refusal/v1', stage='public-release', code=code)
+    assert 'SYNTHETIC_PRIVATE_PAYLOAD' not in detailed.err and '/private/' not in detailed.err
+
+
+def test_explicit_sdk_observe_refusal_reports_sdk_stage(monkeypatch, capsys):
+    from clusterctl import onboarding_target
+    monkeypatch.setattr(being_seed, '_read', lambda *_args, **_kwargs:{})
+    monkeypatch.setattr(onboarding_target, 'validate_plan', lambda _value:{'release_digest':'a'*64})
+    monkeypatch.setattr(onboarding_target.onboarding_code_successor, 'selection', lambda *_args, **_kwargs:Path('/unused/code'))
+    monkeypatch.setattr(onboarding_target.onboarding_code_successor, 'sdk_parameters', lambda *_args:{})
+    def refuse(*_args, **_kwargs):
+        raise OnboardingError('installed_onboarding_sdk_changed')
+    monkeypatch.setattr(onboarding_target.onboarding_sdk, 'observe', refuse)
+    assert onboarding_target.main(['sdk-observe','--diagnostics','--home','/unused',
+        '--code','/unused/code','--plan','/unused/plan','--genesis','/unused/genesis']) == 1
+    result = capsys.readouterr()
+    assert json.loads(result.err)['stage'] == 'sdk-observation'
+    assert json.loads(result.err)['code'] == 'installed_onboarding_sdk_changed'

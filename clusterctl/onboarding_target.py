@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Iterator
 
 from . import being_seed, onboarding_code_successor, onboarding_release, onboarding_sdk
-from .onboarding import OnboardingError, digest, private_directory, validate_plan
+from .onboarding import OnboardingError, digest, private_directory, refusal_diagnostic, validate_plan
 
 
 def document(path: Path) -> dict:
@@ -633,6 +633,7 @@ class Target:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "receiving-control-prepare", "receiving-control-apply", "receiving-identity", "receiving-bootstrap-freeze", "receiving-bootstrap-stage", "receiving-bootstrap-publish"))
+    parser.add_argument("--diagnostics", action="store_true", help="write bounded nonsecret refusal detail to stderr")
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--genesis", type=Path, required=True)
@@ -661,6 +662,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--bootstrap-ready-sha256')
     parser.add_argument('--bootstrap-timeout-seconds', type=float)
     args = parser.parse_args(argv)
+    stage = 'arguments'
     try:
         controlling = args.action in {'receiving-control-prepare', 'receiving-control-apply'}
         identity_query = args.action == 'receiving-identity'
@@ -698,6 +700,7 @@ def main(argv: list[str] | None = None) -> int:
                 or not controlling and (args.control_file is not None or args.control_command is not None)
                 or controlling and args.ready_fd is not None):
             raise OnboardingError('invalid_receiving_control_request')
+        stage = 'public-release'
         plan = validate_plan(being_seed._read(args.plan))
         runtime = onboarding_code_successor.selection(args.runtime_code, args.runtime_digest,
             args.code, plan['release_digest'], uid=0)
@@ -706,10 +709,12 @@ def main(argv: list[str] | None = None) -> int:
             raise OnboardingError('qualified_onboarding_target_observer_required')
         matrix_commit = sdk_parameters.get('matrix_commit', onboarding_sdk.MATRIX_COMMIT)
         if args.action == 'sdk-prepare':
+            stage = 'sdk-preparation'
             onboarding_sdk.install(args.home, runtime, args.runtime_digest or plan['release_digest'], **sdk_parameters)
             print(json.dumps(dict(ready=True, matrix_commit=matrix_commit)))
             return 0
         if args.action == 'sdk-observe':
+            stage = 'sdk-observation'
             try:
                 onboarding_sdk.observe(args.home, runtime, **sdk_parameters)
                 ready = True
@@ -717,6 +722,7 @@ def main(argv: list[str] | None = None) -> int:
                 ready = False
             print(json.dumps(dict(ready=ready, matrix_commit=matrix_commit)))
             return 0
+        stage = 'sdk-observation'
         venv = onboarding_sdk.observe(args.home, runtime, **sdk_parameters)
         imports = venv.parent / 'runtime-imports' if sdk_parameters else None
         qualified_context = (imports is not None
@@ -730,6 +736,7 @@ def main(argv: list[str] | None = None) -> int:
                 # time must consume this budget rather than reset its duration.
                 arguments += ['--observation-deadline-ns', str(observation_deadline_ns)]
             if sdk_parameters:
+                stage = 'sdk-imports'
                 imports = onboarding_sdk.runtime_imports(venv, runtime, **sdk_parameters)
                 command = onboarding_sdk.runtime_command(venv, imports, runtime,
                     'clusterctl.onboarding_target', arguments)
@@ -739,14 +746,17 @@ def main(argv: list[str] | None = None) -> int:
                 command = [str(venv / "bin/python"), "-B", "-I", "-c", launcher,
                            str(runtime), *arguments]
             os.execv(venv / "bin/python", command)
+        stage = 'sdk-startup'
         startup = (onboarding_sdk.qualified_startup(venv, runtime,
             code_digest=args.runtime_digest or plan['release_digest'], **sdk_parameters)
             if sdk_parameters else None)
+        stage = 'owner-action'
         target = Target(args.home, plan, document(args.genesis), code=runtime,
             code_digest=args.runtime_digest or plan['release_digest'], qualified_startup=startup)
         if bootstrapping:
             from .onboarding_receiving_update import GuestOwnerBootstrap, freeze_guest_bootstrap
             deadline_ns = time.monotonic_ns() + int(args.bootstrap_timeout_seconds * 1_000_000_000)
+            stage = args.action
             if args.action == 'receiving-bootstrap-freeze':
                 result = freeze_guest_bootstrap(target, deadline_ns=deadline_ns)
             else:
@@ -799,6 +809,7 @@ def main(argv: list[str] | None = None) -> int:
             return target.serve(receive_only=args.receive_only, visibility_installation=args.visibility_installation,
                                 ready_descriptor=args.ready_fd)
         if args.action in {"running", "admitted-running"}:
+            stage = 'native-observation'
             print(json.dumps(target.running(admitted=args.action == 'admitted-running',
                 require_loaded=args.require_loaded,
                 deadline_ns=observation_deadline_ns)))
@@ -830,7 +841,9 @@ def main(argv: list[str] | None = None) -> int:
             result["request"] = target.credential_request()
         print(json.dumps(result))
         return 0
-    except Exception:
+    except Exception as error:
+        if args.diagnostics:
+            print(json.dumps(refusal_diagnostic(error, stage=stage)), file=sys.stderr)
         print(json.dumps({"error": "native_onboarding_target_refused"}))
         return 1
 

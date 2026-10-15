@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -17,7 +18,7 @@ from pathlib import Path
 from collections.abc import Callable
 
 from . import being_seed, onboarding_code_successor, onboarding_release
-from .onboarding import OnboardingError, private_directory, validate_plan
+from .onboarding import OnboardingError, private_directory, refusal_diagnostic, validate_plan
 
 UNIT = 'daimon-onboarding-matrix.service'
 _selection_owners = threading.local()
@@ -705,6 +706,7 @@ def _run(argv: list[str]) -> None:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--diagnostics', action='store_true', help='write bounded nonsecret refusal detail to stderr')
     parser.add_argument('--code', type=Path, required=True)
     parser.add_argument('--plan', type=Path, required=True)
     parser.add_argument('--runtime-code', type=Path)
@@ -719,6 +721,7 @@ def main(argv=None) -> int:
     selection.add_argument('--receive-only', action='store_true')
     selection.add_argument('--visibility-installation', type=Path)
     args = parser.parse_args(argv)
+    stage = 'public-release'
     try:
         plan = validate_plan(json.loads(onboarding_release.regular(args.plan, uid=1000)))
         onboarding_code_successor.selection(args.runtime_code, args.runtime_digest, args.code,
@@ -729,6 +732,7 @@ def main(argv=None) -> int:
                 and args.runtime_code != Path('/opt/daimon-onboarding-runtime') / args.runtime_digest):
             raise OnboardingError('qualified_guest_service_required')
         if args.action != 'install':
+            stage = args.action
             if (not math.isfinite(args.timeout_seconds) or not 0 < args.timeout_seconds <= 60
                     or args.receive_only or args.visibility_installation is not None or args.messaging_application is not None):
                 raise OnboardingError('receiving_guest_service_request_required')
@@ -753,10 +757,13 @@ def main(argv=None) -> int:
             return 0
         if args.bootstrap_request_json is not None or args.owner_observation_json is not None:
             raise OnboardingError('receiving_guest_service_request_required')
+        stage = 'service-installation'
         install(args.code, receive_only=args.receive_only, visibility=args.visibility_installation,
                 runtime_code=args.runtime_code, runtime_digest=args.runtime_digest, messaging_application=args.messaging_application)
         print(json.dumps(dict(installed=True)))
         return 0
-    except (OSError, ValueError, TypeError, KeyError, OnboardingError):
+    except (OSError, ValueError, TypeError, KeyError, OnboardingError) as error:
+        if args.diagnostics:
+            print(json.dumps(refusal_diagnostic(error, stage=stage)), file=sys.stderr)
         print(json.dumps(dict(installed=False, error='onboarding_service_operation_failed')))
         return 1
