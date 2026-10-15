@@ -599,3 +599,28 @@ After accepted membership/governance changes, recovery finishes forward through
 compatible group artifacts. Old terminated memberships/grants and archived pair
 defaults are not an operational rollback. Historical messages remain readable;
 exact expired retries return their retained outcome without new transmission.
+
+### Public authority histories for future group admission
+
+The source reader also accepts `cluster-onboarding-group-selection/v2`. It adds
+`authority_history` to the existing owner-signed selection, retaining its exact
+application digest, Tribe, paths and socket. This is a public per-being history
+map: its keys must be exactly the foreign Roots in the signed application. The
+current body's own Root/history remains in its native bundle. Each value uses
+Matrix's bounded public history format, ending at that application's exact
+current Root; the existing SDK validator checks every signed succession.
+
+The same public selection reader is used for observation, Source loading and
+guest startup. It validates the closure before opening private custody. Existing
+native known-being histories are compared and retained, not replaced with a
+current snapshot or truncated supplied chain. Missing/extra Roots, forged or
+oversized histories, and mismatched application pins are refused. V1 remains
+readable with its original current-snapshot behavior; a V2 selection requires
+the SDK public-history reader from Matrix #358 and fails explicitly without it.
+
+This reader does not publish a selection, authorize a member, import a foreign
+ledger or copy past conversation plaintext. It changes no production selection.
+Cluster #227 still owns the retained owner requests, additive publication/CAS,
+distinct before/after receiving cohorts, first managed start and integrated
+admission qualification. The prepared2144 update is a separate immutable
+candidate; this future-admission source does not replace it.

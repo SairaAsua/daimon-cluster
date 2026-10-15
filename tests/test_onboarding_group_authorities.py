@@ -1,4 +1,5 @@
 """Owner-signed group Root closure is independent of bilateral enrollment."""
+import copy
 import hashlib
 import os
 import time
@@ -23,11 +24,18 @@ def group_source(tmp_path):
     from daimon_matrix.relationships import DECLARATION_SCHEMA, relationship_event_subject, tribe_ref
 
     targets = []
+    old_peer_event = None
     for name in ('owner', 'candidate'):
         location = tmp_path / name
         location.mkdir(mode=0o700)
         ceremony, plan, target = receiving(location)
         target.activate(ceremony.authorize_target(plan, target.prepare()))
+        if name == 'candidate':
+            from clusterctl.onboarding_peer import loaded
+            previous = loaded(target)
+            old_peer_event = previous.service.ledger.append_local(kind='experience.observed',
+                subject='public group-history qualification', payload={'summary': 'public historical proof'},
+                signer=previous.service.signer, sensitivity='shareable', occurred_at_ms=time.time_ns() // 1000000)
         target.apply_credential(ceremony.authorize_credential(plan, target.credential_request()))
         targets.append(target)
     target, peer = targets
@@ -84,11 +92,11 @@ def group_source(tmp_path):
     source = Source(dict(schema='cluster-onboarding-source/v1', runtime_root=str(base.state_root),
         password_file=str(target.root / 'body.unlock'), native_visibility=str(outputs / 'unused-visibility.json'),
         outputs=str(outputs), applications=[]))
-    return source, target, peer_authority
+    return source, target, peer_authority, peer_bundle, old_peer_event
 
 
 def test_source_resolves_group_authority_without_native_pair_enrollment(group_source):
-    source, target, peer = group_source
+    source, target, peer, *_ = group_source
     before = {name:(source.root/name).read_bytes() for name in ('runtime.json','custody.json')}
     assert target.document_bundle()['sources']['known_beings'] == []
     loaded = source._load(signed=False)
@@ -97,7 +105,7 @@ def test_source_resolves_group_authority_without_native_pair_enrollment(group_so
 
 
 def test_unselected_group_does_not_extend_native_authority(group_source):
-    source, _target, peer = group_source
+    source, _target, peer, *_ = group_source
     (source.outputs / 'tribe/selection.json').unlink()
     loaded = source._load(signed=False)
     with pytest.raises(KeyError):
@@ -105,7 +113,7 @@ def test_unselected_group_does_not_extend_native_authority(group_source):
 
 
 def test_tampered_group_is_refused_before_private_custody(group_source, monkeypatch):
-    source, _target, _peer = group_source
+    source, _target, _peer, *_ = group_source
     selection = source.outputs / 'tribe/selection.json'
     value = being_seed._read(selection)
     value['document']['tribe_ref'] += 'tampered'
@@ -113,3 +121,92 @@ def test_tampered_group_is_refused_before_private_custody(group_source, monkeypa
     monkeypatch.setattr(source, '_reader', lambda: pytest.fail('tampered group opened private custody'))
     with pytest.raises(Exception, match='binding|group'):
         source._load(signed=False)
+
+
+def history_selection(source, peer_bundle):
+    from daimon_matrix.messaging_config import create_binding
+    selected = source.outputs / 'tribe/selection.json'
+    base = source._load(signed=False)
+    document = being_seed._read(selected)['document']
+    document.update(schema='cluster-onboarding-group-selection/v2', authority_history={
+        peer_bundle['manifest']['being_ref']: copy.deepcopy(peer_bundle['authority_history'])})
+    return selected, base, document, create_binding
+
+
+def test_signed_history_selector_loads_historical_proof_without_pair_or_foreign_store(group_source):
+    from daimon_matrix.authority_epochs import RootHistoryAuthority
+    from daimon_matrix.weave import verify_event
+    from clusterctl.onboarding_peer import _group_selection_from_bundle
+
+    source, target, peer, peer_bundle, old_event = group_source
+    assert peer_bundle['authority_history']
+    with pytest.raises(ValueError):
+        verify_event(old_event, peer)
+    before = {name: (source.root / name).read_bytes() for name in ('runtime.json', 'custody.json')}
+    old_peer_files = set(source.root.glob('peer-*.sqlite'))
+    selected, base, document, sign = history_selection(source, peer_bundle)
+    being_seed._write(selected, dict(document=document, binding=sign(base, document)))
+    recovered = source._load(signed=False)
+    history = recovered.service.relationships.store.authority_resolver(peer.manifest.being_ref)
+    assert isinstance(history, RootHistoryAuthority) and history.active == peer
+    verify_event(old_event, history)
+    assert _group_selection_from_bundle(source.outputs / 'tribe', target.document_bundle()) == document
+    assert target.document_bundle()['sources']['known_beings'] == []
+    assert {name: (source.root / name).read_bytes() for name in before} == before
+    assert set(source.root.glob('peer-*.sqlite')) == old_peer_files
+
+
+def test_invalid_history_selector_is_refused_before_private_custody(group_source, monkeypatch):
+    source, target, _peer, peer_bundle, _old_event = group_source
+    selected, base, document, sign = history_selection(source, peer_bundle)
+    peer_ref = peer_bundle['manifest']['being_ref']
+    cases = []
+    missing = copy.deepcopy(document)
+    missing['authority_history'] = {}
+    cases.append(missing)
+    own = copy.deepcopy(document)
+    own['authority_history'][target.document_bundle()['manifest']['being_ref']] = []
+    cases.append(own)
+    forged = copy.deepcopy(document)
+    forged['authority_history'][peer_ref][0]['successor']['acceptance']['value'] = 'A' * 86
+    cases.append(forged)
+    wrong_app = copy.deepcopy(document)
+    wrong_app['application_sha256'] = 'a' * 64
+    cases.append(wrong_app)
+    legacy = copy.deepcopy(document)
+    legacy['schema'] = 'cluster-onboarding-group-selection/v1'
+    cases.append(legacy)
+    monkeypatch.setattr(source, '_reader', lambda: pytest.fail('invalid public history opened private custody'))
+    for candidate in cases:
+        being_seed._write(selected, dict(document=candidate, binding=sign(base, candidate)))
+        with pytest.raises(Exception, match='binding|group'):
+            source._load(signed=False)
+    from daimon_matrix import operator_messaging
+    being_seed._write(selected, dict(document=document, binding=sign(base, document)))
+    monkeypatch.setattr(operator_messaging, 'public_authority_history', None)
+    with pytest.raises(Exception, match='onboarding_group_history_sdk_required'):
+        source._load(signed=False)
+
+
+def test_history_reader_preserves_the_provided_native_chain_and_rejects_truncation(group_source):
+    from clusterctl.onboarding import OnboardingError
+    from clusterctl.onboarding_peer import approved_group_authorities
+
+    source, target, peer, peer_bundle, _old_event = group_source
+    selected, base, document, sign = history_selection(source, peer_bundle)
+    being_seed._write(selected, dict(document=document, binding=sign(base, document)))
+    # Exercise the public native-bundle guard with the genuine peer epochs.
+    # No foreign ledger or augmented runtime is created by this reader test.
+    native = target.document_bundle()
+    native['sources']['known_beings'] = [{**{key: peer_bundle[key] for key in (
+        'manifest', 'control_artifacts', 'control_head', 'credentials', 'incarnations', 'authority_history')},
+        'ledger_filename': 'historical-peer.sqlite'}]
+    before = (source.root / 'runtime.json').read_bytes()
+    accepted = approved_group_authorities(source.root, source.outputs / 'tribe', native)
+    assert len(accepted[peer.manifest.being_ref].historical) == len(peer_bundle['authority_history'])
+    document['authority_history'][peer.manifest.being_ref] = []
+    being_seed._write(selected, dict(document=document, binding=sign(base, document)))
+    with pytest.raises(OnboardingError, match='approved_onboarding_group_history_conflict'):
+        approved_group_authorities(source.root, source.outputs / 'tribe', native)
+    assert (source.root / 'runtime.json').read_bytes() == before
+    assert not (source.root / 'historical-peer.sqlite').exists()
