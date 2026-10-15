@@ -47,11 +47,23 @@ Use the selected SDK for both the observer and receiver; validate that binding
 before lifecycle effects. Keep lifecycle journals on their actual owners.
 Root reads Source lifecycle proof through `SourceGroupClient(lifecycle_journal=...)`
 and its existing owner CLI/UID drop, never a copied journal row or private custody.
+Within one activation invocation, the controller reuses that exact owner/recipe's
+retained lifecycle projection; another invocation reads it again. Live process,
+identity, admission, roster and credential validity are still observed each round.
+A completed selection retry compares the gate already returned by the same
+qualified all-required observation, avoiding another cold status helper per body.
+Neither reuse extends the observation window or caches receiving readiness.
 
 Prepare expiring fixture controls immediately before their use. If an unrelated
 urgent repair intervenes, preserve the scenario and completed effects instead
 of discarding them. Do not extend an expired frozen authorization; recover using
 the supported procedure for the exact retained state, not a new birth ceremony.
+Own a finite synthetic admission producer and its named synthetic native unit in
+the same qualification scope. Stop that unit before retiring the producer; on
+interruption reconcile and close the unit as part of the same cleanup. Leaving
+its production-style restart policy running without admission repeatedly starts
+expensive SDK qualification. Preserve fixture files and receipts; this cleanup
+never means stopping real bodies or discarding an uncertain operation.
 
 Before a real communication-interrupting operation, prepare its exact candidate,
 required receiver readiness and recovery, and obtain scoped human authorization.

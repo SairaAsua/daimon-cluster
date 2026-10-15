@@ -456,9 +456,19 @@ def test_source_cohort_uses_owner_lifecycle_for_adoption_and_replacement(tmp_pat
         assert operation_id not in foreign, 'root coordinator attempted owner journal lookup'
         return local_get(operation_id)
     monkeypatch.setattr(journal, 'get', root_get)
-    controller.activate()
+    first = controller.activate()
     assert set(name for name, _ in calls) == set(owners)
+    assert len(calls) == len(owners)
     assert all(owner.gate['phase'] == 'select' for owner in owners.values())
+    assert controller.activate() == first
+    assert len(calls) == 2 * len(owners), 'next invocation must reread owner proof'
+    assert controller._lifecycle_projections is None
+    def unavailable(operation_id):
+        raise OnboardingError('receiving_source_owner_unavailable')
+    owners['eko'].lifecycle_operation = unavailable
+    with pytest.raises(OnboardingError, match='owner_unavailable'):
+        controller.activate()
+    assert controller._lifecycle_projections is None
 
 
 def test_owner_lifecycle_failure_never_uses_a_stale_local_copy(tmp_path):
@@ -469,6 +479,40 @@ def test_owner_lifecycle_failure_never_uses_a_stale_local_copy(tmp_path):
     with pytest.raises(OnboardingError, match='owner_unavailable'):
         controller.activate()
     assert all(owner.gate['phase'] == 'unselected' for owner in owners.values())
+
+
+def test_competing_activation_cannot_leak_owner_projection_into_next_invocation(
+    tmp_path, monkeypatch,
+):
+    import threading
+    from clusterctl.operation_journal import JournalConflict
+    controller, _, _, _ = activation_fixture(tmp_path)
+    entered, release = threading.Event(), threading.Event()
+    completed = []
+
+    def action():
+        retained = controller._lifecycle_projections
+        assert retained == {}
+        entered.set()
+        assert release.wait(5)
+        assert controller._lifecycle_projections is retained
+        return {'completed': True}
+
+    monkeypatch.setattr(controller, '_activate', action)
+    worker = threading.Thread(target=lambda: completed.append(controller.activate()))
+    worker.start()
+    try:
+        assert entered.wait(5)
+        with pytest.raises(JournalConflict, match='mutation is in progress'):
+            controller.activate()
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive() and completed == [{'completed': True}]
+    assert controller._lifecycle_projections is None
+    monkeypatch.setattr(controller, '_activate', lambda: controller._lifecycle_projections == {})
+    assert controller.activate() is True
+    assert controller._lifecycle_projections is None
 
 
 def test_lost_replacement_revoke_reply_reconciles_exact_request(tmp_path,monkeypatch):
@@ -522,7 +566,7 @@ def test_current_release_cannot_reuse_an_unbound_compatible_assessment(tmp_path,
     assert_new_operation_can_revoke(owners)
 
 
-@pytest.mark.parametrize('stage',['query','prepare','apply','final-status'])
+@pytest.mark.parametrize('stage',['query','prepare','apply','final-query'])
 def test_slow_observation_or_control_cannot_report_fresh_activation(tmp_path,monkeypatch,stage):
     from clusterctl import onboarding_receiving_update as module
     from types import SimpleNamespace
@@ -557,15 +601,10 @@ def test_slow_observation_or_control_cannot_report_fresh_activation(tmp_path,mon
                 result=original(**options)
                 if all(item.gate['phase']=='select' for item in owners.values()):
                     fresh.add(who)
+                if fresh==set(owners):
+                    consume_window()
                 return result
             monkeypatch.setattr(owner,'qualified_identity',record)
-        status=owners['oliva'].status
-        def slow_status():
-            result=status()
-            if fresh==set(owners):
-                consume_window()
-            return result
-        monkeypatch.setattr(owners['oliva'],'status',slow_status)
     with pytest.raises(OnboardingError,match='observation_expired|activation_changed'):
         controller.activate()
     assert all(owner.gate['readers']==[] for owner in owners.values())
@@ -927,11 +966,18 @@ def test_completed_cohort_retry_observes_without_repreparing_native_controls(tmp
     effects = {name: owner.effects for name, owner in owners.items()}
     def refuse(*args, **kwargs):
         pytest.fail('completed selection retry prepared or applied another control')
-    for owner in owners.values():
+    observations = {name: 0 for name in owners}
+    for name, owner in owners.items():
         monkeypatch.setattr(owner, 'prepare_control', refuse)
         monkeypatch.setattr(owner, 'apply_control', refuse)
+        original = owner.status
+        def status(selected=name, query=original):
+            observations[selected] += 1
+            return query()
+        monkeypatch.setattr(owner, 'status', status)
     assert controller.activate() == first
     assert {name: owner.effects for name, owner in owners.items()} == effects
+    assert observations == {name: 1 for name in owners}, 'reuse same-round qualified gate'
 
 
 def test_completed_cohort_retry_changed_gate_still_fences_forward(tmp_path):

@@ -1862,6 +1862,22 @@ class CohortController:
         self.operation_id = operation_id
         self.owners = dict(owners)
         self._preflights: dict[str, dict] = {}
+        self._lifecycle_projections: dict[tuple[int, str, str], dict | None] | None = None
+
+    @contextmanager
+    def _observation_scope(self):
+        """Reuse immutable owner lifecycle proof only within this invocation.
+
+        Current identity, process, admission, gate and credential horizons are
+        always queried afresh. The next invocation reads owner proof again.
+        """
+        previous = self._lifecycle_projections
+        if previous is None:
+            self._lifecycle_projections = {}
+        try:
+            yield
+        finally:
+            self._lifecycle_projections = previous
 
     def _row(self) -> dict:
         row = self.journal.get(self.operation_id)
@@ -1984,7 +2000,8 @@ class CohortController:
             raise OnboardingError('receiving_required_cohort_changed')
         return value, manifest
 
-    def _adoption(self, name: str, plan: dict, manifest: dict) -> dict:
+    def _adoption(self, name: str, plan: dict, manifest: dict,
+                  *, observations: dict | None = None) -> dict:
         """Qualify actual owner observations against the selected receiver vector."""
         recipe = plan['receivers'][name]
         if (not isinstance(recipe, dict)
@@ -2086,6 +2103,8 @@ class CohortController:
             loaded_view_sha256=application['loaded_view_sha256'], expires_at_ms=verified['expires_at_ms'],
             wire_read=sorted(set(startup['reader']['contract']['wire_read']) &
                 {'dm.tribe.conversation/v1', 'dm.tribe.direct-conversation/v1'}), authority_epochs=sorted(epochs))
+        if observations is not None:
+            observations[name] = {key: current[key] for key in ('server', 'process', 'gate')}
         return dict(process=current['process'], server=current['server'],
             loaded_runtime=loaded, loaded_application={key: val for key, val in application.items() if key != 'reader_gates'},
             admission_parent=current.get('admission_parent'), selection=selection,
@@ -2095,8 +2114,19 @@ class CohortController:
     def _lifecycle(self, name: str, recipe: dict) -> dict | None:
         owner = self.owners[name]
         inspect = getattr(owner, 'lifecycle_operation', None)
-        row = (inspect(recipe['lifecycle_operation_id']) if recipe['profile'] == 'source' and inspect is not None
-               else self.journal.get(recipe['lifecycle_operation_id']))
+        if recipe['profile'] == 'source' and inspect is not None:
+            key = (id(owner), name, digest(recipe))
+            retained = self._lifecycle_projections
+            if retained is not None and key in retained:
+                row = retained[key]
+            else:
+                row = inspect(recipe['lifecycle_operation_id'])
+                if retained is not None:
+                    # The CLI result is data, not a mutable proxy owned by an
+                    # adapter. Reuse no host-side copy across invocations.
+                    retained[key] = json.loads(json.dumps(row))
+        else:
+            row = self.journal.get(recipe['lifecycle_operation_id'])
         if row is not None and row.get('operation_id') != recipe['lifecycle_operation_id']:
             raise OnboardingError('receiving_cohort_lifecycle_unobserved')
         return row
@@ -2129,6 +2159,10 @@ class CohortController:
 
     def prepare_activation(self) -> dict:
         """Persist all required adoption before any positive sender request."""
+        with self.journal.mutation_lock(self.operation_id), self._observation_scope():
+            return self._prepare_activation()
+
+    def _prepare_activation(self) -> dict:
         with self.journal.mutation_lock(self.operation_id):
             row = self._row()
             plan, manifest = self._activation(row)
@@ -2247,10 +2281,11 @@ class CohortController:
                 expected_runtime_observation=row['runtime_observation'])
         return row
 
-    def _current_activation(self, row: dict, plan: dict, manifest: dict, activation: dict) -> int:
+    def _current_activation(self, row: dict, plan: dict, manifest: dict, activation: dict,
+                            *, observations: dict | None = None) -> int:
         records = {}
         for name in sorted(self.owners):
-            current = self._adoption(name, plan, manifest)
+            current = self._adoption(name, plan, manifest, observations=observations)
             records[name] = current
             retained = activation['records'][name]
             if ({key: val for key, val in current.items() if key not in {'observed_at_ms', 'observed_at_ns'}} !=
@@ -2407,10 +2442,13 @@ class CohortController:
         """
         release = row['intent']['runtime_call']['manifest_digest']
         try:
-            deadline = self._current_activation(row, plan, manifest, activation)
+            observations: dict = {}
+            deadline = self._current_activation(row, plan, manifest, activation,
+                observations=observations)
             for name, accepted in row['runtime_observation']['sender_selections'].items():
-                with self._owner_deadline(self.owners[name], deadline):
-                    current = self.owners[name].status()
+                # Qualified identity already observed this gate in the same
+                # all-required round; another cold status process adds no proof.
+                current = observations[name]
                 if any(current[key] != accepted[key] for key in ('server', 'process', 'gate')):
                     raise OnboardingError('receiving_cohort_selection_changed')
             self._accept_activation_deadline(deadline)
@@ -2430,6 +2468,10 @@ class CohortController:
         Each sender's partial result is retained. Cached success is reconciled
         against its current process/gate; no request or expiry is renewed.
         """
+        with self.journal.mutation_lock(self.operation_id), self._observation_scope():
+            return self._activate()
+
+    def _activate(self) -> dict:
         row = self._row()
         if 'cohort_activation' not in (row['runtime_observation'] or {}):
             self.prepare_activation()
