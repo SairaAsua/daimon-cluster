@@ -34,6 +34,24 @@ def document(path: Path) -> dict:
     return value
 
 
+def _socket_identity(path: Path, deadline_ns: int | None):
+    """Await initial socket publication inside the existing observation budget.
+
+    This is no presence or readiness proof. The actual connection, responder,
+    admission parent and loaded selection are still authenticated afterwards.
+    Ordinary unbounded status keeps its immediate missing-socket refusal.
+    """
+    while True:
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('onboarding_observation_deadline_expired')
+        try:
+            return path.lstat()
+        except FileNotFoundError:
+            if deadline_ns is None:
+                raise
+        time.sleep(min(.05, max(0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)))
+
+
 def profile(plan: dict) -> dict:
     validate_plan(plan)
     return dict(schema="dm.operator.rebirth-target-profile/v1", label=plan["name"] + "-codex-cluster",
@@ -499,7 +517,7 @@ class Target:
         if prepared["phase"] != "v8":
             raise OnboardingError("current_onboarding_target_required")
         root = self.package / "runtime"
-        socket_identity = (root / "matrix.sock").lstat()
+        socket_identity = _socket_identity(root / "matrix.sock", deadline_ns)
         key = bytearray(onboarding_release.regular(root / "client.key", uid=os.geteuid()))
         config = ClientConfig.load(root / "client.json", key)
         from .owner_process import ConnectedProcessObserver, ParentProcessPresence, ProcessPresence

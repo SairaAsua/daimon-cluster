@@ -55,6 +55,12 @@ pinning the same service process before freezing the predecessor. A successful
 systemd start is not socket readiness. Capture the existing bounded CLI diagnostic
 on the failing call before coupled cleanup removes that process; a later call
 against a stopped fixture cannot diagnose the earlier live refusal.
+Bounded native guest observation also waits for initial socket publication within
+its original remaining deadline. That wait starts no process and grants no
+readiness: the same-connection responder, admission parent, selected unit and
+loaded code are still verified afterwards. Ordinary status without a deadline
+keeps its immediate missing-socket refusal. Do not replay a retained native start
+or mint another controller because its first socket observation raced startup.
 
 Use the selected SDK for both the observer and receiver; validate that binding
 before lifecycle effects. Keep lifecycle journals on their actual owners.

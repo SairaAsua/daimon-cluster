@@ -6,11 +6,53 @@ import multiprocessing
 import socket
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from clusterctl.owner_process import ConnectedProcessObserver, ParentProcessPresence, PresenceError, observe_process_exit
+
+
+def test_initial_native_socket_can_appear_within_the_same_observation_budget(tmp_path):
+    from clusterctl.onboarding_target import _socket_identity
+    path = tmp_path / 'matrix.sock'
+    published = threading.Event()
+    release = threading.Event()
+    def serve():
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            time.sleep(.05)
+            listener.bind(str(path))
+            listener.listen(1)
+            published.set()
+            release.wait(5)
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        identity = _socket_identity(path, time.monotonic_ns() + 2_000_000_000)
+        assert published.wait(1)
+        assert (identity.st_dev, identity.st_ino) == (path.lstat().st_dev, path.lstat().st_ino)
+    finally:
+        release.set()
+        thread.join(5)
+        assert not thread.is_alive()
+
+
+def test_socket_wait_never_extends_deadline_or_retries_unbounded_status(tmp_path):
+    from clusterctl.onboarding import OnboardingError
+    from clusterctl.onboarding_target import _socket_identity
+    path = tmp_path / 'matrix.sock'
+    with pytest.raises(FileNotFoundError):
+        _socket_identity(path, None)
+    deadline = time.monotonic_ns() + 20_000_000
+    with pytest.raises(OnboardingError, match='onboarding_observation_deadline_expired'):
+        _socket_identity(path, deadline)
+    # Even an existing socket cannot turn a late observation into success.
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+        listener.bind(str(path))
+        with pytest.raises(OnboardingError, match='onboarding_observation_deadline_expired'):
+            _socket_identity(path, deadline)
 
 
 def test_both_actual_admitted_child_launchers_compile_before_spawn():
