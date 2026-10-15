@@ -651,6 +651,48 @@ def preservation_authorization(expected: dict, expires_at_ms: int) -> None:
         raise OnboardingError('receiving_preservation_authorization_expired')
 
 
+def controller_bootstrap_mode(bundle: dict, preservation: dict | None) -> str:
+    """Recover only an expired optional role through the selected native SDK.
+
+    The original owner roles still authorize recovery. Freeze this decision
+    before stopping anything; publication revalidates custody and all grants.
+    """
+    if preservation is None:
+        return 'issue'
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    from daimon_matrix.operator_capabilities import host_capability_profile
+    profile = host_capability_profile('receiving-controller')
+    row, = [row for row in bundle['capabilities'] if row['profile'] == profile]
+    now = time.time_ns() // 1_000_000
+    if row['descriptor']['not_after_ms'] > now:
+        return 'preserve'
+    import inspect
+    if 'renew_receiving_controller' not in inspect.signature(upgrade.stage_capabilities).parameters:
+        raise OnboardingError('qualified_controller_renewal_sdk_required')
+    upgrade._forward_authorization(bundle, now + 60000, renew_receiving_controller=True)
+    if bundle['schema'] != 'dm.runtime.bundle/v8':
+        raise OnboardingError('receiving_controller_renewal_v8_required')
+    return 'renew'
+
+
+def renewal_authorization(bundle: dict, expires_at_ms: int) -> None:
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    now = upgrade._forward_authorization(bundle, expires_at_ms, renew_receiving_controller=True)
+    if expires_at_ms > upgrade._controller_grant_expiry(bundle, now):
+        raise OnboardingError('receiving_controller_renewal_authorization_expired')
+
+
+def controller_stage_options(mode: str) -> dict:
+    # Do not send the new keyword to a retained legacy SDK on ordinary issuance.
+    return ({'renew_receiving_controller': True} if mode == 'renew'
+            else {'provision_receiving_controller': True})
+
+
+def controller_stage_matches(receipt: dict, mode: str) -> bool:
+    return (receipt.get('renew_receiving_controller', False) is (mode == 'renew')
+            and receipt.get('provision_receiving_controller', False) is (mode != 'renew'))
+
+
 def preservation_result(upgrade, root: Path, expected: dict, *, password: bytearray,
                         operation_id: str, request_sha256: str, expires_at_ms: int, retained: dict | None = None) -> dict:
     """Verify unchanged native authority while the caller owns native locks."""
@@ -723,7 +765,7 @@ def freeze_source_bootstrap(source, manager) -> dict:
         if preservation is not None and (predecessor['runtime_status'].get('loaded_runtime') or {}).get(
                 'runtime_bundle_sha256') != preservation['runtime_bytes_sha256']:
             raise OnboardingError('receiving_controller_loaded_bundle_conflict')
-        return dict(mode='preserve' if preservation is not None else 'issue', preservation=preservation, settings_sha256=digest(source.settings), unit=str(manager.unit),
+        return dict(mode=controller_bootstrap_mode(bundle, preservation), preservation=preservation, settings_sha256=digest(source.settings), unit=str(manager.unit),
             service=service, scope=scope, predecessor=predecessor,
             bundle_sha256=digest(bundle), visibility_sha256=hashlib.sha256(visibility).hexdigest(),
             visibility_envelope=json.loads(visibility))
@@ -871,9 +913,14 @@ def freeze_guest_bootstrap(target, *, deadline_ns: int) -> dict:
     if preservation is not None and (observed['runtime_status'].get('loaded_runtime') or {}).get(
             'runtime_bundle_sha256') != preservation['runtime_bytes_sha256']:
         raise OnboardingError('receiving_controller_loaded_bundle_conflict')
+    mode = controller_bootstrap_mode(bundle, preservation)
+    renewal = {}
+    if mode == 'renew':
+        from daimon_matrix import operator_runtime_upgrade as upgrade
+        renewal['renewal_not_after_ms'] = upgrade._controller_grant_expiry(bundle, time.time_ns() // 1_000_000)
     return dict(plan_digest=digest(target.plan), genesis_digest=digest(target.genesis),
         code_digest=target.code_digest, runtime_sha256=digest(bundle), group_sha256=digest(group),
-        mode='preserve' if preservation is not None else 'issue', preservation=preservation,
+        mode=mode, preservation=preservation, **renewal,
         being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'], group=group,
         observer_startup=target.qualified_startup,
         predecessor=dict(process=observed['process'], admission_parent=observed['admission_parent']))
@@ -893,9 +940,9 @@ class GuestOwnerBootstrap:
         fields = {'schema', 'operation_id', 'plan_digest', 'genesis_digest', 'code_digest',
                   'runtime_sha256', 'group_sha256', 'predecessor', 'expires_at_ms'}
         if (os.geteuid() != 1000 or set(request) not in (fields, fields | {'mode', 'preservation'})
-                or request.get('mode', 'issue') not in {'issue', 'preserve'}
-                or (request.get('mode', 'issue') == 'preserve') != isinstance(request.get('preservation'), dict)
-                or request.get('mode') == 'preserve' and (
+                or request.get('mode', 'issue') not in {'issue', 'preserve', 'renew'}
+                or (request.get('mode', 'issue') in {'preserve', 'renew'}) != isinstance(request.get('preservation'), dict)
+                or request.get('mode') in {'preserve', 'renew'} and (
                     request['runtime_sha256'] != request['preservation'].get('runtime_sha256')
                     or request['preservation'].get('origin') != target.document_bundle()['local_origin'])
                 or request['schema'] != 'cluster-guest-owner-bootstrap/v1'
@@ -966,6 +1013,10 @@ class GuestOwnerBootstrap:
                 control_head=bundle['control_head'], being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'])
             if intent is not None and current != intent:
                 raise OnboardingError('receiving_guest_bootstrap_source_changed')
+            if self.request.get('mode') == 'renew':
+                if controller_preservation(self.runtime, bundle) != self.request['preservation']:
+                    raise OnboardingError('receiving_controller_preservation_changed')
+                renewal_authorization(bundle, self.request['expires_at_ms'])
             intent = self._record('capability_intent', current)
             stage = dict(transaction=str(self.transaction))
             if 'capability_stage_intent' not in observations:
@@ -983,8 +1034,8 @@ class GuestOwnerBootstrap:
                 upgrade.stage_capabilities(source=self.runtime, transaction=self.transaction,
                     expected_source_sha256=intent['source_sha256'], expected_counter=intent['counter'],
                     expected_control_head=intent['control_head'], expected_being_ref=intent['being_ref'],
-                    expected_origin=intent['origin'], add_methods={}, provision_receiving_controller=True,
-                    expires_at_ms=self.request['expires_at_ms'], password=bytes(password), externally_quiesced=True)
+                    expected_origin=intent['origin'], add_methods={},
+                    **controller_stage_options(self.request.get('mode', 'issue')), expires_at_ms=self.request['expires_at_ms'], password=bytes(password), externally_quiesced=True)
             finally:
                 password[:] = b'\0' * len(password)
             receipt = json.loads(onboarding_release.regular(ready_path, uid=1000))
@@ -995,7 +1046,7 @@ class GuestOwnerBootstrap:
                 or receipt.get('counter_after') != intent['counter'] + 1
                 or receipt.get('control_head') != intent['control_head']
                 or receipt.get('being_ref') != intent['being_ref'] or receipt.get('origin') != intent['origin']
-                or receipt.get('provision_receiving_controller') is not True
+                or not controller_stage_matches(receipt, self.request.get('mode', 'issue'))
                 or receipt.get('add_methods') != {} or receipt.get('expires_at_ms') != self.request['expires_at_ms']):
             raise OnboardingError('receiving_guest_bootstrap_request_conflict')
         raw = onboarding_release.regular(ready_path, uid=1000)
@@ -1097,9 +1148,9 @@ class SourceBootstrapController:
         if (not isinstance(frozen, dict) or not isinstance(candidate, dict)
                 or frozen.get('settings_sha256') != digest(self.source.settings)
                 or frozen.get('unit') != str(self.manager.unit)
-                or frozen.get('mode', 'issue') not in {'issue', 'preserve'}
-                or (frozen.get('mode', 'issue') == 'preserve') != isinstance(frozen.get('preservation'), dict)
-                or frozen.get('mode') == 'preserve' and (
+                or frozen.get('mode', 'issue') not in {'issue', 'preserve', 'renew'}
+                or (frozen.get('mode', 'issue') in {'preserve', 'renew'}) != isinstance(frozen.get('preservation'), dict)
+                or frozen.get('mode') in {'preserve', 'renew'} and (
                     'qualification' not in candidate
                     or frozen['preservation'].get('runtime_sha256') != frozen.get('bundle_sha256')
                     or frozen['preservation'].get('origin') != frozen['predecessor'].get('server'))
@@ -1261,7 +1312,7 @@ class SourceBootstrapController:
                 self._qualify_candidate(row, candidate)
             if row['state'] == 'planned':
                 self.journal.advance(self.operation_id, 'runtime-dispatching')
-            if frozen.get('mode', 'issue') == 'preserve':
+            if frozen.get('mode', 'issue') in {'preserve', 'renew'}:
                 bundle = being_seed._read(self.source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
                 if controller_preservation(self.source.root, bundle) != frozen['preservation']:
                     raise OnboardingError('receiving_controller_preservation_changed')
@@ -1293,6 +1344,8 @@ class SourceBootstrapController:
                         if values['ActiveState'] == 'active':
                             if frozen.get('mode') == 'preserve':
                                 preservation_authorization(frozen['preservation'], candidate['expires_at_ms'])
+                            elif frozen.get('mode') == 'renew':
+                                renewal_authorization(bundle, candidate['expires_at_ms'])
                             try:
                                 self.manager.stop()
                             except (OnboardingError, OSError):
@@ -1318,6 +1371,8 @@ class SourceBootstrapController:
                 self._record('stop_intent', dict(scope=scope, unit_sha256=inspected['unit_sha256']))
                 if frozen.get('mode') == 'preserve':
                     preservation_authorization(frozen['preservation'], candidate['expires_at_ms'])
+                elif frozen.get('mode') == 'renew':
+                    renewal_authorization(bundle, candidate['expires_at_ms'])
                 try:
                     self.manager.stop()
                 except (OnboardingError, OSError):
@@ -1391,6 +1446,10 @@ class SourceBootstrapController:
                 intent = dict(source_sha256=upgrade.inventory_digest(self.source.root),
                     counter=bundle['keystore']['counter'], control_head=bundle['control_head'],
                     being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'])
+                if frozen.get('mode') == 'renew':
+                    if controller_preservation(self.source.root, bundle) != frozen['preservation']:
+                        raise OnboardingError('receiving_controller_preservation_changed')
+                    renewal_authorization(bundle, candidate['expires_at_ms'])
                 retained_intent = observations.get('capability_intent', intent)
                 if retained_intent != intent:
                     raise OnboardingError('receiving_bootstrap_source_changed')
@@ -1407,14 +1466,14 @@ class SourceBootstrapController:
                 upgrade.stage_capabilities(source=self.source.root, transaction=transaction,
                     expected_source_sha256=intent['source_sha256'], expected_counter=intent['counter'],
                     expected_control_head=intent['control_head'], expected_being_ref=intent['being_ref'],
-                    expected_origin=intent['origin'], add_methods={}, provision_receiving_controller=True,
-                    expires_at_ms=candidate['expires_at_ms'], password=password, externally_quiesced=True)
+                    expected_origin=intent['origin'], add_methods={},
+                    **controller_stage_options(frozen.get('mode', 'issue')), expires_at_ms=candidate['expires_at_ms'], password=password, externally_quiesced=True)
             ready = onboarding_release.regular(ready_path, uid=os.geteuid())
             receipt = json.loads(ready)
             intent = (self._row()[0]['runtime_observation'] or {})['source_bootstrap']['capability_intent']
             if (receipt.get('source_sha256') != intent['source_sha256']
                     or receipt.get('origin') != intent['origin'] or receipt.get('control_head') != intent['control_head']
-                    or receipt.get('provision_receiving_controller') is not True
+                    or not controller_stage_matches(receipt, frozen.get('mode', 'issue'))
                     or receipt.get('add_methods') != {} or receipt.get('expires_at_ms') != candidate['expires_at_ms']):
                 raise OnboardingError('receiving_bootstrap_binding_conflict')
             ready_hash = hashlib.sha256(ready).hexdigest()
@@ -1660,10 +1719,10 @@ class GuestBootstrapController:
         candidate = after['guest_bootstraps'][self.name]
         if (set(frozen) != {'plan', 'owner', 'root'} or frozen['plan']['name'] != self.name
                 or type(candidate['expires_at_ms']) is not int or candidate['expires_at_ms'] <= 0
-                or frozen['owner'].get('mode', 'issue') not in {'issue', 'preserve'}
-                or (frozen['owner'].get('mode', 'issue') == 'preserve') != isinstance(frozen['owner'].get('preservation'), dict)
+                or frozen['owner'].get('mode', 'issue') not in {'issue', 'preserve', 'renew'}
+                or (frozen['owner'].get('mode', 'issue') in {'preserve', 'renew'}) != isinstance(frozen['owner'].get('preservation'), dict)
                 or frozen['owner']['plan_digest'] != digest(frozen['plan'])
-                or frozen['owner'].get('mode') == 'preserve' and (
+                or frozen['owner'].get('mode') in {'preserve', 'renew'} and (
                     frozen['owner']['preservation'].get('runtime_sha256') != frozen['owner']['runtime_sha256']
                     or frozen['owner']['preservation'].get('origin') != frozen['owner']['origin'])
                 or candidate['runtime_digest'] != frozen['owner']['code_digest']
@@ -1756,6 +1815,10 @@ class GuestBootstrapController:
                     if any(fresh.get(key) != value for key, value in frozen['owner'].items()
                            if key != 'observer_startup'):
                         raise OnboardingError('receiving_guest_bootstrap_predecessor_changed')
+                    if frozen['owner'].get('mode') == 'renew' and (
+                            type(fresh.get('renewal_not_after_ms')) is not int
+                            or candidate['expires_at_ms'] > fresh['renewal_not_after_ms']):
+                        raise OnboardingError('receiving_controller_renewal_authorization_expired')
                     expected_startup = dict(code_digest=candidate['prepared']['code_digest'],
                         matrix_commit=candidate['prepared']['matrix_revision'],
                         matrix_wheel_sha256=candidate['prepared']['matrix_wheel_sha256'],

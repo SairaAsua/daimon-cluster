@@ -101,6 +101,53 @@ def test_quiescence_retains_actual_journal_stage_and_exact_retry(fixture):
     assert set(journal.get(identifier)['runtime_observation']['source_bootstrap']) == {'stop_intent', 'quiesced'}
 
 
+@pytest.mark.parametrize('late_at', ['after-exit', 'status', 'active-stop-intent'])
+def test_renewal_checks_expiry_at_stop_but_retains_exit_after_expiry(fixture, monkeypatch, late_at):
+    from clusterctl import onboarding_receiving_update as updates
+    from clusterctl.onboarding import digest
+    import time
+    source, manager, journal, identifier, _ = fixture
+    original = journal.get(identifier)
+    before, after = copy.deepcopy(original['expected_precondition']), copy.deepcopy(original['intended_transition'])
+    frozen = before['source_bootstrap']
+    preservation = dict(runtime_sha256=frozen['bundle_sha256'], origin=frozen['predecessor']['server'])
+    frozen.update(mode='renew', preservation=preservation)
+    now = [time.time_ns() // 1_000_000]
+    expiry = now[0] + 60000
+    after['source_bootstrap'].update(expires_at_ms=expiry, qualification={'group': {}})
+    row = plan_update(journal, manifest_digest='a' * 64, target='source:renewal-expiry',
+        expected_precondition=before, intended_transition=after, audit_identity={'actor': 'fixture'})
+    controller = SourceBootstrapController(journal, row['operation_id'], source, manager)
+    monkeypatch.setattr(controller, '_qualify_candidate', lambda *_: {})
+    monkeypatch.setattr(updates, 'controller_preservation', lambda *_: preservation)
+    monkeypatch.setattr(time, 'time_ns', lambda: now[0] * 1_000_000)
+    checks = []
+    def authorized(_bundle, expires):
+        checks.append(now[0])
+        if now[0] >= expires:
+            raise OnboardingError('synthetic_renewal_expired')
+    monkeypatch.setattr(updates, 'renewal_authorization', authorized)
+    if late_at == 'after-exit':
+        result = controller.quiesce()
+        now[0] = expiry + 1
+        assert controller.quiesce() == result and manager.stops == len(checks) == 1
+    else:
+        if late_at == 'active-stop-intent':
+            controller._record('stop_intent', dict(scope=frozen['scope'], unit_sha256=frozen['service']['unit_sha256']))
+            now[0] = expiry + 1
+        else:
+            actual = updates.OwnerGroupClient.base_status
+            def late(self):
+                result = actual(self)
+                now[0] = expiry + 1
+                return result
+            monkeypatch.setattr(updates.OwnerGroupClient, 'base_status', late)
+        with pytest.raises(OnboardingError, match='synthetic_renewal_expired'):
+            controller.quiesce()
+        assert manager.stops == 0 and len(checks) == 1
+    assert digest(journal.get(row['operation_id'])['expected_precondition']) == digest(before)
+
+
 def test_lost_stop_reply_reconciles_exit_without_a_second_stop(fixture, monkeypatch):
     source, manager, journal, identifier, _ = fixture
     stop = manager.stop

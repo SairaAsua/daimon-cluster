@@ -152,6 +152,42 @@ def test_full_dual_route_effects_and_exact_retry_never_repeat_stop_or_keys(fixtu
     assert controller.execute() == result
 
 
+@pytest.mark.parametrize('outside_horizon', [False, True])
+def test_expired_controller_uses_existing_owner_route_and_checks_horizon_before_stop(fixture, outside_horizon):
+    controller, backend, calls, _ = fixture
+    original = controller.journal.get(controller.operation_id)
+    before = copy.deepcopy(original['expected_precondition'])
+    owner = before['guest_bootstraps']['eko']['owner']
+    expiry = original['intended_transition']['guest_bootstraps']['eko']['expires_at_ms']
+    owner.update(mode='renew', renewal_not_after_ms=expiry + (-1 if outside_horizon else 60000),
+        preservation=dict(runtime_sha256=owner['runtime_sha256'], origin=owner['origin']))
+    row = plan_update(controller.journal, manifest_digest='a' * 64, target='expired-guest:fixture',
+        expected_precondition=before, intended_transition=original['intended_transition'],
+        audit_identity={'actor': 'fixture'})
+    controller = GuestBootstrapController(controller.journal, row['operation_id'], backend, 'eko')
+    actual = backend._target_call
+    def renewal(plan, action, **options):
+        if action == 'receiving-bootstrap-freeze':
+            return copy.deepcopy(owner)
+        if options.get('bootstrap_request') is not None:
+            assert options['bootstrap_request']['mode'] == 'renew'
+            assert options['bootstrap_request']['preservation'] == owner['preservation']
+        return actual(plan, action, **options)
+    backend._target_call = renewal
+    if outside_horizon:
+        with pytest.raises(OnboardingError, match='renewal_authorization_expired'):
+            controller.execute()
+        assert backend.stops == backend.stages == 0
+    else:
+        backend.fail = 'publish'
+        with pytest.raises(OSError, match='lost publish'):
+            controller.execute()
+        result = controller.execute()
+        assert controller.execute() == result
+        assert backend.stops == backend.starts == backend.stages == backend.publications == 1
+        assert 'receiving-bootstrap-publish' in calls
+
+
 def test_journal_reference_becomes_one_stable_uuid_for_both_native_routes(fixture):
     controller, backend, _, _ = fixture
     assert controller.operation_id.startswith('operation:')

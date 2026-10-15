@@ -289,6 +289,9 @@ class Target:
         Normalize only for the retained credential/peer comparison. Current
         group validation and loaded evidence always use the actual bundle.
         Authenticity remains inspectable after expiry; this grants no control.
+        The custody counter is an antirollback revision, not a count of controller
+        issuances: renewal retains one role while advancing authenticated custody.
+        Its transaction lineage is retained by the native owner/update journals.
         """
         from daimon_matrix import canonical, local_api, operator_capabilities as profiles
         fields = ('capabilities', 'operator_capability_binding', 'keystore')
@@ -300,7 +303,9 @@ class Target:
             current = bundle['capabilities']
             if (len(current) != len(previous) + 1 or current[:-1] != previous
                     or any(row['profile'] == profile for row in previous)
-                    or bundle['keystore'] != {**expected['keystore'], 'counter': expected['keystore']['counter'] + 1}
+                    or type(bundle['keystore'].get('counter')) is not int
+                    or bundle['keystore']['counter'] <= expected['keystore']['counter']
+                    or bundle['keystore'] != {**expected['keystore'], 'counter': bundle['keystore']['counter']}
                     or store.counter != bundle['keystore']['counter']):
                 raise ValueError
             label = expected['runtime_label']

@@ -182,6 +182,32 @@ def test_pin_only_qualification_checks_code_content(monkeypatch, tmp_path):
     assert not sdk_pin_only(tmp_path, 'a' * 40, changed + ['clusterctl/onboarding_custody.py'])
 
 
+def test_literal_sdk_successor_composes_receiving_tests_without_unrelated_full_jobs(monkeypatch, tmp_path):
+    import subprocess
+    from tools.ci_scope import LOADED_STARTUP_TESTS, SDK_TESTS
+    pins = {'requirements-weave.txt', 'clusterctl/onboarding_sdk.py', 'clusterctl/matrix_host.py'}
+    changes = sorted(pins | {'clusterctl/onboarding_receiving_update.py', 'clusterctl/onboarding_target.py',
+        'tests/test_guest_owner_bootstrap.py', 'tests/test_guest_bootstrap_controller.py',
+        'tests/test_source_bootstrap.py', 'docs/runbooks/tribu-sdk-successor.md'})
+    current_pin = '0dc0b555939b16a1150a220a366a6911a5ae9c28'
+    def show(argv, **_kwargs):
+        path = argv[2].split(':', 1)[1]
+        assert path in pins
+        return subprocess.CompletedProcess(argv, 0, (ROOT / path).read_bytes().replace(current_pin.encode(), b'a' * 40))
+    monkeypatch.setattr('tools.ci_scope.subprocess.run', show)
+    profile, tests = select(changes, ROOT, base='a' * 40)
+    assert profile == 'sdk' and set(tests) == set(LOADED_STARTUP_TESTS) | set(SDK_TESTS)
+    assert len(tests) == len(set(tests))
+    for extra in ('clusterctl/onboarding_custody.py', 'unknown.py', 'constraints.txt'):
+        assert select([*changes, extra], ROOT, base='a' * 40) == ('full', ['tests'])
+    assert select(changes, tmp_path, base='a' * 40) == ('full', ['tests'])
+    def changed_code(argv, **kwargs):
+        result = show(argv, **kwargs)
+        return subprocess.CompletedProcess(argv, 0, result.stdout + b'\n# executable drift\n')
+    monkeypatch.setattr('tools.ci_scope.subprocess.run', changed_code)
+    assert select(changes, ROOT, base='a' * 40) == ('full', ['tests'])
+
+
 def test_receiving_presentation_and_readiness_keep_native_admission_without_archive_jobs(tmp_path):
     from tools.ci_scope import RECEIVING_RUNTIME_FILES, SDK_TESTS
     changed = sorted(RECEIVING_RUNTIME_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py',

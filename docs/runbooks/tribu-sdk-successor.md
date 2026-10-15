@@ -6,6 +6,9 @@ The original readable-presentation increment is retained under
 [Matrix #287](https://github.com/AlterMundi/daimon-matrix/issues/287).
 Matrix owns signed messaging and presentation; Cluster selects the exact
 executable SDK and receiving helpers on the existing bodies.
+The current source candidate pins Matrix `0dc0b555939b16a1150a220a366a6911a5ae9c28`.
+The three-body production selection remains its separately recorded predecessor
+until receiving adoption succeeds.
 
 ## Execute from the next missing effect
 
@@ -58,11 +61,32 @@ Prepare expiring fixture controls immediately before their use. If an unrelated
 urgent repair intervenes, preserve the scenario and completed effects instead
 of discarding them. Do not extend an expired frozen authorization; recover using
 the supported procedure for the exact retained state, not a new birth ceremony.
-An expired optional receiving controller currently blocks the owner update path
-even when the original roles remain valid. [Matrix #355](https://github.com/AlterMundi/daimon-matrix/issues/355)
-owns the missing grant-lifetime separation and existing-owner recovery. Do not
-treat capability-method upgrades as renewal or run a routine rebirth to hide this
-gap. Retain the stopped receiver and its original lifecycle evidence for recovery.
+The #355 successor separates the controller grant lifetime from the finite
+update deadline. Freeze selects `issue` when absent, `preserve` when still live,
+or `renew` only for an expired active-status optional V8 controller with valid
+original owner roles. Renewal requires the qualified native SDK before any
+stop; the operation deadline must fit the remaining owner authorization horizon.
+It uses the existing owner/root transaction and lifecycle controllers, retaining
+identity, controller key/methods and credential history. It does not grant
+revoked roles, repair expired original roles or create automatic renewal.
+
+Keep the original expired operation and its actual load receipts unchanged. A
+new explicitly authorized recovery lifecycle links the retained body/process
+state; it does not extend the old frozen deadline or relabel its load. Source
+renewal rebinds the existing base visibility installation to the new full runtime
+bundle, then qualifies an actual new receiving load. Guest normalization accepts
+an authenticated strictly advancing custody revision, rather than assuming only
+one controller issuance ever occurred. This is historical comparison, not
+control readiness; native transaction and owner/root journals retain the exact
+publication lineage. [Matrix #355](https://github.com/AlterMundi/daimon-matrix/issues/355)
+tracks integrated receiving acceptance. No routine rebirth is required.
+
+For source qualification against a Matrix successor, select that checkout for
+Python imports explicitly; do not silently test the installed production SDK.
+Use the repository's `tools/check_rc_types.py` typing boundary, which intentionally
+skips unrelated dependency implementation. A bare unrestricted mypy run changes
+that contract and can report failures in the old installed SDK or unrelated
+cryptography versions. Never replace a live venv to prepare a source test.
 Own a finite synthetic admission producer and its named synthetic native unit in
 the same qualification scope. Stop that unit before retiring the producer; on
 interruption reconcile and close the unit as part of the same cleanup. Leaving

@@ -288,7 +288,7 @@ def test_predecessor_freeze_uses_actual_base_and_admission_without_group_status(
                 return identifier, response
             with monkeypatch.context() as wrong:
                 wrong.setattr(LegacyGroupRestrictedClient, 'runtime_status', wrong_identity)
-                with pytest.raises(OnboardingError, match='identity_required'):
+                with pytest.raises(OnboardingError, match='^receiving_identity_admission_conflict$'):
                     freeze_guest_bootstrap(target, deadline_ns=deadline())
         assert actual_observe() == old and not (target.root / 'receiving-bootstrap').exists()
     finally:
@@ -319,6 +319,147 @@ def preserved_fixture(fixture):
         'preservation': receiving_update.controller_preservation(first.runtime, target.document_bundle()),
         'expires_at_ms': time.time_ns() // 1_000_000 + 60000}
     return target, request, group, exited
+
+
+@pytest.fixture
+def expired_fixture(preserved_fixture):
+    """An authentic old short-lived controller; original owner grants are live."""
+    from daimon_matrix.canonical import canonical_bytes
+    from daimon_matrix.keystore import EncryptedKeystore
+    from daimon_matrix.local_api import create_capability
+    from daimon_matrix.operator_capabilities import create_operator_capability_binding
+    target, request, group, exited = preserved_fixture
+    root = target.package / 'runtime'
+    bundle = target.document_bundle()
+    custody = EncryptedKeystore(root / 'custody.json').open(target._reader)
+    row = next(row for row in bundle['capabilities'] if row['profile']['role'] == 'receiving-controller')
+    now = time.time_ns() // 1_000_000
+    previous = row['descriptor']
+    capability = create_capability(custody.secrets[row['secret_slot']],
+        **{key: previous[key] for key in ('client_id', 'methods', 'status')},
+        not_before_ms=now - 120000, not_after_ms=now - 60000)
+    row['descriptor'] = capability.descriptor
+    client = root / row['profile']['client_directory'] / row['profile']['client_config_filename']
+    config = json.loads(client.read_bytes())
+    config['capability'] = capability.descriptor
+    client.write_bytes(canonical_bytes(config))
+    bundle['operator_capability_binding'] = create_operator_capability_binding(
+        runtime_id=bundle['runtime_id'], runtime_label=bundle['runtime_label'],
+        being_ref=bundle['manifest']['being_ref'], origin=bundle['local_origin'],
+        signing_seed=custody.secrets[bundle['keystore']['signing_slot']], capability_rows=bundle['capabilities'])
+    (root / 'runtime.json').write_bytes(canonical_bytes(bundle))
+    request = {**request, 'operation_id': str(uuid.uuid4()), 'mode': 'renew',
+        'runtime_sha256': digest(bundle), 'preservation': receiving_update.controller_preservation(root, bundle)}
+    return target, request, group, exited
+
+
+def test_expired_native_controller_renews_once_without_new_identity_or_history(expired_fixture, monkeypatch):
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    from daimon_matrix.keystore import EncryptedKeystore
+    target, request, _, _ = expired_fixture
+    root = target.package / 'runtime'
+    original, history = target.document_bundle(), files(target.credential)
+    keys = EncryptedKeystore(root / 'custody.json').open(target._reader).secrets
+    assert receiving_update.controller_bootstrap_mode(original, request['preservation']) == 'renew'
+    owner = GuestOwnerBootstrap(target, request)
+    ready = owner.execute('stage', deadline_ns=deadline())
+    assert target.document_bundle() == original and owner.execute('stage', deadline_ns=deadline()) == ready
+    actual = upgrade.publish
+    def lost(**kwargs):
+        actual(**kwargs)
+        raise OSError('synthetic lost renewal publication reply')
+    with monkeypatch.context() as fault:
+        fault.setattr(upgrade, 'publish', lost)
+        with pytest.raises(OSError, match='lost renewal'):
+            owner.execute('publish', deadline_ns=deadline(), ready_sha256=ready['ready_sha256'])
+    ciphertext = (root / 'custody.json').read_bytes()
+    result = GuestOwnerBootstrap(target, request).execute('publish', deadline_ns=deadline(),
+        ready_sha256=ready['ready_sha256'])
+    current = target.document_bundle()
+    assert current['keystore']['counter'] == original['keystore']['counter'] + 1
+    assert current['capabilities'][:-1] == original['capabilities'][:-1]
+    assert current['capabilities'][-1]['secret_slot'] == original['capabilities'][-1]['secret_slot']
+    assert current['capabilities'][-1]['descriptor']['not_after_ms'] > request['expires_at_ms']
+    assert EncryptedKeystore(root / 'custody.json').open(target._reader).secrets == keys
+    assert files(target.credential) == history and (root / 'custody.json').read_bytes() == ciphertext
+    assert target.observe()['receiving_controller']['counter'] == result['counter_after']
+    assert result['receiving_readiness'] == 'unobserved'
+    assert receiving_update.controller_bootstrap_mode(current,
+        receiving_update.controller_preservation(root, current)) == 'preserve'
+    assert owner.execute('publish', deadline_ns=deadline(), ready_sha256=ready['ready_sha256']) == result
+
+
+def test_renewal_preflight_refuses_legacy_sdk_or_an_expired_owner_horizon(expired_fixture, monkeypatch):
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    target, request, _, _ = expired_fixture
+    bundle = target.document_bundle()
+    before = files(target.package / 'runtime')
+    with monkeypatch.context() as old:
+        old.setattr(upgrade, 'stage_capabilities', lambda **_kwargs: None)
+        with pytest.raises(OnboardingError, match='qualified_controller_renewal_sdk_required'):
+            receiving_update.controller_bootstrap_mode(bundle, request['preservation'])
+    original = next(row for row in bundle['capabilities'] if row['profile']['role'] != 'receiving-controller')
+    original['descriptor']['not_after_ms'] = time.time_ns() // 1_000_000 - 1
+    with pytest.raises(ValueError, match='legacy_authorization_expired'):
+        receiving_update.controller_bootstrap_mode(bundle, request['preservation'])
+    assert files(target.package / 'runtime') == before
+
+
+def test_source_renewal_reuses_native_publication_and_rebinds_visibility(expired_fixture, tmp_path, monkeypatch):
+    """Real owner capability publication; explicit visibility/systemd seams."""
+    from types import SimpleNamespace
+    from clusterctl.operation_journal import OperationJournal
+    from clusterctl.onboarding_code_successor import plan_update
+    from tests.test_source_bootstrap import FakeManager
+    target, request, group, _ = expired_fixture
+    root = target.package / 'runtime'
+    visibility = tmp_path / 'visibility.json'
+    being_seed._write(visibility, {'fixture': 'visibility observation seam'})
+    unit = tmp_path / 'daimon-matrix-renewal.service'
+    unit.write_bytes(b'[Service]\nExecStart=/original/loader\nKillMode=control-group\n')
+    unit.chmod(0o600)
+    manager = FakeManager(unit)
+    service = manager.inspect()
+    manager.live = False
+    source = SimpleNamespace(root=root, settings={'fixture': 'source'}, visibility=visibility, _reader=target._reader)
+    frozen = dict(mode='renew', preservation=request['preservation'], settings_sha256=digest(source.settings),
+        unit=str(unit), service=service, scope={'invocation_id': manager.invocation},
+        bundle_sha256=request['runtime_sha256'],
+        predecessor={'process': request['predecessor']['process'], 'server': request['preservation']['origin']},
+        visibility_sha256=receiving_update.hashlib.sha256(visibility.read_bytes()).hexdigest())
+    candidate = dict(transaction=str(root.parent / 'source-renewal'), expires_at_ms=request['expires_at_ms'],
+        argv=['/qualified/new/loader'], qualification={'group': group})
+    journal = OperationJournal(tmp_path / 'source-renewal-journal')
+    row = plan_update(journal, manifest_digest='a' * 64, target='source:renewal-fixture',
+        expected_precondition={'source_bootstrap': frozen}, intended_transition={'source_bootstrap': candidate},
+        audit_identity={'actor': 'fixture'})
+    controller = receiving_update.SourceBootstrapController(journal, row['operation_id'], source, manager)
+    monkeypatch.setattr(controller, '_qualify_candidate', lambda *_: {})
+    monkeypatch.setattr(controller, '_writer_quiesced', lambda: None)
+    controller._record('quiesced', {'exit_observed': True})
+    rebound = []
+    def rebind(_upgrade, _frozen, transaction):
+        assert transaction == Path(candidate['transaction'])
+        actual = target.document_bundle()
+        assert actual['keystore']['counter'] == request['preservation']['counter'] + 1
+        rebound.append(digest(actual))
+        return dict(runtime_sha256=rebound[-1], installation_sha256='a' * 64)
+    monkeypatch.setattr(controller, '_publish_visibility', rebind)
+    history = files(target.credential)
+    for path in (root / 'custody.json', root / 'host-clients/receiving-controller/client.json'):
+        before = path.read_bytes()
+        path.write_bytes(before + b' ')
+        with pytest.raises(OnboardingError, match='preservation_changed'):
+            controller.publish()
+        assert not Path(candidate['transaction']).exists()
+        assert 'capability_intent' not in journal.get(row['operation_id'])['runtime_observation']['source_bootstrap']
+        path.write_bytes(before)
+    result = controller.publish()
+    assert result['published'] is True and result['loaded_readiness'] == 'unobserved'
+    assert files(target.credential) == history and len(rebound) == 1
+    effects = journal.get(row['operation_id'])['runtime_observation']['source_bootstrap']
+    assert effects['capability_published']['publication']['counter_after'] == request['preservation']['counter'] + 1
+    assert effects['visibility_published']['runtime_sha256'] == digest(target.document_bundle())
 
 
 def test_existing_controller_is_preserved_without_native_publication(preserved_fixture, monkeypatch):

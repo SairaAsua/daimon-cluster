@@ -12,6 +12,9 @@ contains the maintained Source/guest/cohort update controllers and their current
 qualification record; Matrix [PR352](https://github.com/AlterMundi/daimon-matrix/pull/352)
 contains the corresponding SDK candidate. Neither draft is a live-selection receipt.
 The existing three-body production group below stays selected.
+The candidate SDK pin is `0dc0b555939b16a1150a220a366a6911a5ae9c28`, including owner-local #355
+recovery without rebirth; it is not the selected production SDK. Qualification
+and actual receiving adoption remain in the current PR/work record.
 
 Use the current operation/PR evidence and the execution procedure in
 [the receiving update runbook](docs/runbooks/tribu-sdk-successor.md).
