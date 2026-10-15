@@ -152,6 +152,58 @@ def test_full_dual_route_effects_and_exact_retry_never_repeat_stop_or_keys(fixtu
     assert controller.execute() == result
 
 
+def test_quiesce_retains_the_same_lifecycle_without_publishing_or_starting(fixture):
+    controller, backend, calls, _ = fixture
+    result = controller.quiesce()
+    assert result == {'exits': {'process': True, 'admission_parent': True}}
+    assert not backend.active and backend.stops == 1
+    assert backend.starts == backend.stages == backend.publications == 0
+    assert calls[-1] == 'bootstrap-quiesce'
+    assert controller.quiesce() == result
+    assert backend.stops == 1 and calls[-1] == 'bootstrap-quiesce'
+    effects = controller._row()[0]['runtime_observation']['guest_bootstraps']['eko']
+    assert set(effects) == {'candidate_validated', 'quiesced'}
+    assert controller.execute()['receiving_readiness'] == 'unobserved'
+    assert backend.stops == backend.starts == backend.stages == backend.publications == 1
+
+
+def test_quiesce_lost_reply_resumes_the_same_root_operation(fixture):
+    controller, backend, _, _ = fixture
+    backend.fail = 'quiesce'
+    with pytest.raises(OSError, match='lost quiesce'):
+        controller.quiesce()
+    assert backend.stops == 1 and not backend.active
+    assert controller.quiesce()['exits'] == {'process': True, 'admission_parent': True}
+    assert backend.stops == 1 and backend.starts == backend.stages == backend.publications == 0
+
+
+@pytest.mark.parametrize('lost_start_reply', [False, True])
+def test_quiesce_cannot_stop_a_started_replacement(fixture, lost_start_reply):
+    controller, backend, calls, _ = fixture
+    if lost_start_reply:
+        backend.fail = 'start'
+        with pytest.raises(OSError, match='lost start'):
+            controller.execute()
+    else:
+        controller.execute()
+    before = list(calls)
+    with pytest.raises(OnboardingError, match='already_started|replacement unit'):
+        controller.quiesce()
+    assert backend.active and backend.stops == backend.starts == 1
+    if not lost_start_reply:
+        assert calls == before
+
+
+def test_quiesce_rechecks_current_root_instead_of_trusting_retained_exit(fixture):
+    controller, backend, _, _ = fixture
+    controller.quiesce()
+    backend.active = True
+    backend.starts = 1
+    with pytest.raises(OnboardingError, match='replacement unit'):
+        controller.quiesce()
+    assert backend.active and backend.stops == 1
+
+
 @pytest.mark.parametrize('outside_horizon', [False, True])
 def test_expired_controller_uses_existing_owner_route_and_checks_horizon_before_stop(fixture, outside_horizon):
     controller, backend, calls, _ = fixture
@@ -269,7 +321,8 @@ def test_changed_host_configuration_and_replacement_job_owner_prevent_effects(fi
     assert not calls
 
 
-def test_journal_and_jobs_are_owned_during_both_typed_routes(fixture):
+@pytest.mark.parametrize('action', ['execute', 'quiesce'])
+def test_journal_and_jobs_are_owned_during_both_typed_routes(fixture, action):
     controller, backend, _, _ = fixture
     competitor = OperationJournal(controller.journal.path.parent)
     root = backend._guest_service_call
@@ -281,7 +334,11 @@ def test_journal_and_jobs_are_owned_during_both_typed_routes(fixture):
                 pytest.fail('jobs parent is not owned')
         return root(*args, **kwargs)
     backend._guest_service_call = checked
-    assert controller.execute()['receiving_readiness'] == 'unobserved'
+    result = getattr(controller, action)()
+    if action == 'execute':
+        assert result['receiving_readiness'] == 'unobserved'
+    else:
+        assert result['exits'] == {'process': True, 'admission_parent': True}
 
 
 def test_preparation_reuses_maintained_command_and_refuses_sdk_mismatch_before_root(fixture, monkeypatch):

@@ -1912,6 +1912,18 @@ class GuestBootstrapController:
 
     def execute(self, *, timeout_seconds: float = 30) -> dict:
         """Resume exact local effects; never blindly stop a replacement process."""
+        return self._advance(timeout_seconds=timeout_seconds, quiesce_only=False)
+
+    def quiesce(self, *, timeout_seconds: float = 30) -> dict:
+        """Retain and recheck predecessor exit without publishing or starting.
+
+        Group admission needs the existing native writer while the predecessor
+        is stopped. This is the same bounded lifecycle operation as execute,
+        not permission to stop a replacement or report receiving readiness.
+        """
+        return self._advance(timeout_seconds=timeout_seconds, quiesce_only=True)
+
+    def _advance(self, *, timeout_seconds: float, quiesce_only: bool) -> dict:
         from .onboarding_host import HostConfig
         with ExitStack() as locks:
             locks.enter_context(self.journal.mutation_lock(self.operation_id))
@@ -1946,6 +1958,8 @@ class GuestBootstrapController:
             if 'mode' in frozen['owner']:
                 owner_request.update(mode=frozen['owner']['mode'], preservation=frozen['owner']['preservation'])
             effects = (row['runtime_observation'] or {}).get('guest_bootstraps', {}).get(self.name, {})
+            if quiesce_only and ('started' in effects or 'controlled_loaded' in effects):
+                raise OnboardingError('receiving_guest_bootstrap_already_started')
             if row['state'] == 'planned':
                 self.journal.advance(self.operation_id, 'runtime-dispatching')
             def root_call(action):
@@ -1987,6 +2001,15 @@ class GuestBootstrapController:
                     if candidate['expires_at_ms'] <= time.time_ns() // 1_000_000:
                         raise OnboardingError('receiving_guest_bootstrap_authorization_expired')
                 self._record('quiesced', root_call('bootstrap-quiesce'))
+            if quiesce_only:
+                # A retained exit is historical evidence. The owning root
+                # route rechecks the current unit and exact predecessor exits
+                # before returning, and refuses to stop a replacement.
+                if 'quiesced' in effects:
+                    result = root_call('bootstrap-quiesce')
+                    self._record('quiesced', result)
+                    return result
+                return self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]['quiesced']
             # Root rechecks current quiescence before every owner mutation; its
             # retained independent exits do not imply the unit stayed stopped.
             if owner_request.get('mode', 'issue') == 'preserve':

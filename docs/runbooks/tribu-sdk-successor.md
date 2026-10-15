@@ -636,6 +636,17 @@ consumer below require the actual protected initial records, current native
 adoption and all-required revocations. Admission publication/lifecycle derivation
 and complete portal orchestration remain unfinished, not deployed acceptance.
 
+`GuestBootstrapController.quiesce()` exposes the existing guest stop/exit phase
+without running owner publication, unit selection or replacement startup. It
+uses the same operation, candidate validation and operation -> jobs ownership
+as `execute()`. An exact retry asks the root owner to recheck current quiescence;
+a retained exit alone is insufficient. A replacement already started by this
+operation cannot be stopped through this method. `execute()` can continue the
+same operation afterwards. This is the publication seam, not completed group
+admission: the approved before/after group binding and the admission-aware
+revocation barrier still need their caller integration. Live use retains the
+existing scoped interruption-consent requirement.
+
 ### Controller preparation before initial group admission
 
 `ManagedRuntime.prepare_admission(plan)` prepares the existing native admission
