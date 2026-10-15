@@ -618,9 +618,31 @@ oversized histories, and mismatched application pins are refused. V1 remains
 readable with its original current-snapshot behavior; a V2 selection requires
 the SDK public-history reader from Matrix #358 and fails explicitly without it.
 
-This reader does not publish a selection, authorize a member, import a foreign
+The reader does not publish a selection, authorize a member, import a foreign
 ledger or copy past conversation plaintext. It changes no production selection.
-Cluster #227 still owns the retained owner requests, additive publication/CAS,
-distinct before/after receiving cohorts, first managed start and integrated
-admission qualification. The prepared2144 update is a separate immutable
-candidate; this future-admission source does not replace it.
+
+`onboarding_peer.publish_group_selection` is the owner-local publication step.
+Call it under the actual runtime writer with senders fenced, after the exact
+application is published. It derives fixed application/visibility/socket pins,
+checks the complete public history against current and already-known native
+authorities, and signs V2 through the current local body. Pin the previous
+selection's digest (or `None` for an absent first selection) and retain one
+operation UUID. The previous signed selector, exact intended successor and
+operation directory are made durable before replacing `selection.json`.
+An exact lost-reply retry completes missing durability and returns the same
+selection without another replacement; a different later selection or application
+refuses instead of being overwritten. Invalid history is rejected before retention.
+The old selector may pin the preceding application during this offline transaction.
+Do not start a service until application, accepted visibility and selector agree.
+`selected` here explicitly leaves receiving readiness unobserved.
+
+Cluster #227 still owns the retained authenticated owner requests, orchestrated
+application/visibility/selector publication, distinct before/after receiving
+cohorts, first managed start and integrated admission qualification. Native local
+API frames have a30-second first-use freshness window: freeze durable intent
+early, but prepare and retain its authenticated frame immediately before first
+dispatch. An already-journaled native request remains exactly retryable later;
+an unseen expired frame is not permission to refresh or re-author an uncertain
+request. Preserve it for owner-side reconciliation under actual writer ownership.
+The prepared2144 update is a separate immutable candidate; future-admission source
+does not replace it.

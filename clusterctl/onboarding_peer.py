@@ -16,7 +16,7 @@ import types
 from contextlib import closing
 from pathlib import Path
 
-from . import onboarding_release
+from . import being_seed, onboarding_release
 from .onboarding import OnboardingError, digest, private_directory
 
 TOOL_SHA256 = 'd1f67e40bbc8c08eff0e0f96354e107d2f8219b258c661b81b9e98a60565c03c'
@@ -214,11 +214,15 @@ def _approved_group(group_root: Path, verify):
 
 
 def _approved_group_packet(group_root: Path, verify):
-    from daimon_matrix.messaging_config import APPLICATION_SCHEMA_V3, _read_publication
     path = group_root / 'selection.json'
     if not path.exists():
         return None
     packet = json.loads(onboarding_release.regular(path, uid=os.geteuid()))
+    return _validate_group_packet(group_root, packet, verify)
+
+
+def _validate_group_packet(group_root: Path, packet: dict, verify):
+    from daimon_matrix.messaging_config import APPLICATION_SCHEMA_V3, _read_publication
     if set(packet) != {'document', 'binding'}:
         raise OnboardingError('approved_onboarding_group_required')
     document = packet['document']
@@ -244,6 +248,104 @@ def _approved_group_packet(group_root: Path, verify):
     if schema == 'cluster-onboarding-group-selection/v2':
         histories = _group_public_history(document, packet['binding'], application)
     return document, histories
+
+
+def publish_group_selection(hosted, group_root: Path, *, operation_id: str,
+                            expected_selection_sha256: str | None,
+                            authority_history: dict) -> dict:
+    """Owner-local CAS after application publication, under the runtime writer.
+
+    This selects public authority/application pins only. It neither loads a
+    visibility controller nor claims startup, receiving admission or delivery.
+    The caller must keep senders fenced until the complete admission succeeds.
+    """
+    import re
+    import uuid
+    from daimon_matrix.messaging_config import (
+        create_binding, read_application_authorities, read_publication, verify_binding,
+    )
+    try:
+        if (str(uuid.UUID(operation_id)) != operation_id
+                or expected_selection_sha256 is not None
+                and re.fullmatch(r'[0-9a-f]{64}', expected_selection_sha256) is None):
+            raise ValueError
+    except (TypeError, ValueError, AttributeError):
+        raise OnboardingError('onboarding_group_selection_operation_required') from None
+    private_directory(group_root)
+    def verify(document, binding):
+        return verify_binding(hosted, document, binding)
+    with being_seed._locked(group_root):
+        application, _ = read_publication(hosted, group_root / 'application')
+        document = dict(schema='cluster-onboarding-group-selection/v2',
+            tribe_ref=application['tribe']['policy']['tribe_ref'],
+            directory=str(group_root / 'application'),
+            visibility=str(group_root / 'visibility/installation.json'), socket='tribe.sock',
+            application_sha256=digest(application), authority_history=copy.deepcopy(authority_history))
+        candidate = dict(document=document, binding=create_binding(hosted, document))
+        if len(json.dumps(candidate, sort_keys=True).encode()) > being_seed.MAX_SELECTION:
+            raise OnboardingError('onboarding_group_selection_too_large')
+        # Validate before retaining anything, including the exact foreign Root
+        # history map. The predecessor can legitimately pin the earlier app.
+        _, histories = _validate_group_packet(group_root, candidate, verify)
+        bundle = being_seed._read(hosted.state_root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+        current = read_application_authorities(hosted.state_root, 'runtime.json',
+            group_root / 'application', at_ms=hosted.service.clock())
+        _group_authorities_with_history(bundle, histories, current)
+        path = group_root / 'selection.json'
+        before = being_seed._read(path, limit=being_seed.MAX_SELECTION) if path.exists() else None
+        command = dict(operation_id=operation_id, expected_selection_sha256=expected_selection_sha256,
+                       candidate_sha256=digest(candidate))
+        operations = group_root / 'selection-operations'
+        private_directory(operations, create=True)
+        operation = operations / (operation_id + '.json')
+        if operation.exists():
+            retained = being_seed._read(operation, limit=2 * being_seed.MAX_SELECTION + being_seed.MAX_RECORD)
+            if (set(retained) != {'schema', 'command', 'before', 'candidate'}
+                    or retained['schema'] != 'cluster-onboarding-group-selection-operation/v1'
+                    or retained['command'] != command or retained['candidate'] != candidate):
+                raise OnboardingError('onboarding_group_selection_operation_conflict')
+            predecessor = retained['before']
+        else:
+            predecessor = before
+        if (None if predecessor is None else digest(predecessor)) != expected_selection_sha256:
+            raise OnboardingError('onboarding_group_selection_changed')
+        if predecessor is not None:
+            if set(predecessor) != {'document', 'binding'}:
+                raise OnboardingError('approved_onboarding_group_required')
+            verify(predecessor['document'], predecessor['binding'])
+            if predecessor['document']['tribe_ref'] != document['tribe_ref']:
+                raise OnboardingError('onboarding_group_selection_changed')
+        if not operation.exists():
+            being_seed._write(operation, dict(schema='cluster-onboarding-group-selection-operation/v1',
+                command=command, before=predecessor, candidate=candidate),
+                limit=2 * being_seed.MAX_SELECTION + being_seed.MAX_RECORD)
+        if before != predecessor and before != candidate:
+            raise OnboardingError('onboarding_group_selection_changed')
+        # A retry after a failed directory fsync must finish durability before
+        # replacing the selector, even when the retained operation is readable.
+        for directory in (operations, group_root):
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        current_application, _ = read_publication(hosted, group_root / 'application')
+        if digest(current_application) != document['application_sha256']:
+            raise OnboardingError('onboarding_group_selection_changed')
+        before = being_seed._read(path, limit=being_seed.MAX_SELECTION) if path.exists() else None
+        if before != predecessor and before != candidate:
+            raise OnboardingError('onboarding_group_selection_changed')
+        if before != candidate:
+            being_seed._write(path, candidate, limit=being_seed.MAX_SELECTION)
+        else:
+            descriptor = os.open(group_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        return dict(schema='cluster-onboarding-group-selection-result/v1',
+            status='selected', operation_id=operation_id, selection_sha256=digest(candidate),
+            application_sha256=document['application_sha256'], receiving_readiness='unobserved')
 
 
 def _group_public_history(selection: dict, binding: dict, application: dict) -> dict:
@@ -314,6 +416,10 @@ def approved_group_authorities(runtime_root: Path, group_root: Path, bundle: dic
     from daimon_matrix.messaging_config import read_application_authorities
     current = read_application_authorities(runtime_root, 'runtime.json',
         Path(selected['directory']), at_ms=time.time_ns() // 1000000)
+    return _group_authorities_with_history(bundle, histories, current)
+
+
+def _group_authorities_with_history(bundle: dict, histories: dict | None, current: dict) -> dict:
     if histories is None:
         return current
     from daimon_matrix.operator_messaging import public_authority_history

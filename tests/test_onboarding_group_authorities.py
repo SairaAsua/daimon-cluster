@@ -1,6 +1,7 @@
 """Owner-signed group Root closure is independent of bilateral enrollment."""
 import copy
 import hashlib
+import json
 import os
 import time
 import uuid
@@ -131,6 +132,161 @@ def history_selection(source, peer_bundle):
     document.update(schema='cluster-onboarding-group-selection/v2', authority_history={
         peer_bundle['manifest']['being_ref']: copy.deepcopy(peer_bundle['authority_history'])})
     return selected, base, document, create_binding
+
+
+def selection_operation(source, peer_bundle):
+    from clusterctl.onboarding import digest
+    from clusterctl.onboarding_peer import publish_group_selection
+    selected, base, _document, _sign = history_selection(source, peer_bundle)
+    before = being_seed._read(selected)
+    arguments = dict(operation_id=str(uuid.uuid4()), expected_selection_sha256=digest(before),
+        authority_history={peer_bundle['manifest']['being_ref']: peer_bundle['authority_history']})
+    return selected, base, before, arguments, publish_group_selection
+
+
+def test_selection_publication_recovers_lost_reply_without_replacing_again(group_source, monkeypatch):
+    from clusterctl.onboarding import digest
+    source, target, _peer, peer_bundle, _old = group_source
+    selected, base, before, arguments, publish = selection_operation(source, peer_bundle)
+    original = being_seed._write
+    native = {name: (source.root / name).read_bytes() for name in ('runtime.json', 'custody.json')}
+
+    def lost_reply(path, value, **options):
+        original(path, value, **options)
+        if path == selected:
+            raise OSError('synthetic lost selector publication reply')
+
+    monkeypatch.setattr(being_seed, '_write', lost_reply)
+    with pytest.raises(OSError, match='synthetic lost'):
+        publish(base, selected.parent, **arguments)
+    candidate = selected.read_bytes()
+
+    def no_replacement(*args, **kwargs):
+        pytest.fail('exact retry replaced an already selected document')
+
+    monkeypatch.setattr(being_seed, '_write', no_replacement)
+    result = publish(base, selected.parent, **arguments)
+    assert result['status'] == 'selected' and result['receiving_readiness'] == 'unobserved'
+    assert result['selection_sha256'] == digest(being_seed._read(selected)) != digest(before)
+    assert selected.read_bytes() == candidate
+    recovered = source._load(signed=False)
+    assert recovered.service.relationships.authority_resolver(peer_bundle['manifest']['being_ref'])
+    assert {name: (source.root / name).read_bytes() for name in native} == native
+    assert target.document_bundle()['sources']['known_beings'] == []
+
+
+def test_selection_retry_finishes_parent_durability_before_publication(group_source, monkeypatch):
+    source, _target, _peer, peer_bundle, _old = group_source
+    selected, base, before, arguments, publish = selection_operation(source, peer_bundle)
+    original = os.fsync
+    operations = selected.parent / 'selection-operations'
+    observed = []
+
+    def failed_directory_sync(descriptor):
+        path = os.readlink('/proc/self/fd/' + str(descriptor))
+        if path == str(operations):
+            observed.append(path)
+            raise OSError('synthetic operation directory sync failure')
+        original(descriptor)
+
+    monkeypatch.setattr(os, 'fsync', failed_directory_sync)
+    for _ in range(2):
+        with pytest.raises(OSError, match='synthetic operation directory'):
+            publish(base, selected.parent, **arguments)
+        assert being_seed._read(selected) == before
+        assert (operations / (arguments['operation_id'] + '.json')).exists()
+    assert len(observed) == 2
+    monkeypatch.setattr(os, 'fsync', original)
+    assert publish(base, selected.parent, **arguments)['status'] == 'selected'
+
+
+def test_selection_retry_preserves_a_later_signed_winner(group_source, monkeypatch):
+    from clusterctl.onboarding import OnboardingError
+    from clusterctl.onboarding_peer import approved_group_application
+    from daimon_matrix.messaging_config import create_binding
+    source, _target, peer, peer_bundle, _old = group_source
+    selected, base, before, arguments, publish = selection_operation(source, peer_bundle)
+    original = being_seed._write
+
+    def before_selection(path, value, **options):
+        if path == selected:
+            raise OSError('synthetic interruption before selector')
+        original(path, value, **options)
+
+    monkeypatch.setattr(being_seed, '_write', before_selection)
+    with pytest.raises(OSError, match='synthetic interruption'):
+        publish(base, selected.parent, **arguments)
+    monkeypatch.setattr(being_seed, '_write', original)
+    winner = {**before['document'], 'schema': 'cluster-onboarding-group-selection/v2',
+              'authority_history': {peer.manifest.being_ref: []}}
+    original(selected, dict(document=winner, binding=create_binding(base, winner)))
+    assert approved_group_application(base, selected.parent) == winner
+    exact = selected.read_bytes()
+    with pytest.raises(OnboardingError, match='onboarding_group_selection_changed'):
+        publish(base, selected.parent, **arguments)
+    assert selected.read_bytes() == exact
+
+
+def test_invalid_selection_history_is_not_retained(group_source):
+    from clusterctl.onboarding import OnboardingError
+    source, _target, _peer, peer_bundle, _old = group_source
+    selected, base, before, arguments, publish = selection_operation(source, peer_bundle)
+    arguments['authority_history'] = {}
+    with pytest.raises(OnboardingError, match='approved_onboarding_group_history_required'):
+        publish(base, selected.parent, **arguments)
+    assert being_seed._read(selected) == before
+    assert not (selected.parent / 'selection-operations').exists()
+
+
+def test_first_selection_and_winner_during_publication_are_preserved(group_source, monkeypatch):
+    from clusterctl.onboarding import OnboardingError
+    from clusterctl.onboarding_peer import approved_group_application
+    from daimon_matrix.messaging_config import create_binding
+    source, _target, peer, peer_bundle, _old = group_source
+    selected, base, before, arguments, publish = selection_operation(source, peer_bundle)
+    selected.unlink()
+    arguments['expected_selection_sha256'] = None
+    winner = {**before['document'], 'schema': 'cluster-onboarding-group-selection/v2',
+              'authority_history': {peer.manifest.being_ref: []}}
+    packet = dict(document=winner, binding=create_binding(base, winner))
+    original = os.fsync
+    inserted = False
+
+    def concurrent_winner(descriptor):
+        nonlocal inserted
+        if not inserted and os.readlink('/proc/self/fd/' + str(descriptor)) == str(selected.parent):
+            inserted = True
+            being_seed._write(selected, packet)
+        original(descriptor)
+
+    monkeypatch.setattr(os, 'fsync', concurrent_winner)
+    with pytest.raises(OnboardingError, match='onboarding_group_selection_changed'):
+        publish(base, selected.parent, **arguments)
+    assert inserted and approved_group_application(base, selected.parent) == winner
+    monkeypatch.setattr(os, 'fsync', original)
+    # A distinct genuine first-selection operation accepts only an absent pin.
+    selected.unlink()
+    arguments['operation_id'] = str(uuid.uuid4())
+    result = publish(base, selected.parent, **arguments)
+    exact = selected.read_bytes()
+    assert result['status'] == 'selected'
+    assert publish(base, selected.parent, **arguments) == result
+    assert selected.read_bytes() == exact
+
+
+def test_oversized_signed_selection_is_rejected_before_retention(group_source, monkeypatch):
+    from clusterctl.onboarding import OnboardingError
+    source, _target, _peer, peer_bundle, _old = group_source
+    selected, base, before, arguments, publish = selection_operation(source, peer_bundle)
+    _, _, document, sign = history_selection(source, peer_bundle)
+    candidate = dict(document=document, binding=sign(base, document))
+    # Exercise the real encoding boundary with a genuine signed history, without
+    # generating hundreds of unrelated epochs merely to consume the byte limit.
+    monkeypatch.setattr(being_seed, 'MAX_SELECTION', len(json.dumps(candidate, sort_keys=True).encode()) - 1)
+    with pytest.raises(OnboardingError, match='onboarding_group_selection_too_large'):
+        publish(base, selected.parent, **arguments)
+    assert json.loads(selected.read_bytes()) == before
+    assert not (selected.parent / 'selection-operations').exists()
 
 
 def test_signed_history_selector_loads_historical_proof_without_pair_or_foreign_store(group_source):
