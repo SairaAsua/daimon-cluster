@@ -128,11 +128,16 @@ class ManagedRuntime:
             return Observation('absent', safe_to_execute=True)
         return Observation('complete', dict(verified=True, identity_verified=True))
 
-    def execute(self, plan: dict) -> None:
-        if not self._ready(plan):
-            raise OnboardingError('onboarding_visibility_selection_required')
+    def prepare_admission(self, plan: dict) -> dict:
+        """Enroll the existing native holder without selecting or starting a service.
+
+        Initial shared-group admission needs this profile before its owner
+        context is frozen. Group publication and managed service startup follow
+        separately; neither a profile nor a registry row proves a loaded body.
+        The normal execute path reuses these same durable proposals and retries.
+        """
         expected = self._expected(plan)
-        self._registered(expected)  # Refuse foreign canonical state before launch.
+        self._registered(expected)  # Preserve foreign canonical state before enrollment.
         if not self._check_proxy(plan):
             proxy = self._proxy()
             self.backend._dispatch(plan, ['config', 'device', 'add', self.backend.instance(plan),
@@ -160,6 +165,13 @@ class ManagedRuntime:
             being_seed._write(root / 'confirmed.json', configuration)
         assert configuration is not None
         onboarding_mounts.prepare_matrix_public(self.backend.config.views, plan, {'admission.json': configuration})
+        return configuration
+
+    def execute(self, plan: dict) -> None:
+        if not self._ready(plan):
+            raise OnboardingError('onboarding_visibility_selection_required')
+        self.prepare_admission(plan)
+        expected = self._expected(plan)
         _, code, _ = self.backend._guest_paths(plan)
         runtime_code, runtime_args, _ = self.backend._runtime_paths(plan, code)
         launcher = ('import sys;sys.path.insert(0,sys.argv.pop(1));'

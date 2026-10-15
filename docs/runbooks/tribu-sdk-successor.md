@@ -629,6 +629,16 @@ marker until its genuine initial-managed producer and validator are integrated.
 
 ### Controller preparation before initial group admission
 
+`ManagedRuntime.prepare_admission(plan)` prepares the existing native admission
+holder/profile independently of application selection and service launch. The
+admission caller uses it under the same job/operation ownership as the remaining
+transaction, before freezing the group-owner context. It reuses the maintained
+proxy, signed proposal history, confirmed profile and exact lost-enrollment
+reconciliation; it does not create another messaging channel or registration.
+A confirmed native profile is not a running body or a cohort adoption receipt.
+Ordinary `ManagedRuntime.execute` calls this same preparation before its existing
+service path, preserving its application/visibility readiness requirement.
+
 Before freezing a new body's group-owner context, prepare its real optional
 receiving controller through the existing qualified guest-owner bootstrap route.
 `receiving-bootstrap-freeze --bootstrap-initial` observes a verified V8 body

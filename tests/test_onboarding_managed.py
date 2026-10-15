@@ -8,7 +8,7 @@ import pytest
 
 from clusterctl import being_seed
 from clusterctl.admission import AdmissionAuthority, AdmissionEndpoint, AdmissionTCPServer, serve_in_thread
-from clusterctl.onboarding import digest
+from clusterctl.onboarding import OnboardingError, digest
 from clusterctl.onboarding_admission import ReceivingHolder
 from clusterctl.onboarding_managed import ManagedRuntime
 from clusterctl.onboarding_runtime import AdmittedDaemon
@@ -115,9 +115,21 @@ def test_lost_enrollment_and_registry_ack_resume_same_holder_and_native_body(tmp
         try:
             assert managed.observe(plan).state == 'absent'
             with pytest.raises(OSError, match='authority registration'):
-                managed.execute(plan)
+                managed.prepare_admission(plan)
             preserved_key = holder.key.read_bytes()
             proposal = being_seed._read(tmp_path / 'service-state' / digest(plan) / 'candidate.json')
+            # A shared-group owner context must be frozen after native profile
+            # preparation, while no application/service has been selected yet.
+            # The real authority has already accepted the lost enrollment ACK.
+            ready = managed._ready
+            managed._ready = lambda _plan: False
+            with pytest.raises(OnboardingError, match='visibility_selection_required'):
+                managed.execute(plan)
+            assert managed.prepare_admission(plan) == proposal
+            assert managed.prepare_admission(plan) == proposal
+            assert active == []
+            assert not managed._registered(managed._expected(plan))
+            managed._ready = ready
             with pytest.raises(OSError, match='registry publication'):
                 managed.execute(plan)
             pid = active[0].process.pid
