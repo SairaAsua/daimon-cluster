@@ -40,6 +40,9 @@ def populated(app):
     def entry(ref, audience, title):
         e=selected(ref * 32, audience, title=title, kind='link',
                    url='https://t.me/example_bot/'+title.lower())
+        # The real link publisher has a canonical version_ref, not the file
+        # revision field carried by artifact fixtures.
+        e.pop('revision')
         e['version_ref']=version_digest(e)
         return e
     states={'one':{'schema':1,'entries':[entry('a','human','PrivateOwn')]},
@@ -60,6 +63,7 @@ def test_cross_home_public_discovery_cannot_reuse_local_private_entitlement(syst
     app,_=system;states=populated(app)
     result=catalog(app,'one',app.authority.actor('human'),False)
     assert {e['title'] for e in result['apps']}=={'PrivateOwn','PublicApp'}
+    assert all(len(e['version_ref'])==64 for e in result['apps'])
     assert not result['partial']
     assert {e['title'] for e in catalog(app,'one',None,False)['apps']}=={'PublicApp'}
     states['two']['entries'][1]['visibility']='human'
