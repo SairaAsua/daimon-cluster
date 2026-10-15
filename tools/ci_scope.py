@@ -323,6 +323,9 @@ LOADED_STARTUP_TESTS = ('tests/test_onboarding_sdk.py', 'tests/test_onboarding_c
 
 
 HOME_FILES = {'clusterctl/homes/__init__.py', 'clusterctl/homes/policy.py',
+    'clusterctl/homes/launcher.py', 'clusterctl/homes/launcher/index.html',
+    'clusterctl/homes/launcher/launcher.js', 'clusterctl/homes/launcher/launcher.css',
+    'tests/test_home_launcher.py', 'docs/design/miniapps-launcher.md',
     'clusterctl/homes/sessions.py', 'clusterctl/homes/authority.py',
     'clusterctl/homes/registry.py', 'clusterctl/homes/service.py',
     'clusterctl/homes/passkeys.py', 'clusterctl/homes/assets/passkeys.js',
@@ -346,7 +349,7 @@ HOME_FILES = {'clusterctl/homes/__init__.py', 'clusterctl/homes/policy.py',
     'clusterd/assets/fonts/space-grotesk-latin.woff2',
     'clusterd/assets/fonts/OFL.txt', 'clusterd/assets/fonts/PROVENANCE.json',
     'tests/test_home_access.py', 'tests/test_home_gateway.py', 'tests/test_home_host.py'}
-HOME_TESTS = ('tests/test_home_access.py', 'tests/test_home_gateway.py', 'tests/test_home_host.py',
+HOME_TESTS = ('tests/test_home_launcher.py', 'tests/test_home_access.py', 'tests/test_home_gateway.py', 'tests/test_home_host.py',
               'tests/test_home_passkeys.py', 'tests/test_home_client.py', 'tests/test_home_styles.py', 'tests/test_home_login.py', 'tests/test_home_homemaker.py',
               'tests/test_auth.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
 

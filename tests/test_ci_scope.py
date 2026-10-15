@@ -59,6 +59,17 @@ def test_loaded_startup_covers_actual_processes_and_preserves_broader_boundaries
         assert select([*changed, other], ROOT) != ('peer', list(LOADED_STARTUP_TESTS))
 
 
+def test_launcher_keeps_the_existing_home_authority_and_browser_boundary():
+    from tools.ci_scope import HOME_TESTS
+    changed=['clusterctl/homes/service.py','clusterctl/homes/homemaker.py',
+             'clusterctl/homes/launcher.py','clusterctl/homes/launcher/index.html',
+             'clusterctl/homes/launcher/launcher.css','clusterctl/homes/launcher/launcher.js',
+             'tests/test_home_launcher.py','docs/design/miniapps-launcher.md',
+             'tools/ci_scope.py','tests/test_ci_scope.py']
+    assert select(changed,ROOT)==('homes',list(HOME_TESTS))
+    assert select([*changed,'clusterctl/operation_journal.py'],ROOT)==('full',['tests'])
+
+
 def test_host_selection_covers_job_fences_and_shared_journal_consumers(tmp_path):
     from tools.ci_scope import HOST_SELECTION_FILES, HOST_SELECTION_TESTS
     changed = sorted(HOST_SELECTION_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py'})
