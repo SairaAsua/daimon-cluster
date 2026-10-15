@@ -384,6 +384,32 @@ def sdk_generations(tmp_path):
     return base, fingerprint, source, profile, current / 'sdk', home
 
 
+def test_retained_legacy_sdk_selection_survives_a_host_pin_change(tmp_path, monkeypatch):
+    from clusterctl import onboarding_code_successor, onboarding_sdk
+    from clusterctl.onboarding_host import HostConfig
+    base, original, source, _, sdk, _ = sdk_generations(tmp_path)
+    output = tmp_path / 'sdk-successor'
+    result = build(base, original, source, ('onboarding_target.py',), output, sdk=sdk)
+    # The host updates its default while these approved bytes stay selected.
+    monkeypatch.setattr(onboarding_sdk, 'MATRIX_COMMIT', 'f' * 40)
+    assert onboarding_code_successor.sdk_parameters(output, uid=os.geteuid()) == {}
+    with pytest.raises(OnboardingError, match='invalid_onboarding_sdk'):
+        onboarding_sdk.verify(output, uid=os.geteuid())
+    assert selected(output, result['runtime_digest'], base, original, uid=os.geteuid()) == output
+    value = dict(schema='cluster-onboarding-host/v1', native_image='3' * 64,
+        browser_image='4' * 64, release_digest=original, pool='daimon-cluster',
+        profile='daimon-agent', concurrency=1, code=str(base), runtime_code=str(output),
+        runtime_digest=result['runtime_digest'], runtime_by_name={
+            'eko': dict(runtime_code=str(output), runtime_digest=result['runtime_digest'])})
+    for key in ('jobs', 'grants', 'inputs', 'views', 'progress'):
+        directory = tmp_path / key
+        directory.mkdir(mode=0o700)
+        value[key] = str(directory)
+    config = tmp_path / 'host.json'
+    being_seed._write(config, value)
+    assert HostConfig.load(config).runtime_code == output
+
+
 def test_explicit_sdk_successor_installs_new_generation_without_touching_previous(tmp_path):
     from clusterctl import onboarding_sdk
     from clusterctl.onboarding import digest
