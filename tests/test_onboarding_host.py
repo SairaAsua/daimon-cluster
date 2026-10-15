@@ -76,6 +76,32 @@ def configured(tmp_path):
     return config, value, run, HostBackend(config, run=run)
 
 
+@pytest.mark.parametrize('action', ['native-install', 'probe', 'prepare', 'install'])
+def test_native_harness_commands_do_not_require_bot_connections(tmp_path, action):
+    from clusterctl.onboarding import Observation
+    _, value, _, backend = configured(tmp_path)
+    backend._environment = lambda p: Observation('complete')
+    mounts = {'qualified-code': {'source': '/public/code'}}
+    backend._guest_paths = lambda p: (Path('/guest'), Path('/guest/code'), dict(mounts))
+    backend._telegram_paths = lambda p, base: (base, [], {})
+    observed = []
+    backend._mounted = lambda p, selected: observed.append(selected) or True
+    calls = []
+    def dispatch(p, argv):
+        calls.append(argv)
+        return json.dumps({'plan_digest': digest(p)})
+    backend._dispatch = dispatch
+    # No views or private connection data exists for the native-only phase.
+    if action in {'prepare', 'install'}:
+        with pytest.raises(OnboardingError, match='receiving_code_configuration_required'):
+            backend._telegram_command(value, action)
+        assert calls == []
+        return
+    assert backend._telegram_command(value, action) == {'plan_digest': digest(value)}
+    assert observed == [mounts]
+    assert ('--user' in calls[0]) == (action == 'probe')
+
+
 def test_receiving_base_keeps_original_release_without_requiring_participant_archive(tmp_path):
     from tests.test_onboarding_code_successor import fixture as code_fixture
     (tmp_path/'code-fixture').mkdir()

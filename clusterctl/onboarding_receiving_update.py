@@ -439,6 +439,11 @@ class GuestGroupClient:
             native_endpoint=native_endpoint, native_threads=native_threads, binding_filename=binding_filename,
             timeout_seconds=self.timeout_seconds, deadline_ns=self.deadline_ns)
 
+    def preflight_native(self, endpoint: Path) -> dict:
+        from .onboarding_owner_client import OwnerClient
+        return OwnerClient(self.backend).preflight_native(self.plan, candidate=self.candidate,
+            endpoint=endpoint, timeout_seconds=self.timeout_seconds, deadline_ns=self.deadline_ns)
+
 
 class SourceGroupClient:
     """Host coordination through the approved receiving owner's closed CLI.
@@ -587,6 +592,16 @@ class SourceGroupClient:
             module='clusterctl.onboarding_owner_client')
         if (result.get('schema') != 'cluster-native-chat-tooling/v1'
                 or result.get('operation_id') != operation_id or result.get('code_digest') != self.code_digest):
+            raise OnboardingError('receiving_source_owner_observation_conflict')
+        return result
+
+    def preflight_native(self, endpoint: Path) -> dict:
+        result = self._call(['--native-preflight', '--native-endpoint', str(endpoint)],
+            module='clusterctl.onboarding_owner_client')
+        if (result.get('schema') != 'cluster-native-endpoint-readiness/v1'
+                or result.get('acceptance') != 'native-endpoint-only'
+                or result.get('model_turns_started') != 0 or result.get('messages_sent') != 0
+                or result.get('qualification', {}).get('code_digest') != self.code_digest):
             raise OnboardingError('receiving_source_owner_observation_conflict')
         return result
 

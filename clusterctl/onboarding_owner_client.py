@@ -11,7 +11,9 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import time
 from pathlib import Path
+from typing import Callable
 from . import onboarding_release, onboarding_sdk
 from .onboarding import Observation, OnboardingError, digest, validate_plan
 
@@ -160,39 +162,23 @@ def _serve_chat(arguments: list[str], *, startup: dict, binding: Path, code: Pat
     return 0
 
 
-def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict,
-                   codex_home: Path, endpoint: Path, threads: tuple[str, ...],
-                   config_sha256: str, reload: bool = False,
-                   deadline_ns: int | None = None, binding_filename: str = 'binding.json') -> dict:
-    """Observe selected existing native contexts; never create a thread or turn."""
+def _native_query(endpoint: Path, query, *, deadline_ns: int) -> dict:
+    """Use the same pinned owner socket for readiness and catalog inspection."""
     import asyncio
     import os
     import socket
     import stat
     import time
-    from daimon_matrix.agent_chat import bridge
-    from daimon_matrix.messaging_config import protected_read
     from .owner_process import ConnectedProcessObserver
-    import uuid
     from websockets.asyncio.client import unix_connect
-    if (not endpoint.is_absolute() or '..' in endpoint.parts
-            or len(threads) != len(set(threads)) or len(threads) > 128
-            or any(not isinstance(item, str) or str(uuid.UUID(item)) != item for item in threads)):
-        raise OnboardingError('native_tooling_context_required')
-    deadline = deadline_ns if deadline_ns is not None else time.monotonic_ns() + 30_000_000_000
+    if not endpoint.is_absolute() or '..' in endpoint.parts:
+        raise OnboardingError('native_tooling_endpoint_required')
     def remaining():
-        seconds = (deadline - time.monotonic_ns()) / 1_000_000_000
+        seconds = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
         if seconds <= 0:
             raise OnboardingError('native_tooling_observation_expired')
         return seconds
-    def configuration():
-        if hashlib.sha256(protected_read(codex_home / 'config.toml')).hexdigest() != config_sha256:
-            raise OnboardingError('native_tooling_configuration_changed')
-    configuration()
-    binding, fingerprint = _installer(code, code_uid)._binding_fingerprint(attachment, binding_filename=binding_filename)
-    version = tooling_version(startup, fingerprint)
-    catalog = asyncio.run(bridge(binding).list_tools(None, None))
-    expected = {tool.name: tool.input_schema for tool in catalog.tools}
+    remaining()
     selector = endpoint.lstat()
     if selector.st_uid != os.geteuid():
         raise OnboardingError('native_tooling_endpoint_required')
@@ -203,7 +189,19 @@ def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict
     if (not stat.S_ISSOCK(socket_info.st_mode) or socket_info.st_uid != os.geteuid()
             or socket_info.st_mode & 0o022):
         raise OnboardingError('native_tooling_endpoint_required')
-    async def query(stream, observer):
+    async def observe(stream, observer):
+        def verify_endpoint():
+            after = target.lstat()
+            current_selector = endpoint.lstat()
+            if ((socket_info.st_dev, socket_info.st_ino) != (after.st_dev, after.st_ino)
+                    or (selector.st_dev, selector.st_ino, selector.st_ctime_ns) != (
+                        current_selector.st_dev, current_selector.st_ino, current_selector.st_ctime_ns)
+                    or endpoint.resolve(strict=True) != target):
+                raise OnboardingError('native_tooling_endpoint_changed')
+            observer.verify()
+            remaining()
+            return digest(dict(path=str(endpoint), target=str(target), device=after.st_dev,
+                inode=after.st_ino, selector_inode=selector.st_ino, selector_ctime_ns=selector.st_ctime_ns))
         identifier = 0
         async with asyncio.timeout(remaining()), unix_connect(sock=stream, open_timeout=remaining(),
                 close_timeout=1, max_size=8*1024**2) as connection:
@@ -219,95 +217,134 @@ def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict
                         remaining()
                         return value['result']
                 raise OnboardingError('native_tooling_observation_limit')
-            await call('initialize', dict(clientInfo=dict(name='matrix-native-readiness', version='1'),
+            initialized = await call('initialize', dict(clientInfo=dict(name='matrix-native-readiness', version='1'),
                 capabilities=dict(experimentalApi=True)))
             await connection.send(json.dumps(dict(method='initialized')))
-            async def pages(method, parameters):
-                result, cursor, seen = [], None, set()
-                for _ in range(16):
-                    page = await call(method, {**parameters, **({'cursor': cursor} if cursor else {})})
-                    result.extend(page['data'])
-                    cursor = page.get('nextCursor')
-                    if not cursor:
-                        return result
-                    if cursor in seen:
-                        break
-                    seen.add(cursor)
-                raise OnboardingError('native_tooling_observation_limit')
-            def unchanged():
-                configuration()
-                if _installer(code, code_uid)._binding_fingerprint(attachment, binding_filename=binding_filename)[1] != fingerprint:
-                    raise OnboardingError('native_tooling_binding_changed')
-                after = target.lstat()
-                current_selector = endpoint.lstat()
-                if ((socket_info.st_dev, socket_info.st_ino) != (after.st_dev, after.st_ino)
-                        or (selector.st_dev, selector.st_ino, selector.st_ctime_ns) != (
-                            current_selector.st_dev, current_selector.st_ino, current_selector.st_ctime_ns)
-                        or endpoint.resolve(strict=True) != target):
-                    raise OnboardingError('native_tooling_endpoint_changed')
-                observer.verify()
-                remaining()
-                return after
-            loaded = await pages('thread/loaded/list', {'limit': 128})
-            if not set(threads) <= set(loaded):
-                raise OnboardingError('native_tooling_context_unloaded')
-            refreshed = False
-            while True:
-                records, pending, stale = [], False, False
-                for thread in threads or (None,):
-                    parameters = dict(serverName='matrix', detail='toolsAndAuthOnly', limit=16)
-                    if thread is not None:
-                        parameters['threadId'] = thread
-                    rows = await pages('mcpServerStatus/list', parameters)
-                    if len(rows) != 1 or rows[0].get('name') != 'matrix':
-                        raise OnboardingError('native_tooling_catalog_unavailable')
-                    row = rows[0]
-                    if thread is not None and row.get('runtimeStatus') == 'starting':
-                        pending = True
-                        continue
-                    status = row.get('runtimeStatus')
-                    tools = row.get('tools', {})
-                    if (row.get('toolsError') is not None or set(tools) != set(expected)
-                            or any(tools[name].get('inputSchema') != schema for name, schema in expected.items())
-                            or (row.get('serverInfo') or {}).get('version') != version
-                            or thread is not None and status != 'connected'):
-                        # Only an observed stale/failed thread can justify the
-                        # global native reload. Pending and unknown states do not.
-                        if (thread is None or status not in ('connected', 'failed')
-                                or status == 'connected' and (
-                                    (row.get('serverInfo') or {}).get('version') == version
-                                    or row.get('toolsError') is not None)):
-                            raise OnboardingError('native_tooling_catalog_mismatch')
-                        stale = True
-                    else:
-                        records.append(dict(thread_id=thread, tools_sha256=digest(expected), server_version=version))
-                if pending:
-                    await asyncio.sleep(min(.05, remaining()))
-                    continue
-                if not stale:
-                    break
-                if not reload or refreshed:
-                    raise OnboardingError('native_tooling_catalog_mismatch')
-                if not set(threads) <= set(await pages('thread/loaded/list', {'limit': 128})):
-                    raise OnboardingError('native_tooling_context_unloaded')
-                unchanged()
-                refreshed = True
-                await call('config/mcpServer/reload', None)
-            if not set(threads) <= set(await pages('thread/loaded/list', {'limit': 128})):
-                raise OnboardingError('native_tooling_context_unloaded')
-            after = unchanged()
-            return dict(schema='cluster-native-tool-catalog/v1', config_sha256=config_sha256,
-                binding_sha256=fingerprint, native_process=observer.process,
-                endpoint_sha256=digest(dict(path=str(endpoint), target=str(target), device=after.st_dev,
-                    inode=after.st_ino, selector_inode=selector.st_ino, selector_ctime_ns=selector.st_ctime_ns)),
-                contexts=records, acceptance='selected-existing-contexts' if threads else 'server-catalog-only',
-                model_turns_started=0, messages_sent=0)
-
+            result = await query(call, remaining, verify_endpoint, observer.process, initialized)
+            verify_endpoint()
+            return result
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream, ConnectedProcessObserver() as observer:
         stream.settimeout(remaining())
         stream.connect(str(target))
         with observer(stream):
-            return asyncio.run(query(stream, observer))
+            return asyncio.run(observe(stream, observer))
+
+
+def native_endpoint_readiness(endpoint: Path, *, deadline_ns: int) -> dict:
+    """Qualify the approved Codex endpoint before a Matrix binding exists.
+
+    This proves only the owner/peer and native handshake, never Matrix catalog
+    adoption. It neither creates contexts nor reloads tools nor starts a model.
+    """
+    async def query(call, remaining, verify_endpoint, process, initialized):
+        # Codex v1 InitializeResponse; additional fields remain compatible.
+        if (not isinstance(initialized, dict) or any(
+                not isinstance(initialized.get(key), str) or not initialized[key]
+                for key in ('userAgent', 'codexHome', 'platformFamily', 'platformOs'))):
+            raise OnboardingError('native_tooling_observation_refused')
+        home = Path(initialized['codexHome'])
+        if not home.is_absolute() or '..' in home.parts or str(home) != initialized['codexHome']:
+            raise OnboardingError('native_tooling_observation_refused')
+        return dict(schema='cluster-native-endpoint-readiness/v1',
+            native_process=process, endpoint_sha256=verify_endpoint(),
+            acceptance='native-endpoint-only', model_turns_started=0, messages_sent=0)
+    return _native_query(endpoint, query, deadline_ns=deadline_ns)
+
+
+def native_catalog(attachment: Path, *, code: Path, code_uid: int, startup: dict,
+                   codex_home: Path, endpoint: Path, threads: tuple[str, ...],
+                   config_sha256: str, reload: bool = False,
+                   deadline_ns: int | None = None, binding_filename: str = 'binding.json') -> dict:
+    """Observe selected existing native contexts; never create a thread or turn."""
+    import asyncio
+    import time
+    import uuid
+    from daimon_matrix.agent_chat import bridge
+    from daimon_matrix.messaging_config import protected_read
+    if (len(threads) != len(set(threads)) or len(threads) > 128
+            or any(not isinstance(item, str) or str(uuid.UUID(item)) != item for item in threads)):
+        raise OnboardingError('native_tooling_context_required')
+    deadline = deadline_ns if deadline_ns is not None else time.monotonic_ns() + 30_000_000_000
+    def configuration():
+        if hashlib.sha256(protected_read(codex_home / 'config.toml')).hexdigest() != config_sha256:
+            raise OnboardingError('native_tooling_configuration_changed')
+    configuration()
+    binding, fingerprint = _installer(code, code_uid)._binding_fingerprint(attachment, binding_filename=binding_filename)
+    version = tooling_version(startup, fingerprint)
+    catalog = asyncio.run(bridge(binding).list_tools(None, None))
+    expected = {tool.name: tool.input_schema for tool in catalog.tools}
+    async def query(call, remaining, verify_endpoint, process, initialized):
+        async def pages(method, parameters):
+            result, cursor, seen = [], None, set()
+            for _ in range(16):
+                page = await call(method, {**parameters, **({'cursor': cursor} if cursor else {})})
+                result.extend(page['data'])
+                cursor = page.get('nextCursor')
+                if not cursor:
+                    return result
+                if cursor in seen:
+                    break
+                seen.add(cursor)
+            raise OnboardingError('native_tooling_observation_limit')
+        def unchanged():
+            configuration()
+            if _installer(code, code_uid)._binding_fingerprint(attachment, binding_filename=binding_filename)[1] != fingerprint:
+                raise OnboardingError('native_tooling_binding_changed')
+            return verify_endpoint()
+        loaded = await pages('thread/loaded/list', {'limit': 128})
+        if not set(threads) <= set(loaded):
+            raise OnboardingError('native_tooling_context_unloaded')
+        refreshed = False
+        while True:
+            records, pending, stale = [], False, False
+            for thread in threads or (None,):
+                parameters = dict(serverName='matrix', detail='toolsAndAuthOnly', limit=16)
+                if thread is not None:
+                    parameters['threadId'] = thread
+                rows = await pages('mcpServerStatus/list', parameters)
+                if len(rows) != 1 or rows[0].get('name') != 'matrix':
+                    raise OnboardingError('native_tooling_catalog_unavailable')
+                row = rows[0]
+                if thread is not None and row.get('runtimeStatus') == 'starting':
+                    pending = True
+                    continue
+                status = row.get('runtimeStatus')
+                tools = row.get('tools', {})
+                if (row.get('toolsError') is not None or set(tools) != set(expected)
+                        or any(tools[name].get('inputSchema') != schema for name, schema in expected.items())
+                        or (row.get('serverInfo') or {}).get('version') != version
+                        or thread is not None and status != 'connected'):
+                    # Only an observed stale/failed thread can justify the
+                    # global native reload. Pending and unknown states do not.
+                    if (thread is None or status not in ('connected', 'failed')
+                            or status == 'connected' and (
+                                (row.get('serverInfo') or {}).get('version') == version
+                                or row.get('toolsError') is not None)):
+                        raise OnboardingError('native_tooling_catalog_mismatch')
+                    stale = True
+                else:
+                    records.append(dict(thread_id=thread, tools_sha256=digest(expected), server_version=version))
+            if pending:
+                await asyncio.sleep(min(.05, remaining()))
+                continue
+            if not stale:
+                break
+            if not reload or refreshed:
+                raise OnboardingError('native_tooling_catalog_mismatch')
+            if not set(threads) <= set(await pages('thread/loaded/list', {'limit': 128})):
+                raise OnboardingError('native_tooling_context_unloaded')
+            unchanged()
+            refreshed = True
+            await call('config/mcpServer/reload', None)
+        if not set(threads) <= set(await pages('thread/loaded/list', {'limit': 128})):
+            raise OnboardingError('native_tooling_context_unloaded')
+        after = unchanged()
+        return dict(schema='cluster-native-tool-catalog/v1', config_sha256=config_sha256,
+            binding_sha256=fingerprint, native_process=process,
+            endpoint_sha256=after,
+            contexts=records, acceptance='selected-existing-contexts' if threads else 'server-catalog-only',
+            model_turns_started=0, messages_sent=0)
+    return _native_query(endpoint, query, deadline_ns=deadline)
 
 
 def chat_command(venv: Path, imports: Path, code: Path, *, code_digest: str,
@@ -360,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--code-digest', required=True)
     parser.add_argument('--code-owner', type=int, default=0)
-    parser.add_argument('--binding', type=Path, required=True)
+    parser.add_argument('--binding', type=Path)
     parser.add_argument('--config', type=Path)
     parser.add_argument('--expected-config-sha256')
     parser.add_argument('--observation-deadline-ns', type=int)
@@ -369,6 +406,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--codex-home', type=Path)
     parser.add_argument('--connection-mirror', type=Path, action='append', default=[])
     parser.add_argument('--native-endpoint', type=Path)
+    parser.add_argument('--native-preflight', action='store_true')
     parser.add_argument('--native-thread', action='append', default=[])
     parser.add_argument('chat_arguments', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -376,7 +414,7 @@ def main(argv: list[str] | None = None) -> int:
         import math
         import time
         timeout = args.observation_timeout_seconds
-        if not args.reconcile_tooling or not math.isfinite(timeout) or not 0 < timeout <= 60:
+        if not (args.reconcile_tooling or args.native_preflight) or not math.isfinite(timeout) or not 0 < timeout <= 60:
             raise OnboardingError('receiving_owner_deadline_expired')
         deadline = time.monotonic_ns() + int(timeout * 1_000_000_000)
         args.observation_deadline_ns = min(args.observation_deadline_ns or deadline, deadline)
@@ -388,29 +426,45 @@ def main(argv: list[str] | None = None) -> int:
             raise OnboardingError('receiving_source_configuration_changed')
     elif args.expected_config_sha256 is not None:
         raise OnboardingError('receiving_source_configuration_changed')
+    if args.native_preflight:
+        if (args.native_endpoint is None or args.binding is not None or args.reconcile_tooling
+                or args.codex_home is not None or args.connection_mirror or args.native_thread
+                or args.chat_arguments or args.observation_deadline_ns is None):
+            raise OnboardingError('qualified_native_peer_tool_required')
+    elif args.binding is None:
+        raise OnboardingError('qualified_native_peer_tool_required')
     code = Path(__file__).resolve().parents[1]
     parameters = onboarding_code_successor.sdk_parameters(code, uid=args.code_owner)
     if not parameters:
         raise OnboardingError('qualified_native_peer_tool_required')
     startup = onboarding_sdk.qualified_startup(Path(sys.prefix), code,
         code_digest=args.code_digest, code_uid=args.code_owner, **parameters)
+    if args.native_preflight:
+        result = native_endpoint_readiness(args.native_endpoint, deadline_ns=args.observation_deadline_ns)
+        result['qualification'] = {key: startup[key] for key in (
+            'code_digest', 'sdk_digest', 'matrix_commit', 'matrix_wheel_sha256')}
+        print(json.dumps(result))
+        return 0
+    binding = args.binding
+    if binding is None:
+        raise OnboardingError('qualified_native_peer_tool_required')
     if args.reconcile_tooling:
-        if args.chat_arguments or args.binding.name not in {'binding.json', 'owner-binding.json'} or args.codex_home is None:
+        if args.chat_arguments or binding.name not in {'binding.json', 'owner-binding.json'} or args.codex_home is None:
             raise OnboardingError('qualified_native_peer_tool_required')
         if args.observation_deadline_ns is not None:
             import time
             if time.monotonic_ns() >= args.observation_deadline_ns:
                 raise OnboardingError('receiving_owner_deadline_expired')
-        result = reconcile_chat_tooling(args.binding.parent, args.reconcile_tooling,
+        result = reconcile_chat_tooling(binding.parent, args.reconcile_tooling,
             code=code, code_digest=args.code_digest, startup=startup,
             codex_home=args.codex_home, code_uid=args.code_owner, connections=tuple(args.connection_mirror),
-            deadline_ns=args.observation_deadline_ns, binding_filename=args.binding.name)
+            deadline_ns=args.observation_deadline_ns, binding_filename=binding.name)
         if args.native_endpoint is not None and result['status'] == 'configured':
-            result['native_catalog'] = native_catalog(args.binding.parent, code=code,
+            result['native_catalog'] = native_catalog(binding.parent, code=code,
                 code_uid=args.code_owner, startup=startup, codex_home=args.codex_home,
                 endpoint=args.native_endpoint, threads=tuple(args.native_thread),
                 config_sha256=result['config_sha256'], reload=True,
-                deadline_ns=args.observation_deadline_ns, binding_filename=args.binding.name)
+                deadline_ns=args.observation_deadline_ns, binding_filename=binding.name)
             result['catalog_acceptance'] = result['native_catalog']['acceptance']
         if args.observation_deadline_ns is not None:
             import time
@@ -421,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.connection_mirror or args.codex_home is not None or args.native_endpoint is not None or args.native_thread:
         raise OnboardingError('qualified_native_peer_tool_required')
     # Import only after the exact interpreter, code and SDK tree are qualified.
-    return _serve_chat(args.chat_arguments, startup=startup, binding=args.binding, code=code, code_uid=args.code_owner)
+    return _serve_chat(args.chat_arguments, startup=startup, binding=binding, code=code, code_uid=args.code_owner)
 
 # This maintained program runs as the receiving owner, using the already
 # qualified SDK interpreter. Existing or partly published artifacts are checked
@@ -742,12 +796,10 @@ class OwnerClient:
     def execute(self, plan: dict, expected: dict) -> None:
         self._call(plan, expected, install=True)
 
-    def reconcile(self, plan: dict, operation_id: str, *, candidate: tuple[Path, str],
-                  attachment: Path, codex_home: Path, connections: tuple[Path, ...] = (),
-                  native_endpoint: Path | None = None, native_threads: tuple[str, ...] = (),
-                  timeout_seconds: float = 30, deadline_ns: int | None = None,
-                  binding_filename: str = 'binding.json') -> dict:
-        """Use the existing owner CLI; never install personalized owner context."""
+    def _tooling_call(self, plan: dict, *, candidate: tuple[Path, str],
+                      arguments: Callable[[float], list[str]], timeout_seconds: float,
+                      deadline_ns: int | None) -> tuple[dict, dict, int]:
+        """One owner-qualified route for native readiness and tooling changes."""
         import math
         import time
         if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 60:
@@ -770,13 +822,7 @@ class OwnerClient:
         sdk = onboarding_sdk.verify(candidate[0], uid=0, **sdk_parameters(candidate[0], uid=0))
         venv = Path('/home/agent/.local/share/daimon-matrix/sdk') / digest(sdk) / 'venv'
         argv = onboarding_sdk.runtime_command(venv, venv.parent / 'runtime-imports', guest_code,
-            'clusterctl.onboarding_owner_client', ['--code-digest', candidate[1],
-                '--binding', str(attachment / binding_filename), '--reconcile-tooling', operation_id,
-                '--codex-home', str(codex_home),
-                '--observation-timeout-seconds', str(remaining()),
-                *[part for path in connections for part in ('--connection-mirror', str(path))],
-                *(['--native-endpoint', str(native_endpoint)] if native_endpoint is not None else []),
-                *[part for thread in native_threads for part in ('--native-thread', thread)]])
+            'clusterctl.onboarding_owner_client', ['--code-digest', candidate[1], *arguments(remaining())])
         raw = self.host._dispatch(plan, ['exec', self.host.instance(plan), '--user', '1000',
             '--group', '1000', '--env', 'HOME=/home/agent', '--', *argv],
             timeout_seconds=remaining(), deadline_ns=deadline)
@@ -784,11 +830,47 @@ class OwnerClient:
         if len(raw.encode()) > 65536:
             raise OnboardingError('verification_failed')
         result = json.loads(raw)
-        if (not isinstance(result, dict) or result.get('schema') != 'cluster-native-chat-tooling/v1'
+        if not isinstance(result, dict):
+            raise OnboardingError('verification_failed')
+        remaining()
+        return result, sdk, deadline
+
+    def preflight_native(self, plan: dict, *, candidate: tuple[Path, str], endpoint: Path,
+                         timeout_seconds: float = 30, deadline_ns: int | None = None) -> dict:
+        """Check the exact approved endpoint before there is a Matrix binding."""
+        result, sdk, deadline = self._tooling_call(plan, candidate=candidate, timeout_seconds=timeout_seconds,
+            deadline_ns=deadline_ns, arguments=lambda remaining: ['--native-preflight',
+                '--native-endpoint', str(endpoint), '--observation-timeout-seconds', str(remaining)])
+        if (result.get('schema') != 'cluster-native-endpoint-readiness/v1'
+                or result.get('acceptance') != 'native-endpoint-only'
+                or result.get('model_turns_started') != 0 or result.get('messages_sent') != 0
+                or result.get('qualification') != dict(code_digest=candidate[1], sdk_digest=digest(sdk),
+                    matrix_commit=sdk['matrix_commit'], matrix_wheel_sha256=next(
+                        row['sha256'] for row in sdk['wheels'] if row['distribution'] == 'daimon-matrix'))):
+            raise OnboardingError('verification_failed')
+        if time.monotonic_ns() >= deadline:
+            raise OnboardingError('receiving_owner_deadline_expired')
+        return result
+
+    def reconcile(self, plan: dict, operation_id: str, *, candidate: tuple[Path, str],
+                  attachment: Path, codex_home: Path, connections: tuple[Path, ...] = (),
+                  native_endpoint: Path | None = None, native_threads: tuple[str, ...] = (),
+                  timeout_seconds: float = 30, deadline_ns: int | None = None,
+                  binding_filename: str = 'binding.json') -> dict:
+        """Use the existing owner CLI; never install personalized owner context."""
+        result, sdk, deadline = self._tooling_call(plan, candidate=candidate, timeout_seconds=timeout_seconds,
+            deadline_ns=deadline_ns, arguments=lambda remaining: [
+                '--binding', str(attachment / binding_filename), '--reconcile-tooling', operation_id,
+                '--codex-home', str(codex_home), '--observation-timeout-seconds', str(remaining),
+                *[part for path in connections for part in ('--connection-mirror', str(path))],
+                *(['--native-endpoint', str(native_endpoint)] if native_endpoint is not None else []),
+                *[part for thread in native_threads for part in ('--native-thread', thread)]])
+        if (result.get('schema') != 'cluster-native-chat-tooling/v1'
                 or result.get('operation_id') != operation_id or result.get('code_digest') != candidate[1]
                 or result.get('sdk_digest') != digest(sdk) or result.get('matrix_commit') != sdk['matrix_commit']):
             raise OnboardingError('verification_failed')
-        remaining()
+        if time.monotonic_ns() >= deadline:
+            raise OnboardingError('receiving_owner_deadline_expired')
         return result
 
 

@@ -1053,3 +1053,149 @@ def test_tooling_recipe_explicit_binding_filename_never_discovers_another_path(f
     else:
         with pytest.raises(OnboardingError, match='receiving_native_tooling_recipe_required'):
             validate_tooling_recipe(recipe)
+
+
+@pytest.mark.parametrize('fault', [None, 'alias', 'alias-drift', 'unsafe-mode', 'refused', 'stall', 'expired',
+    'empty-response', 'relative-home'])
+def test_native_preflight_uses_exact_endpoint_without_binding_or_model(tmp_path, fault):
+    import threading
+    import time
+    from websockets.sync.server import unix_serve
+    from clusterctl import onboarding_owner_client as owner
+    with tempfile.TemporaryDirectory(prefix='dm-preflight-') as short:
+        endpoint = Path(short) / 'native.sock'
+        selected = Path(short) / 'selected.sock'
+        selected.symlink_to(endpoint.name)
+        requests, release = [], threading.Event()
+        def respond(connection):
+            for message in connection:
+                request = json.loads(message)
+                requests.append(request['method'])
+                assert request['method'] in {'initialize', 'initialized'}
+                if request['method'] == 'initialized':
+                    continue
+                if fault == 'stall':
+                    release.wait(2)
+                    return
+                if fault == 'alias-drift':
+                    replacement = selected.with_suffix('.next')
+                    replacement.symlink_to(endpoint.name)
+                    os.replace(replacement, selected)
+                response = {'id': request['id'], 'result': dict(userAgent='codex/test',
+                    codexHome='/owner/.codex', platformFamily='unix', platformOs='linux')}
+                if fault == 'empty-response':
+                    response['result'] = {}
+                if fault == 'relative-home':
+                    response['result']['codexHome'] = 'relative/.codex'
+                if fault == 'refused':
+                    response = {'id': request['id'], 'error': {'message': 'private server detail'}}
+                connection.send(json.dumps(response))
+        with unix_serve(respond, str(endpoint), close_timeout=.1) as server:
+            endpoint.chmod(0o622 if fault == 'unsafe-mode' else 0o600)
+            thread = threading.Thread(target=server.serve_forever)
+            thread.start()
+            try:
+                deadline = time.monotonic_ns() + int((-.1 if fault == 'expired' else .1 if fault == 'stall' else 3)*1e9)
+                def observe():
+                    return owner.native_endpoint_readiness(
+                        selected if fault in {'alias', 'alias-drift'} else endpoint, deadline_ns=deadline)
+                if fault in {None, 'alias'}:
+                    result = observe()
+                    assert result['acceptance'] == 'native-endpoint-only'
+                    assert result['native_process']['pid'] == os.getpid()
+                    assert result['model_turns_started'] == result['messages_sent'] == 0
+                    assert len(result['endpoint_sha256']) == 64
+                else:
+                    with pytest.raises((OnboardingError, TimeoutError)) as caught:
+                        observe()
+                    assert 'private server detail' not in str(caught.value)
+                if fault in {'expired', 'unsafe-mode'}:
+                    assert requests == []
+            finally:
+                release.set()
+                server.shutdown()
+                thread.join(3)
+                assert not thread.is_alive()
+
+
+@pytest.mark.parametrize('invalid', [None, 'binding', 'reconcile', 'thread', 'no-deadline', 'no-endpoint'])
+def test_native_preflight_cli_qualifies_before_handshake_and_requires_closed_mode(tmp_path, monkeypatch, capsys, invalid):
+    from clusterctl import onboarding_owner_client as owner, onboarding_code_successor
+    calls = []
+    startup = dict(code_digest='a'*64, sdk_digest='b'*64, matrix_commit='c'*40, matrix_wheel_sha256='d'*64)
+    monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda *a, **k: {'matrix_commit': 'c'*40})
+    def qualify(*args, **options):
+        calls.append('qualified')
+        return startup
+    monkeypatch.setattr(owner.onboarding_sdk, 'qualified_startup', qualify)
+    def handshake(endpoint, *, deadline_ns):
+        assert calls == ['qualified']
+        assert endpoint == tmp_path/'native.sock' and deadline_ns > 0
+        calls.append('handshake')
+        return dict(schema='cluster-native-endpoint-readiness/v1', acceptance='native-endpoint-only')
+    monkeypatch.setattr(owner, 'native_endpoint_readiness', handshake)
+    arguments = ['--code-digest', 'a'*64, '--native-preflight']
+    if invalid != 'no-endpoint':
+        arguments += ['--native-endpoint', str(tmp_path/'native.sock')]
+    if invalid != 'no-deadline':
+        arguments += ['--observation-timeout-seconds', '2']
+    arguments += {'binding': ['--binding', str(tmp_path/'binding.json')],
+                  'reconcile': ['--reconcile-tooling', 'operation'],
+                  'thread': ['--native-thread', '00000000-0000-0000-0000-000000000001']}.get(invalid, [])
+    if invalid:
+        with pytest.raises(OnboardingError, match='qualified_native_peer_tool_required'):
+            owner.main(arguments)
+        assert calls == []
+    else:
+        assert owner.main(arguments) == 0
+        assert json.loads(capsys.readouterr().out)['qualification'] == startup
+        assert calls == ['qualified', 'handshake']
+        calls.clear()
+        def refuse(*args, **kwargs):
+            raise OnboardingError('qualified_runtime_context_required')
+        monkeypatch.setattr(owner.onboarding_sdk, 'qualified_startup', refuse)
+        with pytest.raises(OnboardingError, match='qualified_runtime_context_required'):
+            owner.main(arguments)
+        assert calls == []
+
+
+def test_guest_native_preflight_uses_same_qualified_owner_route(tmp_path, monkeypatch):
+    from clusterctl import onboarding_owner_client as owner, onboarding_code_successor
+    from clusterctl.onboarding import digest
+    from tests.test_onboarding import plan
+    sdk = dict(schema=owner.onboarding_sdk.SCHEMA, matrix_commit='b'*40,
+        wheels=[dict(distribution='daimon-matrix', sha256='c'*64,
+            filename='daimon_matrix-1-py3-none-any.whl', version='1')])
+    result = dict(schema='cluster-native-endpoint-readiness/v1', acceptance='native-endpoint-only',
+        qualification=dict(code_digest='a'*64, sdk_digest=digest(sdk), matrix_commit=sdk['matrix_commit'],
+            matrix_wheel_sha256='c'*64), model_turns_started=0, messages_sent=0)
+    calls = []
+    def dispatch(value, command, **options):
+        calls.append((command, options))
+        assert 0 < options['timeout_seconds'] <= 2
+        return json.dumps(result)
+    host = SimpleNamespace(authorize=lambda *a: True, _receiving_base=lambda p: Path('/public/base'),
+        _runtime_paths=lambda *a, **k: (Path('/public/selected'), [], {}),
+        _mounted=lambda *a, **k: True, instance=lambda p: 'dm-fixture', _dispatch=dispatch)
+    monkeypatch.setattr(owner.onboarding_sdk, 'verify', lambda *a, **k: sdk)
+    monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda *a, **k: {})
+    client = owner.OwnerClient(host)
+    options = dict(candidate=(tmp_path/'candidate', 'a'*64), endpoint=Path('/home/agent/native.sock'), timeout_seconds=2)
+    assert client.preflight_native(plan(), **options) == result
+    command = calls[-1][0]
+    assert command[:8] == ['exec', 'dm-fixture', '--user', '1000', '--group', '1000', '--env', 'HOME=/home/agent']
+    assert command[command.index('--native-endpoint')+1] == '/home/agent/native.sock'
+    assert '--native-preflight' in command and '--binding' not in command
+    result['qualification']['sdk_digest'] = 'd'*64
+    with pytest.raises(OnboardingError, match='verification_failed'):
+        client.preflight_native(plan(), **options)
+    result['qualification']['sdk_digest'] = digest(sdk)
+    clock = [0]
+    decode = json.loads
+    def late_decode(raw):
+        clock[0] = 3_000_000_000
+        return decode(raw)
+    monkeypatch.setattr(owner.time, 'monotonic_ns', lambda: clock[0])
+    monkeypatch.setattr(owner.json, 'loads', late_decode)
+    with pytest.raises(OnboardingError, match='receiving_owner_deadline_expired'):
+        client.preflight_native(plan(), **options)

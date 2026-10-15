@@ -1011,6 +1011,24 @@ start can call it while holding its own job scope. It passes only the remaining
 host budget into the root call and checks expiry after it; guest monotonic values
 are not compared with the host clock. No prior ACK is attributed to a replacement.
 
+Before irreversible admission, prepare the native harness separately from the
+later Telegram stage. The existing `native-install` and `probe` verbs require
+qualified code/environment but no bot-connections mount. Bot verbs retain that
+private requirement. Do not run the whole access or Telegram stage early:
+access can invoke a model probe and Telegram can start the human listener.
+Keep the existing JobStore stage order.
+
+The qualified owner-client `--native-preflight --native-endpoint PATH` accepts
+only this closed observation mode and an explicit finite observation budget.
+It shares the catalog reader's resolved-socket/selector/process pin and native
+initialize handshake, without a Matrix binding, tool reload, thread or turn.
+Source and guest clients reuse the existing owner-qualified dispatch routes.
+The result is `native-endpoint-only`, never catalog/adoption acceptance. The
+ordinary probe alone checks the default daemon; this prerequisite must inspect
+the exact endpoint from the approved Codex recipe before fencing old senders.
+After genuine application publication and first load, retain full native catalog
+acceptance through the existing tooling route before positive cohort selection.
+
 The protected worker coordinator, approved publication-command comparison and
 installed old-members/newcomer journey remain unfinished. These lifecycle helpers
 do not establish complete portal admission or installed receiving acceptance.

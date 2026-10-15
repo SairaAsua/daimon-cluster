@@ -472,3 +472,19 @@ def test_source_lifecycle_projection_binds_config_and_omits_unrelated_journal_da
     source.settings = {**settings, 'applications': ['another-source']}
     with pytest.raises(OnboardingError, match='lifecycle_conflict'):
         source.receiving_lifecycle(journal_path, row['operation_id'])
+
+
+def test_source_native_preflight_uses_same_owner_and_requires_no_matrix_binding(adapter):
+    client, result, calls = adapter
+    result.clear()
+    result.update(schema='cluster-native-endpoint-readiness/v1', acceptance='native-endpoint-only',
+        qualification=dict(code_digest=client.code_digest), model_turns_started=0, messages_sent=0)
+    endpoint = client.root.parent/'native.sock'
+    assert client.preflight_native(endpoint) == result
+    argv, options = calls[-1]
+    assert 'clusterctl.onboarding_owner_client' in argv and '--binding' not in argv
+    assert argv[-3:] == ['--native-preflight', '--native-endpoint', str(endpoint)]
+    assert options['user'] == client.owner_uid and options['extra_groups'] == ()
+    result['qualification']['code_digest'] = 'b'*64
+    with pytest.raises(OnboardingError, match='receiving_source_owner_observation_conflict'):
+        client.preflight_native(endpoint)

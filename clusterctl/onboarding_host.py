@@ -691,7 +691,10 @@ class HostBackend:
         _, base, mounts = self._guest_paths(plan)
         code, software_args, software_mounts = self._telegram_paths(plan, base)
         mounts.update(software_mounts)
-        mounts['onboarding-connections'] = self._telegram_mount(plan)
+        # Preparing/probing the native harness precedes Matrix admission and
+        # needs no bot data. Keep the private mount mandatory for bot verbs.
+        if action not in {'native-install', 'probe'}:
+            mounts['onboarding-connections'] = self._telegram_mount(plan)
         if not self._mounted(plan, mounts):
             raise OnboardingError('qualified_guest_environment_required')
         launcher = ('import sys;sys.path.insert(0,sys.argv.pop(1));'
