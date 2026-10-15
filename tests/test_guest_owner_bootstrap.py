@@ -17,6 +17,7 @@ import pytest
 from clusterctl import being_seed
 from clusterctl import onboarding_receiving_update as receiving_update
 from clusterctl.onboarding import OnboardingError, digest
+from daimon_matrix.client import ClientError
 from clusterctl.onboarding_receiving_update import GuestOwnerBootstrap
 from tests.test_onboarding_target import receiving
 
@@ -710,3 +711,14 @@ def test_explicit_sdk_observe_refusal_reports_sdk_stage(monkeypatch, capsys):
     result = capsys.readouterr()
     assert json.loads(result.err)['stage'] == 'sdk-observation'
     assert json.loads(result.err)['code'] == 'installed_onboarding_sdk_changed'
+
+
+@pytest.mark.parametrize('error,code', [
+    (ClientError('daemon_response_truncated'), 'daemon_response_truncated'),
+    (ClientError('SYNTHETIC_PRIVATE_PAYLOAD'), 'unclassified_refusal'),
+    (RuntimeError('daemon_response_truncated'), 'unclassified_refusal'),
+])
+def test_native_client_diagnostics_preserve_only_typed_public_codes(error, code):
+    from clusterctl.onboarding import refusal_diagnostic
+    assert refusal_diagnostic(error, stage='owner-action') == dict(
+        schema='cluster-onboarding-refusal/v1', stage='owner-action', code=code)

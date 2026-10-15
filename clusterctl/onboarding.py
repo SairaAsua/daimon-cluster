@@ -99,6 +99,17 @@ def refusal_diagnostic(error: Exception, *, stage: str) -> dict:
         code = 'local_access_refused'
     elif isinstance(error, TimeoutError):
         code = 'local_operation_timed_out'
+    elif isinstance(error, RuntimeError):
+        # Matrix remains optional for ordinary Cluster commands. Only typed,
+        # explicitly selected transport observations may cross this boundary.
+        try:
+            from daimon_matrix.client import ClientError
+        except ImportError:
+            pass
+        else:
+            if isinstance(error, ClientError) and str(error) in {
+                    'daemon_response_truncated', 'daemon_timeout', 'daemon_deadline_expired'}:
+                code = str(error)
     return dict(schema='cluster-onboarding-refusal/v1', stage=stage, code=code)
 
 
