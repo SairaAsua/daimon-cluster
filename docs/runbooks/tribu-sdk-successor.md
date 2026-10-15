@@ -600,6 +600,33 @@ compatible group artifacts. Old terminated memberships/grants and archived pair
 defaults are not an operational rollback. Historical messages remain readable;
 exact expired retries return their retained outcome without new transmission.
 
+### Admission before/after cohort and retained activation plan
+
+An existing Tribe's admission keeps one `receiving-update` operation and native
+control identity. Its target is `receiving:<tribe_ref>`; per-entrant targets cannot
+bypass the same-Tribe conflict. `expected_precondition.senders` contains only the
+actual original senders. The explicit `cohort_admission` transition freezes the
+complete after-receiver identities/owner locators, exact added being/bodies,
+qualified public candidate locations, prepared SDKs, profiles/tooling, original
+receiver selections and finite activation bounds. Existing equal-set updates
+continue using their unchanged `cohort_activation` transition.
+
+The admission's old-sender revocation does not query an unstarted added receiver.
+After actual publication/start effects, `retain_admission_activation` can retain
+the constrained concrete plan once in `runtime_observation.admission_activation_plan`.
+It does not rewrite intent, extend the horizon or replace prior selections, and
+it remains separate from qualified `runtime_observation.cohort_activation` evidence.
+The manifest must cover exactly the approved after-set; candidate/profile/tooling
+and original pre-selection pins cannot drift during derivation.
+
+This record alone cannot enable senders. Native loaded adoption must still prove
+the same Tribe, and an added receiver cannot borrow another operation's replacement
+history as its own first managed start. The ManagedRuntime producer, admission
+publication/lifecycle derivation, after-only sender revocation/repair and complete
+portal/cohort activation remain unfinished integration, not deployed acceptance.
+Added-body lifecycle qualification currently refuses even a locally retained
+marker until its genuine initial-managed producer and validator are integrated.
+
 ### Controller preparation before initial group admission
 
 Before freezing a new body's group-owner context, prepare its real optional

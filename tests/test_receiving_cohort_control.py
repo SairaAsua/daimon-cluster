@@ -274,6 +274,134 @@ def fixture(tmp_path):
     return path, original, runtime, owners, journal, row['operation_id']
 
 
+def admission_fixture(tmp_path):
+    from tests.test_receiving_update_preflight import fixture as reader_fixture
+    code, code_digest, _, manifest_path, manifest, _ = reader_fixture(tmp_path)
+    owners, previous = {}, {}
+    for name in ('eko', 'newcomer', 'oliva'):
+        root = tmp_path / name
+        root.mkdir(mode=0o700)
+        owners[name] = FakeOwner(root, name)
+        previous[name] = {'previous': name}
+    manifest['required_receivers'] = [dict(being_ref=owner.being,
+        embodiment_id=owner.server['embodiment_id'], expected_selection_sha256=digest(previous[name]))
+        for name, owner in owners.items()]
+    authorities = [dict(being_ref=owner.being, control_head='control:fixture', manifest_hash='1' * 64)
+                   for owner in owners.values()]
+    manifest['authorities'] = dict(current=authorities, candidate=copy.deepcopy(authorities))
+    manifest['artifacts']['receiving_code'] = code_digest
+    being_seed._write(manifest_path, manifest)
+    receivers, recipes = {}, {}
+    for name, owner in owners.items():
+        prepared = preflight(code, code_digest, manifest_path, digest(manifest),
+            being_ref=owner.being, embodiment_id=owner.server['embodiment_id'],
+            code_uid=os.geteuid(), manifest_uid=os.geteuid())
+        recipe = dict(profile='guest', prepared=prepared, tooling={'profile': 'matrix-only'})
+        receivers[name] = dict(being_ref=owner.being, embodiment_id=owner.server['embodiment_id'],
+            root=str(owner.root), socket=str(owner.socket), candidate=dict(code=str(code), code_uid=os.geteuid()),
+            recipe=recipe)
+        recipes[name] = {**recipe, 'lifecycle_operation_id': 'unobserved:' + name,
+            'selection': dict(receiving_code=code_digest, matrix_sdk=prepared['matrix_wheel_sha256'],
+                runtime_bundle_sha256='a' * 64, application_sha256='b' * 64,
+                publication_sha256='c' * 64, visibility_installation_sha256='d' * 64)}
+    bounds = dict(manifest_path=str(manifest_path), manifest_uid=os.geteuid(),
+        expires_at_ms=time.time_ns() // 1_000_000 + 300000, observation_window_ms=60000)
+    admission = dict(schema='cluster-receiving-admission/v1', tribe_ref='tribe:fixture',
+        entrant=dict(being_ref=owners['newcomer'].being, embodiment_ids=[owners['newcomer'].server['embodiment_id']]),
+        receivers=receivers, activation=bounds)
+    before = dict(tribe_ref=admission['tribe_ref'], receiver_selections=previous,
+        senders=freeze_senders({name: owner for name, owner in owners.items() if name != 'newcomer'},
+            tribe_ref=admission['tribe_ref']))
+    journal = OperationJournal(tmp_path / 'admission-journal')
+    row = plan_update(journal, manifest_digest=digest(manifest), target='receiving:' + admission['tribe_ref'],
+        expected_precondition=before, intended_transition={'cohort_admission': admission}, audit_identity={'actor': 'fixture'})
+    controller = CohortController(journal, row['operation_id'], owners)
+    return controller, owners, journal, row, {**bounds, 'roster_sha256': '5' * 64, 'receivers': recipes}
+
+
+def test_admission_revokes_only_before_set_and_retains_late_plan_without_rewriting_intent(tmp_path, monkeypatch):
+    controller, owners, journal, original, plan = admission_fixture(tmp_path)
+    def no_initial_status():
+        pytest.fail('An unstarted receiver must not be treated as an old sender')
+    monkeypatch.setattr(owners['newcomer'], 'status', no_initial_status)
+    with pytest.raises(OnboardingError, match='activation_unobserved'):
+        controller._activation(controller._row())
+    barrier = controller.revoke_senders()
+    assert set(barrier['sender_revocations']) == {'eko', 'oliva'}
+    assert owners['eko'].effects == owners['oliva'].effects == 1 and owners['newcomer'].effects == 0
+    retained = controller.retain_admission_activation(plan)
+    assert controller.retain_admission_activation(copy.deepcopy(plan)) == retained
+    row = journal.get(original['operation_id'])
+    assert row['intent'] == original['intent'] and row['intended_transition'] == original['intended_transition']
+    assert row['expected_precondition'] == original['expected_precondition']
+    assert row['runtime_observation']['admission_activation_plan'] == retained
+    assert 'cohort_activation' not in row['runtime_observation']
+    assert set(controller._activation(row)[0]['receivers']) == set(owners)
+    with pytest.raises(OnboardingError, match='lifecycle_unobserved'):
+        controller.prepare_activation()
+    assert all(owner.gate['phase'] != 'select' for owner in owners.values())
+
+
+@pytest.mark.parametrize('drift', ['horizon', 'candidate', 'audience'])
+def test_late_admission_plan_cannot_change_frozen_approval(tmp_path, drift):
+    controller, owners, journal, original, plan = admission_fixture(tmp_path)
+    controller.revoke_senders()
+    if drift == 'horizon':
+        plan['expires_at_ms'] += 1
+    elif drift == 'candidate':
+        plan['receivers']['newcomer']['prepared']['code_digest'] = 'f' * 64
+    else:
+        del plan['receivers']['newcomer']
+    with pytest.raises(OnboardingError, match='activation_changed|activation_required'):
+        controller.retain_admission_activation(plan)
+    assert 'admission_activation_plan' not in journal.get(original['operation_id'])['runtime_observation']
+    assert owners['newcomer'].effects == 0
+
+
+def test_retained_admission_plan_is_write_once_and_single_tribe_target_is_required(tmp_path):
+    from clusterctl.operation_journal import JournalConflict
+    controller, owners, journal, original, plan = admission_fixture(tmp_path)
+    controller.revoke_senders()
+    controller.retain_admission_activation(plan)
+    changed = copy.deepcopy(plan)
+    changed['receivers']['newcomer']['selection']['publication_sha256'] = 'f' * 64
+    with pytest.raises(JournalConflict, match='derivation changed'):
+        controller.retain_admission_activation(changed)
+    with pytest.raises(JournalConflict):
+        plan_update(journal, manifest_digest='e' * 64, target=original['target'],
+            expected_precondition=original['expected_precondition'], intended_transition=original['intended_transition'],
+            audit_identity={'actor': 'fixture'})
+    wrong = plan_update(journal, manifest_digest='d' * 64, target=original['target'] + ':newcomer',
+        expected_precondition=original['expected_precondition'], intended_transition=original['intended_transition'],
+        audit_identity={'actor': 'fixture'})
+    with pytest.raises(OnboardingError, match='admission_required'):
+        CohortController(journal, wrong['operation_id'], owners)._row()
+
+
+def test_admission_requires_same_group_and_genuine_initial_lifecycle(tmp_path):
+    controller, owners, _, _, plan = admission_fixture(tmp_path)
+    owner = owners['newcomer']
+    with pytest.raises(OnboardingError, match='initial_managed_lifecycle_unobserved'):
+        controller._lifecycle('newcomer', plan['receivers']['newcomer'])
+    current = {**owner.status(), 'identity': {}, 'runtime_status': dict(loaded_runtime={},
+        loaded_application={'tribe': {'policy': {'tribe_ref': 'tribe:another'}}})}
+    # This is a guard on authenticated observations, not a claim that fake
+    # status constitutes a qualified startup or a native membership proof.
+    context = ({'profile': 'matrix-only'}, {}, None, plan['receivers']['newcomer']['prepared'])
+    with pytest.raises(OnboardingError, match='admission_group_changed'):
+        controller._adoption('newcomer', plan, {}, context=context, observed=(current, 0, 0))
+
+
+def test_initial_marker_cannot_borrow_same_operation_replacement_proof(tmp_path):
+    controller, _, journal, original, plan = admission_fixture(tmp_path)
+    recipe = {**plan['receivers']['newcomer'], 'lifecycle_operation_id': original['operation_id']}
+    journal.advance(original['operation_id'], 'runtime-dispatching', runtime_observation={
+        'initial_managed': {'newcomer': {}},
+        'guest_bootstraps': {'newcomer': {'controlled_loaded': {'replacement': 'not first-start evidence'}}}})
+    with pytest.raises(OnboardingError, match='initial_managed_lifecycle_unobserved'):
+        controller._lifecycle('newcomer', recipe)
+
+
 def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profile='source', assessment_fault=None, tooling_profile='matrix-only'):
     """Fake RPC/import/load seams; actual protected manifest and journal."""
     from types import MethodType

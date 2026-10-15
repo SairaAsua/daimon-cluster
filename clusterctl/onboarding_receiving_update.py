@@ -2080,7 +2080,9 @@ class CohortController:
         senders = before.get('senders')
         if (not isinstance(senders, list) or not 1 <= len(senders) <= 256
                 or any(not isinstance(item, dict) for item in senders)
-                or [item.get('name') for item in senders] != sorted(self.owners)):
+                or any(not isinstance(item.get('name'), str) for item in senders)
+                or [item['name'] for item in senders] != sorted({item['name'] for item in senders})
+                or not {item['name'] for item in senders} <= set(self.owners)):
             raise OnboardingError('receiving_sender_vector_invalid')
         for item in senders:
             if set(item) - {'being_ref'} != {'name', 'root', 'socket', 'server', 'process', 'gate'}:
@@ -2088,7 +2090,78 @@ class CohortController:
             owner = self.owners[item['name']]
             if (str(owner.root), str(owner.socket)) != (item['root'], item['socket']):
                 raise OnboardingError('receiving_sender_vector_invalid')
+        admission = self._admission(row)
+        if admission is None and [item['name'] for item in senders] != sorted(self.owners):
+            raise OnboardingError('receiving_sender_vector_invalid')
         return row
+
+    def _admission(self, row: dict) -> dict | None:
+        """Validate the frozen physical after-set, independently of late effects."""
+        transition = row['intended_transition']
+        if 'cohort_admission' not in transition:
+            return None
+        value = transition['cohort_admission']
+        if (not isinstance(value, dict) or set(value) != {'schema', 'tribe_ref', 'entrant', 'receivers', 'activation'}
+                or value['schema'] != 'cluster-receiving-admission/v1' or 'cohort_activation' in transition
+                or not isinstance(value['tribe_ref'], str) or not value['tribe_ref']
+                or row['target'] != 'receiving:' + value['tribe_ref']
+                or row['expected_precondition'].get('tribe_ref') != value['tribe_ref']
+                or not isinstance(value['receivers'], dict) or not 1 <= len(value['receivers']) <= 256
+                or sorted(value['receivers']) != sorted(self.owners)):
+            raise OnboardingError('receiving_cohort_admission_required')
+        before = {item['name']: item for item in row['expected_precondition']['senders']}
+        added = set(self.owners) - set(before)
+        if (not added or not isinstance(row['expected_precondition'].get('receiver_selections'), dict)
+                or sorted(row['expected_precondition']['receiver_selections']) != sorted(self.owners)):
+            raise OnboardingError('receiving_cohort_admission_required')
+        identities = set()
+        for name, receiver in value['receivers'].items():
+            if (not isinstance(receiver, dict) or set(receiver) != {
+                    'being_ref', 'embodiment_id', 'root', 'socket', 'candidate', 'recipe'}
+                    or any(not isinstance(receiver[key], str) or not receiver[key]
+                           for key in ('being_ref', 'embodiment_id', 'root', 'socket'))
+                    or (receiver['root'], receiver['socket']) != (str(self.owners[name].root), str(self.owners[name].socket))):
+                raise OnboardingError('receiving_cohort_admission_receiver_changed')
+            identity = receiver['being_ref'], receiver['embodiment_id']
+            if identity in identities:
+                raise OnboardingError('receiving_cohort_admission_receiver_changed')
+            identities.add(identity)
+            if name in before and (before[name].get('being_ref'), before[name]['server'].get('embodiment_id')) != identity:
+                raise OnboardingError('receiving_cohort_admission_receiver_changed')
+            candidate, recipe = receiver['candidate'], receiver['recipe']
+            if (not isinstance(candidate, dict) or set(candidate) != {'code', 'code_uid'}
+                    or not isinstance(candidate['code'], str) or not Path(candidate['code']).is_absolute()
+                    or '..' in Path(candidate['code']).parts
+                    or type(candidate['code_uid']) is not int or candidate['code_uid'] < 0
+                    or not isinstance(recipe, dict) or set(recipe) != {'profile', 'prepared', 'tooling'}
+                    or recipe['profile'] not in {'source', 'guest'} or name in added and recipe['profile'] != 'guest'
+                    or not isinstance(recipe['prepared'], dict)
+                    or any(recipe['prepared'].get(key) != receiver[key] for key in ('being_ref', 'embodiment_id'))
+                    or any(not isinstance(recipe['prepared'].get(key), str)
+                        or re.fullmatch('[0-9a-f]{64}', recipe['prepared'][key]) is None
+                        for key in ('code_digest', 'matrix_wheel_sha256'))):
+                raise OnboardingError('receiving_cohort_admission_candidate_changed')
+            from .onboarding_owner_client import validate_tooling_recipe
+            validate_tooling_recipe(recipe['tooling'])
+        entrant = value['entrant']
+        if (not isinstance(entrant, dict) or set(entrant) != {'being_ref', 'embodiment_ids'}
+                or not isinstance(entrant['being_ref'], str) or not entrant['being_ref']
+                or not isinstance(entrant['embodiment_ids'], list)
+                or any(not isinstance(body, str) or not body for body in entrant['embodiment_ids'])
+                or entrant['embodiment_ids'] != sorted(set(entrant['embodiment_ids']))
+                or {(value['receivers'][name]['being_ref'], value['receivers'][name]['embodiment_id']) for name in added}
+                    != {(entrant['being_ref'], body) for body in entrant['embodiment_ids']}):
+            raise OnboardingError('receiving_cohort_admission_entrant_changed')
+        bounds = value['activation']
+        if (not isinstance(bounds, dict) or set(bounds) != {
+                'manifest_path', 'manifest_uid', 'expires_at_ms', 'observation_window_ms'}
+                or not isinstance(bounds['manifest_path'], str) or not Path(bounds['manifest_path']).is_absolute()
+                or '..' in Path(bounds['manifest_path']).parts
+                or type(bounds['manifest_uid']) is not int or bounds['manifest_uid'] < 0
+                or type(bounds['expires_at_ms']) is not int or not 0 < bounds['expires_at_ms'] < 2**53
+                or type(bounds['observation_window_ms']) is not int or not 0 < bounds['observation_window_ms'] <= 60000):
+            raise OnboardingError('receiving_cohort_admission_required')
+        return value
 
     def _record(self, row: dict, key: str, value: dict) -> dict:
         from .operation_journal import JournalConflict
@@ -2163,8 +2236,23 @@ class CohortController:
                                         _cohort_control=self)
 
     def _activation(self, row: dict) -> tuple[dict, dict]:
-        """Resolve the immutable approved activation, never a fresh retry vector."""
-        value = row['intended_transition'].get('cohort_activation')
+        """Resolve fixed activation or the admission's retained late derivation."""
+        admission = self._admission(row)
+        if admission is None:
+            value = row['intended_transition'].get('cohort_activation')
+        else:
+            retained = (row['runtime_observation'] or {}).get('admission_activation_plan')
+            if (not isinstance(retained, dict) or set(retained) != {
+                    'schema', 'admission_sha256', 'plan_sha256', 'plan', 'receiving_readiness'}
+                    or retained['schema'] != 'cluster-admission-activation-plan/v1'
+                    or retained['admission_sha256'] != digest(admission)
+                    or not isinstance(retained['plan'], dict)
+                    or retained['plan_sha256'] != digest(retained['plan'])
+                    or retained['receiving_readiness'] != 'unobserved'):
+                raise OnboardingError('receiving_admission_activation_unobserved')
+            value = retained['plan']
+            if any(value.get(key) != item for key, item in admission['activation'].items()):
+                raise OnboardingError('receiving_admission_activation_changed')
         if (not isinstance(value, dict) or set(value) != {'manifest_path', 'manifest_uid',
                 'roster_sha256', 'expires_at_ms', 'observation_window_ms', 'receivers'}
                 or not isinstance(value['receivers'], dict)
@@ -2181,10 +2269,51 @@ class CohortController:
         senders = row['expected_precondition']['senders']
         if any(not isinstance(item.get('being_ref'), str) for item in senders):
             raise OnboardingError('receiving_cohort_predecessor_required')
-        expected = {(item['being_ref'], item['server']['embodiment_id']) for item in senders}
+        expected = ({(item['being_ref'], item['server']['embodiment_id']) for item in senders}
+            if admission is None else {(item['being_ref'], item['embodiment_id']) for item in admission['receivers'].values()})
         if {(item['being_ref'], item['embodiment_id']) for item in manifest['required_receivers']} != expected:
             raise OnboardingError('receiving_required_cohort_changed')
+        if admission is not None:
+            for name, approved in admission['receivers'].items():
+                recipe = value['receivers'][name]
+                if (not isinstance(recipe, dict) or set(recipe) != {
+                        'profile', 'prepared', 'tooling', 'selection', 'lifecycle_operation_id'}
+                        or any(recipe.get(key) != item for key, item in approved['recipe'].items())
+                        or not isinstance(recipe['lifecycle_operation_id'], str) or not recipe['lifecycle_operation_id']
+                        or not isinstance(recipe['selection'], dict)
+                        or recipe['selection'].get('receiving_code') != approved['recipe']['prepared']['code_digest']
+                        or recipe['selection'].get('matrix_sdk') != approved['recipe']['prepared']['matrix_wheel_sha256']):
+                    raise OnboardingError('receiving_admission_activation_changed')
+                required = next(item for item in manifest['required_receivers'] if
+                    (item['being_ref'], item['embodiment_id']) == (approved['being_ref'], approved['embodiment_id']))
+                if required['expected_selection_sha256'] != digest(frozen[name]):
+                    raise OnboardingError('receiving_cohort_predecessor_required')
         return value, manifest
+
+    def retain_admission_activation(self, plan: dict) -> dict:
+        """Bind later publication/lifecycle selections without rewriting intent.
+
+        This is not adoption or permission to enable a sender. Actual native
+        observation and lifecycle qualification remain the activation path.
+        """
+        from .operation_journal import JournalConflict
+        with self.journal.mutation_lock(self.operation_id):
+            row = self._row()
+            admission = self._admission(row)
+            if admission is None or row['state'] == 'planned' or not isinstance(plan, dict):
+                raise OnboardingError('receiving_cohort_admission_required')
+            value = dict(schema='cluster-admission-activation-plan/v1', admission_sha256=digest(admission),
+                plan_sha256=digest(plan), plan=plan, receiving_readiness='unobserved')
+            observations = dict(row['runtime_observation'] or {})
+            retained = observations.get('admission_activation_plan')
+            if retained is not None and retained != value:
+                raise JournalConflict('admission activation derivation changed')
+            observations['admission_activation_plan'] = value
+            self._activation({**row, 'runtime_observation': observations})
+            if retained is None:
+                self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
+                    expected_runtime_observation=row['runtime_observation'])
+            return value
 
     def _adoption_context(self, name: str, plan: dict, manifest: dict) -> tuple[dict, dict, dict | None, dict]:
         """Resolve immutable inputs and caches on the coordinator thread."""
@@ -2245,6 +2374,9 @@ class CohortController:
         loaded, application = status.get('loaded_runtime'), status.get('loaded_application')
         if not isinstance(loaded, dict) or not isinstance(application, dict):
             raise OnboardingError('receiving_cohort_loaded_required')
+        admission = self._admission(self._row())
+        if admission is not None and application.get('tribe', {}).get('policy', {}).get('tribe_ref') != admission['tribe_ref']:
+            raise OnboardingError('receiving_cohort_admission_group_changed')
         startup = loaded.get('qualified_startup')
         if (not isinstance(startup, dict) or any(startup.get(key) != prepared.get(field) for key, field in (
                 ('code_digest', 'code_digest'), ('matrix_commit', 'matrix_revision'),
@@ -2381,6 +2513,13 @@ class CohortController:
             context=contexts[name], observed=queried[name]) for name in names}
 
     def _lifecycle(self, name: str, recipe: dict) -> dict | None:
+        cohort = self._row()
+        admission = self._admission(cohort)
+        if admission is not None and name not in {item['name'] for item in cohort['expected_precondition']['senders']}:
+            # The genuine initial-managed producer/validator is not wired yet.
+            # A marker or same-operation replacement record cannot substitute
+            # that contract; keep after-only activation explicitly unqualified.
+            raise OnboardingError('receiving_initial_managed_lifecycle_unobserved')
         owner = self.owners[name]
         inspect = getattr(owner, 'lifecycle_operation', None)
         if recipe['profile'] == 'source' and inspect is not None:
