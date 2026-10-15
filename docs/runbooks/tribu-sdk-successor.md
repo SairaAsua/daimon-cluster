@@ -84,6 +84,11 @@ Preparation's barrier also reuses the process/gate authenticated by that same
 all-required adoption round. Do not launch a second cold status helper for the
 same proof. The original freshness window, exact process/head checks and native
 roster CAS still apply; later invocations observe again.
+Positive controls use `prepare_apply_control`: one qualified owner invocation
+retains and applies the same exact request under the existing private lock.
+Expiry between those effects refuses application; a lost reply retains the exact
+request for reconciliation. Separate prepare/apply verbs remain for recovery.
+No proof-window or credential horizon is widened to compensate for setup cost.
 
 Prepare expiring fixture controls immediately before their use. If an unrelated
 urgent repair intervenes, preserve the scenario and completed effects instead
@@ -297,8 +302,23 @@ capability or request history.
 ## Existing controller software adoption
 
 Existing Codex tooling adoption is a receiving requirement, not first-install
-onboarding. The current candidate does not yet reconcile that tooling; keep its
-adoption unobserved until the narrow installer/owner route is implemented.
+onboarding. Each cohort receiver explicitly selects `tooling`: either
+`{"profile":"matrix-only"}` for a body with no native harness, or a protected
+Codex recipe with `profile`, `attachment`, `codex_home`, `connections`,
+`native_endpoint`, `native_threads` and `tribe_channel`. Paths select existing owner-local
+resources; thread IDs select existing native contexts. Missing selection is an
+error, never implicit Matrix-only acceptance. No first-loaded-thread fallback,
+thread creation/resume or model turn qualifies a recipe.
+
+`CohortController` uses the existing owner route to reconcile tooling before its
+finite reader round. The installer retains the exact operation/file transition;
+the receiving journal retains its public result. Each subsequent qualified
+identity call checks native state in that same owner process. A drifted
+configuration, binding, selected SDK, endpoint/process, context or tool schema
+cannot reuse earlier acceptance. A server-only catalog is labelled separately
+from selected existing-context acceptance. Disabled/restricted roles stay intact
+and cannot count as usable tools. Source-qualified implementation alone is not
+actual receiving adoption; qualify the complete candidate before deployment.
 Do not rerun `OwnerClient.install` over personalized AGENTS or treat a selected
 Matrix daemon as proof that the harness selected its matching tools.
 Reuse the existing installer history and receiving operation for exact connection
@@ -310,7 +330,14 @@ round; retain bound evidence and check drift rather than repeating cold discover
 `config/mcpServer/reload` refreshes only the addressed App Server's threads.
 A fresh config-only catalog probe cannot prove existing sessions reloaded.
 Keep unavailable native-instance routes explicit; neither console fallback nor
-another service restart establishes native-tool acceptance.
+another service restart establishes native-tool acceptance. Native MCP metadata
+binds the actual qualified code/SDK and attachment; identical tool names from an
+old process do not prove the successor loaded. The selected Tribe binding leg
+(single `tribe` or explicit Multi alias) must resolve to this authenticated
+receiver/runtime and group socket; an archived bilateral leg cannot substitute. The SDK wheelhouse includes pinned
+`websockets==15.0.1` under its existing manifest/hash lock. Codex's CLI proxy only
+relays bytes; shared control sockets require WebSocket framing. Reuse the library,
+not a new hand-written protocol or an historical task dependency directory.
 
 Freeze controller `mode` before any interruption. `issue` retains the original
 first-controller stage/publication and its exact recovery; absent mode in old

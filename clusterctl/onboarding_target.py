@@ -649,13 +649,14 @@ class Target:
             if time.monotonic_ns() >= deadline_ns:
                 raise OnboardingError('onboarding_observation_deadline_expired')
             return {**current, 'admission_parent': observed['admission_parent'],
-                    'plan_digest': observed['plan_digest'], 'responder_association': 'same-connection'}
+                    'plan_digest': observed['plan_digest'], 'responder_association': 'same-connection',
+                    'group': observed['group']}
 
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "receiving-control-prepare", "receiving-control-apply", "receiving-identity", "receiving-bootstrap-freeze", "receiving-bootstrap-stage", "receiving-bootstrap-publish"))
+    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "receiving-control-prepare", "receiving-control-apply", "receiving-control-prepare-apply", "receiving-identity", "receiving-bootstrap-freeze", "receiving-bootstrap-stage", "receiving-bootstrap-publish"))
     parser.add_argument("--diagnostics", action="store_true", help="write bounded nonsecret refusal detail to stderr")
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
@@ -681,14 +682,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--control-file', type=Path)
     parser.add_argument('--control-command', type=Path)
     parser.add_argument('--identity-expires-at-ms', type=int)
+    parser.add_argument('--native-tooling-json')
     parser.add_argument('--bootstrap-request-json')
     parser.add_argument('--bootstrap-ready-sha256')
     parser.add_argument('--bootstrap-timeout-seconds', type=float)
     args = parser.parse_args(argv)
     stage = 'arguments'
     try:
-        controlling = args.action in {'receiving-control-prepare', 'receiving-control-apply'}
+        controlling = args.action in {'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
         identity_query = args.action == 'receiving-identity'
+        if args.native_tooling_json is not None and (not identity_query
+                or len(args.native_tooling_json.encode()) > 65536):
+            raise OnboardingError('receiving_native_tooling_recipe_required')
         if identity_query != (args.identity_expires_at_ms is not None):
             raise OnboardingError('invalid_receiving_identity_request')
         if identity_query and not 0 < args.identity_expires_at_ms < 2**53:
@@ -705,7 +710,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.bootstrap_ready_sha256, args.bootstrap_timeout_seconds)):
             raise OnboardingError('invalid_receiving_bootstrap_request')
         timeout = args.observation_timeout_seconds
-        if timeout is not None and (args.action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply'}
+        if timeout is not None and (args.action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
                 or not math.isfinite(timeout) or not 0 < timeout <= 60):
             raise OnboardingError('invalid_receiving_observation_timeout')
         now_ns = time.monotonic_ns()
@@ -719,7 +724,7 @@ def main(argv: list[str] | None = None) -> int:
             raise OnboardingError('invalid_receiving_identity_request')
         if (args.require_loaded and args.action not in {'running', 'admitted-running'}
                 or controlling and (args.control_file is None
-                    or (args.action == 'receiving-control-prepare') != (args.control_command is not None))
+                    or (args.action != 'receiving-control-apply') != (args.control_command is not None))
                 or not controlling and (args.control_file is not None or args.control_command is not None)
                 or controlling and args.ready_fd is not None):
             raise OnboardingError('invalid_receiving_control_request')
@@ -808,8 +813,16 @@ def main(argv: list[str] | None = None) -> int:
         if identity_query:
             if observation_deadline_ns is None:
                 raise OnboardingError('invalid_receiving_identity_request')
-            print(json.dumps(target.qualified_receiving_identity(expires_at_ms=args.identity_expires_at_ms,
-                deadline_ns=observation_deadline_ns)))
+            result = target.qualified_receiving_identity(expires_at_ms=args.identity_expires_at_ms,
+                deadline_ns=observation_deadline_ns)
+            if args.native_tooling_json is not None:
+                from .onboarding_owner_client import observe_selected_tooling
+                if startup is None:
+                    raise OnboardingError('qualified_native_peer_tool_required')
+                result['native_tooling'] = observe_selected_tooling(json.loads(args.native_tooling_json),
+                    code=runtime, startup=startup, code_uid=0, deadline_ns=observation_deadline_ns,
+                    receiving=result)
+            print(json.dumps(result))
             return 0
         if args.action == 'peer-identity':
             from .onboarding_peer import identity

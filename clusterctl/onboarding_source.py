@@ -402,10 +402,12 @@ def main(argv=None) -> int:
     control = parser.add_mutually_exclusive_group()
     control.add_argument('--prepare-control', type=Path)
     control.add_argument('--apply-control', type=Path)
+    control.add_argument('--prepare-apply-control', type=Path)
     parser.add_argument('--control-command', type=Path)
     parser.add_argument('--owner-status', action='store_true')
     parser.add_argument('--qualified-identity', action='store_true')
     parser.add_argument('--identity-expires-at-ms', type=int)
+    parser.add_argument('--native-tooling-json')
     parser.add_argument('--observation-deadline-ns', type=int)
     parser.add_argument('--expected-config-sha256')
     parser.add_argument('--receiving-lifecycle')
@@ -416,8 +418,11 @@ def main(argv=None) -> int:
         code = Path(__file__).resolve().parents[1]
         if args.code_owner < 0:
             raise OnboardingError('qualified_source_code_owner_required')
-        controlling = args.prepare_control is not None or args.apply_control is not None
+        controlling = any(path is not None for path in (args.prepare_control, args.apply_control, args.prepare_apply_control))
         lifecycle = args.receiving_lifecycle is not None
+        if args.native_tooling_json is not None and (not args.qualified_identity
+                or len(args.native_tooling_json.encode()) > 65536):
+            raise OnboardingError('receiving_native_tooling_recipe_required')
         receiving = args.owner_status or args.qualified_identity or controlling or lifecycle
         if (sum((args.observe, args.owner_status, args.qualified_identity, controlling, lifecycle)) > 1
                 or lifecycle != (args.operation_journal is not None)
@@ -436,7 +441,7 @@ def main(argv=None) -> int:
         if args.observation_deadline_ns is not None and not 0 < args.observation_deadline_ns - time.monotonic_ns() <= 60_000_000_000:
             raise OnboardingError('onboarding_observation_deadline_expired')
         if (controlling and (args.observe or args.require_loaded or args.ready_fd is not None)
-                or (args.prepare_control is not None) != (args.control_command is not None)):
+                or (args.prepare_control is not None or args.prepare_apply_control is not None) != (args.control_command is not None)):
             raise OnboardingError('invalid_receiving_control_request')
         stdin_command = None
         if args.control_command == Path('-'):
@@ -472,6 +477,8 @@ def main(argv=None) -> int:
         if controlling:
             action = 'receiving-control-prepare' if args.prepare_control is not None else 'receiving-control-apply'
             path = args.prepare_control if args.prepare_control is not None else args.apply_control
+            if args.prepare_apply_control is not None:
+                action, path = 'receiving-control-prepare-apply', args.prepare_apply_control
             if args.control_command == Path('-'):
                 command = stdin_command
             else:
@@ -486,6 +493,13 @@ def main(argv=None) -> int:
         if args.owner_status or args.qualified_identity:
             result = source.receiving_observation(expires_at_ms=args.identity_expires_at_ms,
                 deadline_ns=args.observation_deadline_ns)
+            if args.native_tooling_json is not None:
+                from .onboarding_owner_client import observe_selected_tooling
+                if startup is None:
+                    raise OnboardingError('qualified_native_peer_tool_required')
+                result['native_tooling'] = observe_selected_tooling(json.loads(args.native_tooling_json),
+                    code=code, startup=startup, code_uid=args.code_owner, deadline_ns=args.observation_deadline_ns,
+                    receiving=result)
             accept_deadline()
             print(json.dumps(result))
             return 0

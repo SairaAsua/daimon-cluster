@@ -956,7 +956,8 @@ class HostBackend:
                      bootstrap_ready_sha256: str | None = None,
                      bootstrap_timeout_seconds: float | None = None,
                      control_file: Path | None = None, control_command: Path | None = None,
-                     control_value: dict | None = None, identity_expires_at_ms: int | None = None) -> dict:
+                     control_value: dict | None = None, identity_expires_at_ms: int | None = None,
+                     native_tooling: dict | None = None) -> dict:
         """Probe prepared receiving code without changing active selectors.
 
         Candidate calls require the already verified public read-only mount.
@@ -965,7 +966,9 @@ class HostBackend:
         """
         deadline_ns = None
         bootstrapping = action in {'receiving-bootstrap-freeze', 'receiving-bootstrap-stage', 'receiving-bootstrap-publish'}
-        controlling = action in {'receiving-control-prepare', 'receiving-control-apply'}
+        controlling = action in {'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
+        if native_tooling is not None and (action != 'receiving-identity' or not isinstance(native_tooling, dict)):
+            raise OnboardingError('receiving_native_tooling_recipe_required')
         if (action == 'receiving-identity') != (identity_expires_at_ms is not None):
             raise OnboardingError('invalid_receiving_identity_request')
         if identity_expires_at_ms is not None and (type(identity_expires_at_ms) is not int
@@ -983,14 +986,14 @@ class HostBackend:
             raise OnboardingError('invalid_receiving_bootstrap_request')
         if controlling:
             if (control_file is None
-                    or (action == 'receiving-control-prepare') != (control_command is not None or control_value is not None)
+                    or (action != 'receiving-control-apply') != (control_command is not None or control_value is not None)
                     or control_command is not None and control_value is not None
                     or control_value is not None and not isinstance(control_value, dict)):
                 raise OnboardingError('invalid_receiving_control_request')
         elif control_file is not None or control_command is not None or control_value is not None:
             raise OnboardingError('invalid_receiving_control_request')
         if observation_timeout_seconds is not None:
-            if (action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply'}
+            if (action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
                     or not math.isfinite(observation_timeout_seconds)
                     or not 0 < observation_timeout_seconds <= 60):
                 raise OnboardingError('receiving_host_deadline_required')
@@ -1011,7 +1014,7 @@ class HostBackend:
             else self._runtime_paths(plan, guest_code, candidate=candidate))
         if candidate is not None:
             if (action not in {'sdk-observe', 'sdk-prepare', 'observe', 'running', 'admitted-running',
-                    'receiving-control-prepare', 'receiving-control-apply', 'receiving-bootstrap-freeze',
+                    'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'receiving-bootstrap-freeze',
                     'receiving-bootstrap-stage', 'receiving-bootstrap-publish', 'receiving-identity'}
                     or profile is not None or peer_packet is not None or peer_being_ref is not None
                     or not onboarding_code_successor.sdk_parameters(candidate[0], uid=os.geteuid())
@@ -1053,6 +1056,11 @@ class HostBackend:
             arguments += ['--control-command', '-']
         if identity_expires_at_ms is not None:
             arguments += ['--identity-expires-at-ms', str(identity_expires_at_ms)]
+        if native_tooling is not None:
+            encoded = json.dumps(native_tooling, separators=(',', ':'))
+            if len(encoded.encode()) > 65536:
+                raise OnboardingError('receiving_native_tooling_recipe_required')
+            arguments += ['--native-tooling-json', encoded]
         if bootstrap_request is not None:
             encoded = json.dumps(bootstrap_request, sort_keys=True, separators=(',', ':'))
             if len(encoded.encode()) > 131072:

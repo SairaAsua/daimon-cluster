@@ -240,8 +240,10 @@ def cli(tmp_path, monkeypatch):
     return arguments, calls
 
 
+@pytest.mark.parametrize('verb,action', [('--prepare-control', 'receiving-control-prepare'),
+    ('--prepare-apply-control', 'receiving-control-prepare-apply')])
 def test_source_cli_stdin_control_preserves_one_original_deadline(
-    cli, monkeypatch, capsys
+    cli, monkeypatch, capsys, verb, action
 ):
     args, calls = cli
     command = {"phase": "revoke", "readers": []}
@@ -254,7 +256,7 @@ def test_source_cli_stdin_control_preserves_one_original_deadline(
         source_cli.main(
             [
                 *args,
-                "--prepare-control",
+                verb,
                 "/owner/control.json",
                 "--control-command",
                 "-",
@@ -263,6 +265,7 @@ def test_source_cli_stdin_control_preserves_one_original_deadline(
         == 0
     )
     assert json.loads(capsys.readouterr().out) == {"retained": True}
+    assert calls[-1][1] == (action, Path("/owner/control.json"))
     assert calls[-1][2]["command"] == command
     assert calls[-1][2]["deadline_ns"] == int(args[-1])
 

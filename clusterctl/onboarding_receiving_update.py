@@ -220,7 +220,10 @@ class OwnerGroupClient:
                                       require_admitted=require_admitted)
         return {**observed, 'identity': identity}
 
-    def qualified_identity(self, *, expires_at_ms: int, require_admitted: bool = False) -> dict:
+    def qualified_identity(self, *, expires_at_ms: int, require_admitted: bool = False,
+                           native_tooling: dict | None = None) -> dict:
+        if native_tooling is not None:
+            raise OnboardingError('qualified_native_peer_tool_required')
         observed = self.identity(require_admitted=require_admitted)
         bundle = being_seed._read(self.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
         verified = verify_receiving_identity(bundle, observed, expires_at_ms=expires_at_ms)
@@ -298,6 +301,16 @@ class OwnerGroupClient:
     def apply_control(self, path: Path) -> dict:
         """Exact retry or observed same-process completion; never re-author."""
         with being_seed._locked(self._control_directory(path)):
+            result = self._apply_control(path)
+            self._accept_deadline()
+            return result
+
+    def prepare_apply_control(self, command: dict, path: Path) -> dict:
+        """Retain and apply the same request in one bounded owner invocation."""
+        with being_seed._locked(self._control_directory(path)):
+            self._accept_deadline()
+            self._prepare_control(command, path)
+            self._accept_deadline()
             result = self._apply_control(path)
             self._accept_deadline()
             return result
@@ -384,8 +397,10 @@ class GuestGroupClient:
             admission_parent=value['admission_parent'], identity=value.get('receiving_identity'),
             receiving_readiness='unobserved')
 
-    def qualified_identity(self, *, expires_at_ms: int, require_admitted: bool = True) -> dict:
-        value = self._call('receiving-identity', identity_expires_at_ms=expires_at_ms)
+    def qualified_identity(self, *, expires_at_ms: int, require_admitted: bool = True,
+                           native_tooling: dict | None = None) -> dict:
+        value = self._call('receiving-identity', identity_expires_at_ms=expires_at_ms,
+            **({'native_tooling': native_tooling} if native_tooling is not None else {}))
         if (value.get('responder_association') != 'same-connection'
                 or value.get('plan_digest') != digest(self.plan)
                 or not isinstance(value.get('admission_parent'), dict)
@@ -401,6 +416,18 @@ class GuestGroupClient:
 
     def apply_control(self, path: Path) -> dict:
         return self._call('receiving-control-apply', control_file=path)
+
+    def prepare_apply_control(self, command: dict, path: Path) -> dict:
+        return self._call('receiving-control-prepare-apply', control_file=path, control_value=command)
+
+    def reconcile_tooling(self, operation_id: str, *, attachment: Path,
+                         codex_home: Path, connections: tuple[Path, ...] = (),
+                         native_endpoint: Path | None = None, native_threads: tuple[str, ...] = ()) -> dict:
+        from .onboarding_owner_client import OwnerClient
+        return OwnerClient(self.backend).reconcile(self.plan, operation_id,
+            candidate=self.candidate, attachment=attachment, codex_home=codex_home, connections=connections,
+            native_endpoint=native_endpoint, native_threads=native_threads,
+            timeout_seconds=self.timeout_seconds, deadline_ns=self.deadline_ns)
 
 
 class SourceGroupClient:
@@ -435,7 +462,8 @@ class SourceGroupClient:
         self.lifecycle_journal = lifecycle_journal
         self.deadline_ns: int | None = None
 
-    def _call(self, arguments: list[str], *, command: dict | None = None) -> dict:
+    def _call(self, arguments: list[str], *, command: dict | None = None,
+              module: str = 'clusterctl.onboarding_source') -> dict:
         deadline = time.monotonic_ns() + int(self.timeout_seconds * 1_000_000_000)
         if self.deadline_ns is not None:
             deadline = min(deadline, self.deadline_ns)
@@ -448,7 +476,9 @@ class SourceGroupClient:
         payload = None if command is None else json.dumps(command, separators=(',', ':'))
         if payload is not None and len(payload.encode()) > being_seed.MAX_SELECTION:
             raise OnboardingError('invalid_receiving_control_request')
-        argv = onboarding_sdk.runtime_command(self.venv, self.imports, self.code, 'clusterctl.onboarding_source', [
+        if module not in {'clusterctl.onboarding_source', 'clusterctl.onboarding_owner_client'}:
+            raise OnboardingError('receiving_source_owner_binding_required')
+        argv = onboarding_sdk.runtime_command(self.venv, self.imports, self.code, module, [
             '--config', str(self.config), '--expected-config-sha256', self.config_sha256,
             '--code-owner', str(self.code_uid), '--code-digest', self.code_digest,
             '--observation-deadline-ns', str(deadline), *arguments])
@@ -499,12 +529,16 @@ class SourceGroupClient:
     def status(self) -> dict:
         return self._observation(self._call(['--owner-status']))
 
-    def qualified_identity(self, *, expires_at_ms: int, require_admitted: bool = False) -> dict:
+    def qualified_identity(self, *, expires_at_ms: int, require_admitted: bool = False,
+                           native_tooling: dict | None = None) -> dict:
         if require_admitted:
             raise OnboardingError('receiving_source_guest_admission_unsupported')
         if type(expires_at_ms) is not int or not time.time_ns() // 1_000_000 < expires_at_ms < 2**53:
             raise OnboardingError('receiving_identity_horizon_expired')
-        value = self._observation(self._call(['--qualified-identity', '--identity-expires-at-ms', str(expires_at_ms)]))
+        arguments = ['--qualified-identity', '--identity-expires-at-ms', str(expires_at_ms)]
+        if native_tooling is not None:
+            arguments += ['--native-tooling-json', json.dumps(native_tooling, separators=(',', ':'))]
+        value = self._observation(self._call(arguments))
         verified = value.get('verified_identity')
         if (not isinstance(verified, dict) or type(verified.get('expires_at_ms')) is not int
                 or verified['expires_at_ms'] <= time.time_ns() // 1_000_000
@@ -517,6 +551,24 @@ class SourceGroupClient:
 
     def apply_control(self, path: Path) -> dict:
         return self._call(['--apply-control', str(path)])
+
+    def prepare_apply_control(self, command: dict, path: Path) -> dict:
+        return self._call(['--prepare-apply-control', str(path), '--control-command', '-'], command=command)
+
+    def reconcile_tooling(self, operation_id: str, *, attachment: Path,
+                         codex_home: Path, connections: tuple[Path, ...] = (),
+                         native_endpoint: Path | None = None, native_threads: tuple[str, ...] = ()) -> dict:
+        result = self._call(['--binding', str(attachment / 'binding.json'),
+            '--reconcile-tooling', operation_id,
+            '--codex-home', str(codex_home),
+            *[part for path in connections for part in ('--connection-mirror', str(path))],
+            *(['--native-endpoint', str(native_endpoint)] if native_endpoint is not None else []),
+            *[part for thread in native_threads for part in ('--native-thread', thread)]],
+            module='clusterctl.onboarding_owner_client')
+        if (result.get('schema') != 'cluster-native-chat-tooling/v1'
+                or result.get('operation_id') != operation_id or result.get('code_digest') != self.code_digest):
+            raise OnboardingError('receiving_source_owner_observation_conflict')
+        return result
 
     def lifecycle_operation(self, operation_id: str) -> dict:
         """Read the retained owner journal under that owner, never as root."""
@@ -542,8 +594,8 @@ def owner_control(root: Path, group: dict, observed: dict, action: str, path: Pa
     The prepared request stays on its receiving owner. Only observation and
     request hashes cross the controller boundary; no capability key is returned.
     """
-    if (action not in {'receiving-control-prepare', 'receiving-control-apply'}
-            or (action == 'receiving-control-prepare') != (command is not None)
+    if (action not in {'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
+            or (action != 'receiving-control-apply') != (command is not None)
             or not isinstance(group, dict) or group.get('channel_id') != 'tribe'
             or observed.get('responder_association') != 'same-connection'):
         raise OnboardingError('invalid_receiving_control_request')
@@ -556,6 +608,9 @@ def owner_control(root: Path, group: dict, observed: dict, action: str, path: Pa
                        for key in ('loaded_runtime', 'loaded_application'))
                 or current['gate'] != previous.get('receiving', {}).get('channels', {}).get('tribe')):
             raise OnboardingError('receiving_control_process_changed')
+        if action == 'receiving-control-prepare-apply':
+            assert command is not None
+            return owner.prepare_apply_control(command, path)
         return (owner.prepare_control(command, path) if command is not None
                 else owner.apply_control(path))
 
@@ -2081,12 +2136,20 @@ class CohortController:
         """Qualify actual owner observations against the selected receiver vector."""
         recipe = plan['receivers'][name]
         if (not isinstance(recipe, dict)
-                or set(recipe) != {'profile', 'selection', 'prepared', 'lifecycle_operation_id'}
+                or set(recipe) != {'profile', 'selection', 'prepared', 'lifecycle_operation_id', 'tooling'}
                 or recipe['profile'] not in {'source', 'guest'}
                 or not isinstance(recipe['prepared'], dict)
                 or not isinstance(recipe['selection'], dict)
                 or not isinstance(recipe['lifecycle_operation_id'], str)):
             raise OnboardingError('receiving_cohort_profile_required')
+        from .onboarding_owner_client import validate_tooling_recipe
+        tooling = validate_tooling_recipe(recipe['tooling'])
+        native_options = {}
+        if tooling['profile'] == 'codex':
+            accepted = (self._row()['runtime_observation'] or {}).get('native_tooling', {}).get(name)
+            if not isinstance(accepted, dict):
+                raise OnboardingError('receiving_native_tooling_unobserved')
+            native_options['native_tooling'] = {'recipe': tooling, 'accepted': accepted}
         lifecycle_row = self._lifecycle(name, recipe)
         prepared = self._qualified_preflight(name, recipe, plan, manifest, lifecycle_row)
         observed_at_ms = time.time_ns() // 1_000_000
@@ -2095,7 +2158,13 @@ class CohortController:
             plan['expires_at_ms'] - observed_at_ms) * 1_000_000
         with self._owner_deadline(self.owners[name], observation_deadline):
             current = self.owners[name].qualified_identity(expires_at_ms=plan['expires_at_ms'],
-                require_admitted=recipe['profile'] == 'guest')
+                require_admitted=recipe['profile'] == 'guest', **native_options)
+        native = current.get('native_tooling')
+        if tooling['profile'] == 'codex' and (not isinstance(native, dict)
+                or native.get('schema') != 'cluster-native-tool-catalog/v1'
+                or native.get('acceptance') != ('selected-existing-contexts' if tooling['native_threads'] else 'server-catalog-only')
+                or [item.get('thread_id') for item in native.get('contexts', [])] != (tooling['native_threads'] or [None])):
+            raise OnboardingError('receiving_native_tooling_unobserved')
         status, identity = current['runtime_status'], current['identity']
         loaded, application = status.get('loaded_runtime'), status.get('loaded_application')
         if not isinstance(loaded, dict) or not isinstance(application, dict):
@@ -2113,6 +2182,17 @@ class CohortController:
             raise OnboardingError('receiving_cohort_startup_mismatch')
         if startup['matrix_commit'] != manifest['provenance']['matrix_revision']:
             raise OnboardingError('receiving_cohort_startup_mismatch')
+        if tooling['profile'] == 'codex' and any(accepted.get(key) != startup.get(key) for key in (
+                'code_digest', 'sdk_digest', 'matrix_commit', 'matrix_wheel_sha256')):
+            raise OnboardingError('receiving_native_tooling_changed')
+        if tooling['profile'] == 'codex':
+            assert isinstance(native, dict)
+        if tooling['profile'] == 'codex' and isinstance(native, dict) and (native.get('runtime_id') != loaded.get('runtime_id')
+                or native.get('server') != current['server'] or accepted.get('server') != current['server']
+                or accepted.get('runtime_id') != loaded.get('runtime_id')
+                or native.get('tribe_channel') != tooling['tribe_channel']
+                or native.get('group_socket_sha256') != digest({'socket': str(self.owners[name].socket)})):
+            raise OnboardingError('receiving_native_tooling_identity_changed')
         receiving = status.get('receiving', {})
         roster = receiving.get('rosters', {}).get('tribe')
         if (not isinstance(roster, dict) or roster.get('schema') != 'dm.runtime.tribe-roster/v1'
@@ -2185,6 +2265,7 @@ class CohortController:
             loaded_runtime=loaded, loaded_application={key: val for key, val in application.items() if key != 'reader_gates'},
             admission_parent=current.get('admission_parent'), selection=selection,
             roster_sha256=roster['roster_sha256'], reader=reader,
+            **({'native_tooling': native} if tooling['profile'] == 'codex' else {}),
             observed_at_ms=observed_at_ms, observed_at_ns=observed_at_ns)
 
     def _lifecycle(self, name: str, recipe: dict) -> dict | None:
@@ -2242,6 +2323,11 @@ class CohortController:
         with self.journal.mutation_lock(self.operation_id):
             row = self._row()
             plan, manifest = self._activation(row)
+            # Configure/discover before the finite all-reader observation round.
+            # Subsequent identity calls reuse their qualified owner process to
+            # inspect native state, never start another cold helper per reader.
+            self.reconcile_tooling()
+            row = self._row()
             observations: dict = {}
             records = {name: self._adoption(name, plan, manifest, observations=observations)
                        for name in sorted(self.owners)}
@@ -2273,6 +2359,35 @@ class CohortController:
             self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
                 expected_runtime_observation=row['runtime_observation'])
             return activation
+
+    def reconcile_tooling(self) -> dict:
+        from .onboarding_owner_client import validate_tooling_recipe
+        with self.journal.mutation_lock(self.operation_id):
+            row = self._row()
+            plan, _manifest_value = self._activation(row)
+            for name in sorted(self.owners):
+                recipe = validate_tooling_recipe(plan['receivers'][name].get('tooling'))
+                if recipe['profile'] == 'matrix-only':
+                    continue
+                observations = dict(row['runtime_observation'] or {})
+                retained = dict(observations.get('native_tooling', {}))
+                if name in retained:
+                    continue
+                operation = str(uuid.uuid5(uuid.NAMESPACE_URL, 'native-tooling:' + self.operation_id + ':' + name))
+                owner = self.owners[name]
+                if not hasattr(owner, 'reconcile_tooling'):
+                    raise OnboardingError('receiving_native_tooling_unobserved')
+                result = owner.reconcile_tooling(operation, attachment=Path(recipe['attachment']),
+                    codex_home=Path(recipe['codex_home']), connections=tuple(map(Path, recipe['connections'])),
+                    native_endpoint=Path(recipe['native_endpoint']), native_threads=tuple(recipe['native_threads']))
+                if (result.get('schema') != 'cluster-native-chat-tooling/v1' or result.get('operation_id') != operation
+                        or result.get('status') != 'configured' or not isinstance(result.get('native_catalog'), dict)):
+                    raise OnboardingError('receiving_native_tooling_unobserved')
+                retained[name] = result
+                observations['native_tooling'] = retained
+                row = self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
+                    expected_runtime_observation=row['runtime_observation'])
+            return (row['runtime_observation'] or {}).get('native_tooling', {})
 
     def _activation_barrier(self, row: dict, plan: dict, records: dict, current_observations: dict) -> dict:
         """Preserve old revocations and qualify an explicitly replaced sender.
@@ -2592,9 +2707,7 @@ class CohortController:
                 path = owner.root / 'receiving-control' / (control_id + '-select.json')
                 try:
                     with self._owner_deadline(owner, deadline):
-                        owner.prepare_control(command, path)
-                        self._accept_activation_deadline(deadline)
-                        result = owner.apply_control(path)
+                        result = owner.prepare_apply_control(command, path)
                         self._accept_activation_deadline(deadline)
                     if (not isinstance(result, dict)
                             or not {'process', 'server', 'gate', 'request_sha256', 'command_sha256'} <= set(result)

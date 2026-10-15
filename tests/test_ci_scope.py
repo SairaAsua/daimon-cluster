@@ -616,15 +616,20 @@ def test_exact_candidate_host_scope_covers_legacy_peer_and_rejects_other_bytes(m
     from tools import ci_scope
     name = 'clusterctl/onboarding_host.py'
     # The scope job reads the actual base; the unit test job has a shallow
-    # checkout. Model only that baseline read/digest, retain real candidate
-    # hashing and every mutation refusal below without requiring git history.
+    # checkout. Model the retained qualified hash pair as stable inputs; a
+    # legitimate new host implementation must not require a golden-hash edit
+    # merely to pass this selector-policy test. Unknown bytes still select full.
     original = b'explicit retained baseline fixture\n'
+    candidate = b'explicit retained qualified candidate fixture\n'
     sha256 = ci_scope.hashlib.sha256
     monkeypatch.setattr(ci_scope.hashlib, 'sha256', lambda raw:
         SimpleNamespace(hexdigest=lambda: '742fb3e396d4619369152cde4c3811c22df18504e504d7012e99c99772040c59')
-        if raw == original else sha256(raw))
+        if raw == original else SimpleNamespace(hexdigest=lambda: '0ec24cc2096f5b88b498d1e49578810404c2248b0a8309d027c30d28d5f2daee')
+        if raw == candidate else sha256(raw))
     monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *_args, **_kwargs:
         subprocess.CompletedProcess([], 0, original))
+    actual_read = Path.read_bytes
+    monkeypatch.setattr(Path, 'read_bytes', lambda path: candidate if path == ROOT / name else actual_read(path))
     changed = sorted(ci_scope.LOADED_STARTUP_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py',
         name, 'tests/test_onboarding_host.py'})
     selected, tests = ci_scope.select(changed, ROOT, base='a' * 40)
@@ -653,6 +658,20 @@ def test_controlled_software_update_and_its_runbook_keep_receiving_coverage():
     assert 'tests/test_onboarding_group_authorities.py' in LOADED_STARTUP_TESTS
     assert select([*changed, 'clusterctl/onboarding_custody.py'], ROOT)[0] == 'full'
     assert select([*changed, 'docs/unclassified-contract.md'], ROOT)[0] == 'full'
+
+
+def test_native_tooling_capture_composes_owner_sdk_and_receiving_coverage():
+    changed = ['clusterctl/onboarding_owner_client.py', 'clusterctl/onboarding_chat_native.py',
+        'clusterctl/onboarding_code_successor.py', 'tools/build_onboarding_code.py',
+        'support/matrix-agent-chat/TOOLING-PROVENANCE.json',
+        'tests/test_onboarding_owner_client.py', 'tests/test_onboarding_code_successor.py',
+        'tests/test_source_bootstrap.py', 'tools/ci_scope.py', 'tests/test_ci_scope.py']
+    profile, tests = select(changed, ROOT)
+    assert profile == 'peer'
+    assert {'tests/test_onboarding_owner_client.py', 'tests/test_onboarding_sdk.py',
+        'tests/test_onboarding_code_successor.py', 'tests/test_onboarding_release.py',
+        'tests/test_source_bootstrap.py'} <= set(tests)
+    assert select([*changed, 'clusterctl/onboarding_custody.py'], ROOT)[0] == 'full'
 
 
 def test_reviewed_receiving_helpers_keep_scope_exact_and_qualify_default_callers(monkeypatch):

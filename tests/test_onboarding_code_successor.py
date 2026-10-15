@@ -50,6 +50,25 @@ def test_runtime_successor_preserves_original_code_and_context_bytes(tmp_path):
     assert (output / 'clusterctl/onboarding_target.py').read_bytes() == b'Updated runtime.'
 
 
+def test_owner_successor_captures_current_tooling_inside_runtime_boundary(tmp_path):
+    import hashlib
+    from pathlib import Path
+    from clusterctl.onboarding_owner_client import TOOLING_INSTALLER_MODULE, TOOLING_INSTALLER_SHA256
+    base, original, source, _ = fixture(tmp_path)
+    (source / 'onboarding_owner_client.py').write_text('Selected owner runtime module.')
+    output = tmp_path / 'successor'
+    result = build(base, original, source, ('onboarding_owner_client.py',), output)
+    assert verify(output, result['runtime_digest'], base, original, uid=os.geteuid())
+    captured = output / 'clusterctl' / TOOLING_INSTALLER_MODULE
+    assert hashlib.sha256(captured.read_bytes()).hexdigest() == TOOLING_INSTALLER_SHA256
+    assert (output / 'inheritance.md').read_bytes() == (base / 'inheritance.md').read_bytes()
+    assert not (base / 'clusterctl' / TOOLING_INSTALLER_MODULE).exists()
+    root = Path(__file__).resolve().parents[1]
+    provenance = json.loads((root / 'support/matrix-agent-chat/TOOLING-PROVENANCE.json').read_bytes())
+    assert provenance['sha256'] == TOOLING_INSTALLER_SHA256
+    assert provenance['captured_module'] == 'clusterctl/' + TOOLING_INSTALLER_MODULE
+
+
 def telegram_fixture(tmp_path, monkeypatch):
     from clusterctl import onboarding_telegram as telegram
     import hashlib

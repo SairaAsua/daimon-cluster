@@ -118,9 +118,12 @@ PEER_TOOL_FILES = {'clusterctl/onboarding_peer.py', 'clusterctl/onboarding_peer_
 PEER_TOOL_TESTS = (*PEER_TESTS, 'tests/test_onboarding_peer.py',
     'tests/test_onboarding_local_body.py', 'tests/test_onboarding_code_successor.py')
 OWNER_CLIENT_FILES = {'clusterctl/onboarding_owner_client.py', 'clusterctl/onboarding_host.py',
+                      'clusterctl/onboarding_chat_native.py', 'tools/build_onboarding_code.py',
+                      'support/matrix-agent-chat/TOOLING-PROVENANCE.json',
                       'tests/test_onboarding_owner_client.py', 'tools/check_rc_types.py',
                       'support/matrix-agent-chat/install_agent_chat.py', 'support/matrix-agent-chat/PROVENANCE.json'}
 OWNER_CLIENT_TESTS = (*WELCOME_TESTS, *PEER_TESTS, 'tests/test_onboarding_owner_client.py',
+                      'tests/test_onboarding_release.py',
                       'tests/test_onboarding_target.py', 'tests/test_onboarding_runtime.py',
                       'tests/test_onboarding_sdk.py', 'tests/test_onboarding_peer.py')
 HOSTED_CHECK_FILES = PORTAL_FILES | {'clusterctl/onboarding_acceptance.py',
@@ -190,6 +193,7 @@ INPUT_CACHE_TESTS = ('tests/test_onboarding_input.py', 'tests/test_onboarding_ho
     'tests/test_onboarding.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
 
 SDK_FILES = {'requirements-weave.txt', 'RESUME.md', 'clusterctl/onboarding_sdk.py',
+    'clusterctl/onboarding_chat_native.py', 'support/matrix-agent-chat/TOOLING-PROVENANCE.json',
     'clusterctl/matrix_host.py', 'clusterctl/onboarding_peer.py',
     'clusterctl/onboarding_peer_native.py', 'clusterctl/onboarding_owner_client.py',
     'support/matrix-onboarding/PROVENANCE.json',
@@ -292,6 +296,7 @@ RECEIVING_RUNTIME_FILES = {'clusterctl/onboarding_peer.py', 'clusterctl/onboardi
     'tests/test_onboarding_peer.py', 'tests/test_onboarding_runtime.py'}
 
 LOADED_STARTUP_FILES = {'RESUME.md', 'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_target.py',
+    'clusterctl/onboarding_code_successor.py',
     'clusterctl/onboarding_service.py', 'tests/test_source_bootstrap.py',
     'clusterctl/onboarding_runtime.py', 'clusterctl/onboarding_source.py', 'clusterctl/owner_process.py',
     'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_cohort_control.py',

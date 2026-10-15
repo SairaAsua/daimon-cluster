@@ -5,6 +5,7 @@ Native owner RPC/fence qualification is a separate actual integration boundary.
 """
 import copy
 import hashlib
+import json
 import os
 import time
 import uuid
@@ -177,6 +178,10 @@ class FakeOwner:
             path.parent.mkdir(mode=0o700, exist_ok=True)
             being_seed._write(path, {'command': command})
 
+    def prepare_apply_control(self, command, path):
+        self.prepare_control(command, path)
+        return self.apply_control(path)
+
     def apply_control(self, path):
         command = self.requests[path]
         request = digest(command)
@@ -269,7 +274,7 @@ def fixture(tmp_path):
     return path, original, runtime, owners, journal, row['operation_id']
 
 
-def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profile='source', assessment_fault=None):
+def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profile='source', assessment_fault=None, tooling_profile='matrix-only'):
     """Fake RPC/import/load seams; actual protected manifest and journal."""
     from types import MethodType
     from tests.test_receiving_update_preflight import fixture as reader_fixture, call as qualify_reader
@@ -287,7 +292,7 @@ def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profi
         startup = dict(code_digest=code_digest,matrix_commit=baseline['matrix_revision'],
             matrix_wheel_sha256=baseline['matrix_wheel_sha256'],sdk_digest=baseline['sdk_digest'],
             reader=reader,process_id=owner.process['pid'],startup_instance_id=name)
-        owner.loaded = dict(process_id=owner.process['pid'], qualified_startup=startup,
+        owner.loaded = dict(process_id=owner.process['pid'], qualified_startup=startup,runtime_id='runtime:'+name,
             runtime_bundle_sha256='f'*64,authority_epoch={'accepted_manifest_hashes':epochs})
         owner.application = dict(loaded_view_sha256='9'*64,application_sha256='a'*64,
             tribe={'policy':{'tribe_ref':'tribe:fixture'}},
@@ -309,9 +314,10 @@ def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profi
                 receiving={'features':['signed-roster-cas/v1'],'rosters':{'tribe':copy.deepcopy(self.roster)}})
             return result
         owner.status = MethodType(status,owner)
-        def qualified(self, *, expires_at_ms, require_admitted):
+        def qualified(self, *, expires_at_ms, require_admitted, native_tooling=None):
             assert require_admitted == (profile == 'guest')
             return {**self.status(),'identity':copy.deepcopy(self.identity),
+                **({'native_tooling':copy.deepcopy(self.native_catalog)} if native_tooling is not None else {}),
                 **({'admission_parent':copy.deepcopy(self.parent)} if require_admitted else {}),
                 'verified_identity':dict(identity=copy.deepcopy(self.identity),runtime_bundle_sha256='f'*64,
                                          authority_control_head='control:fixture',
@@ -322,7 +328,25 @@ def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profi
         before[name]={'old':name}
         required.append(dict(being_ref=owner.being,embodiment_id=owner.server['embodiment_id'],
                              expected_selection_sha256=digest(before[name])))
-        recipes[name]=dict(profile=profile,selection=selection)
+        recipes[name]=dict(profile=profile,selection=selection,tooling={'profile':'matrix-only'})
+        if tooling_profile == 'codex':
+            native_thread = str(uuid.uuid5(uuid.NAMESPACE_URL, 'native-fixture:' + name))
+            recipes[name]['tooling'] = dict(profile='codex', attachment=str(owner.root/'attachment'),
+                codex_home=str(owner.root/'codex'), connections=[], native_endpoint=str(owner.root/'native.sock'),
+                native_threads=[native_thread],tribe_channel='tribe')
+            owner.native_catalog = dict(schema='cluster-native-tool-catalog/v1',
+                acceptance='selected-existing-contexts',native_process={'pid':123},
+                runtime_id='runtime:'+name,server=owner.server,tribe_channel='tribe',group_socket_sha256=digest({'socket':str(owner.socket)}),
+                contexts=[{'thread_id':native_thread}],config_sha256='e'*64,binding_sha256='d'*64)
+            owner.tooling_effects = 0
+            def reconcile(self, operation, **options):
+                self.tooling_effects += 1
+                return dict(schema='cluster-native-chat-tooling/v1',status='configured',operation_id=operation,
+                    runtime_id=self.loaded['runtime_id'],server=self.server,
+                    **{key:self.loaded['qualified_startup'][key] for key in (
+                        'code_digest','sdk_digest','matrix_commit','matrix_wheel_sha256')},
+                    native_catalog=copy.deepcopy(self.native_catalog))
+            owner.reconcile_tooling=MethodType(reconcile,owner)
     authorities=[dict(being_ref=who.being,manifest_hash=epochs[0],control_head='control:fixture')
                  for who in owners.values()]
     manifest=dict(schema='dm.receiving-release/v1',
@@ -1001,5 +1025,147 @@ def test_completed_cohort_retry_changed_gate_still_fences_forward(tmp_path):
     with pytest.raises(OnboardingError, match='selection_changed'):
         controller.activate()
     assert journal.get(identifier)['runtime_observation']['cohort_activation']['readers'] == first['readers']
-    assert all(owner.gate['readers'] == [] for owner in owners.values())
+    assert all(owner.gate["readers"] == [] for owner in owners.values())
     assert_new_operation_can_revoke(owners)
+
+
+def test_combined_owner_control_keeps_durable_request_after_lost_acceptance(
+    tmp_path, monkeypatch
+):
+    from daimon_matrix.local_api import request_hash
+    from types import SimpleNamespace
+
+    root = tmp_path / "owner"
+    root.mkdir(mode=0o700)
+    owner = OwnerGroupClient(root, root / "tribe.sock")
+    command = dict(
+        channel_id="tribe",
+        process_instance_id="fixture",
+        expected_head="a" * 64,
+        phase="select",
+        operation_id="operation",
+        release_digest="b" * 64,
+        readers=[],
+    )
+    gate = dict(
+        process_instance_id="fixture", head="a" * 64, phase="revoke", readers=[]
+    )
+    process = {"pid": 1}
+    server = {"embodiment_id": "fixture"}
+    authored = []
+    sent = []
+
+    def prepare(method, params):
+        request = dict(method=method, params=params, request_id="one-retained-request")
+        authored.append(request)
+        return request
+
+    def send(request):
+        sent.append(copy.deepcopy(request))
+        gate.update(
+            {k: v for k, v in command.items() if k != "expected_head"},
+            head="c" * 64,
+            request_sha256=request_hash(request),
+        )
+        raise OSError("lost reply after native acceptance")
+
+    monkeypatch.setattr(
+        owner, "_client", lambda _role: SimpleNamespace(prepare=prepare, send=send)
+    )
+    monkeypatch.setattr(
+        owner,
+        "status",
+        lambda: dict(process=dict(process), server=server, gate=dict(gate)),
+    )
+    path = root / "receiving-control/select.json"
+    with pytest.raises(OSError, match="lost reply"):
+        owner.prepare_apply_control(command, path)
+    retained = path.read_bytes()
+    accepted = owner.prepare_apply_control(command, path)
+    assert path.read_bytes() == retained
+    assert accepted["request_sha256"] == request_hash(authored[0])
+    assert len(authored) == len(sent) == 1
+    process["pid"] = 2
+    with pytest.raises(OnboardingError, match="process_changed"):
+        owner.prepare_apply_control(command, path)
+    assert path.read_bytes() == retained and len(authored) == len(sent) == 1
+
+
+def test_combined_owner_control_expiry_after_preparation_never_applies(
+    tmp_path, monkeypatch
+):
+    from clusterctl import onboarding_receiving_update as module
+    from types import SimpleNamespace
+
+    root = tmp_path / "owner"
+    root.mkdir(mode=0o700)
+    clock = [1]
+    monkeypatch.setattr(module.time, "monotonic_ns", lambda: clock[0])
+    owner = OwnerGroupClient(root, root / "tribe.sock", deadline_ns=100)
+    command = dict(
+        channel_id="tribe",
+        process_instance_id="fixture",
+        expected_head="a" * 64,
+        phase="revoke",
+    )
+    monkeypatch.setattr(
+        owner,
+        "status",
+        lambda: dict(
+            process={},
+            server={},
+            gate={"process_instance_id": "fixture", "head": "a" * 64},
+        ),
+    )
+    monkeypatch.setattr(
+        owner,
+        "_client",
+        lambda role: SimpleNamespace(
+            prepare=lambda method, params: dict(
+                method=method, params=params, request_id="retained"
+            )
+        ),
+    )
+    durable = owner._durable_control
+
+    def expire(path):
+        durable(path)
+        clock[0] = 101
+
+    monkeypatch.setattr(owner, "_durable_control", expire)
+    monkeypatch.setattr(
+        owner,
+        "_apply_control",
+        lambda p: pytest.fail("expired request reached application"),
+    )
+    path = root / "receiving-control/revoke.json"
+    with pytest.raises(OnboardingError, match="deadline_expired"):
+        owner.prepare_apply_control(command, path)
+    assert json.loads(path.read_text())["request"]["request_id"] == "retained"
+
+
+@pytest.mark.parametrize('profile', ['source', 'guest'])
+def test_codex_tooling_is_retained_once_and_native_drift_prevents_activation(tmp_path, profile):
+    controller, owners, journal, identifier = activation_fixture(tmp_path, profile=profile, tooling_profile='codex')
+    prepared = controller.prepare_activation()
+    assert all(owner.tooling_effects == 1 for owner in owners.values())
+    assert all('native_tooling' in record for record in prepared['records'].values())
+    assert len(journal.get(identifier)['runtime_observation']['native_tooling']) == 2
+    assert controller.prepare_activation() == prepared
+    assert all(owner.tooling_effects == 1 for owner in owners.values())
+    owners['eko'].native_catalog['native_process']['pid'] = 456
+    with pytest.raises(OnboardingError, match='activation_changed'):
+        controller.activate()
+    assert all(owner.gate['readers'] == [] for owner in owners.values())
+
+
+def test_codex_configuration_without_catalog_cannot_be_receiving_adoption(tmp_path):
+    from types import MethodType
+    controller, owners, journal, identifier = activation_fixture(tmp_path, tooling_profile='codex')
+    def configured(self, operation, **options):
+        return dict(schema='cluster-native-chat-tooling/v1',status='configured',operation_id=operation)
+    owners['eko'].reconcile_tooling=MethodType(configured,owners['eko'])
+    with pytest.raises(OnboardingError,match='native_tooling_unobserved'):
+        controller.prepare_activation()
+    assert all(owner.gate['readers'] == [] for owner in owners.values())
+    assert 'native_tooling' not in journal.get(identifier)['runtime_observation']
