@@ -429,11 +429,11 @@ def admission_activation_fixture(tmp_path, initial):
                 application_sha256=application['application_sha256'], publication_sha256=application['publication_sha256'],
                 visibility_installation_sha256=application['visibility']['installation_sha256'])}
     cohort.retain_admission_activation({**admission['activation'], 'roster_sha256': '5' * 64, 'receivers': recipes})
-    return cohort, manager
+    return cohort, manager, managed, plan
 
 
 def test_first_load_is_consumed_by_the_same_cohort_and_all_senders_activate(tmp_path, initial):
-    cohort, manager = admission_activation_fixture(tmp_path, initial)
+    cohort, manager, _, _ = admission_activation_fixture(tmp_path, initial)
     before = copy.deepcopy(cohort._row()['runtime_observation']['sender_revocations'])
     prepared = cohort.prepare_activation()
     row = cohort._row()
@@ -449,7 +449,7 @@ def test_first_load_is_consumed_by_the_same_cohort_and_all_senders_activate(tmp_
 
 
 def test_lost_initial_revoke_is_recoverable_before_any_activation_vector(tmp_path, initial, monkeypatch):
-    cohort, _ = admission_activation_fixture(tmp_path, initial)
+    cohort, _, _, _ = admission_activation_fixture(tmp_path, initial)
     owner = cohort.owners['newcomer']
     actual = owner.prepare_apply_control
     def lost(*args):
@@ -469,7 +469,7 @@ def test_lost_initial_revoke_is_recoverable_before_any_activation_vector(tmp_pat
 
 
 def test_missing_initial_revoke_cannot_enable_an_old_sender(tmp_path, initial):
-    cohort, _ = admission_activation_fixture(tmp_path, initial)
+    cohort, _, _, _ = admission_activation_fixture(tmp_path, initial)
     cohort.prepare_activation()
     row = cohort._row()
     changed = copy.deepcopy(row['runtime_observation'])
@@ -482,7 +482,7 @@ def test_missing_initial_revoke_cannot_enable_an_old_sender(tmp_path, initial):
 
 
 def test_initial_context_marker_cannot_replace_the_produced_load(tmp_path, initial):
-    cohort, _ = admission_activation_fixture(tmp_path, initial)
+    cohort, _, _, _ = admission_activation_fixture(tmp_path, initial)
     row = cohort._row()
     changed = copy.deepcopy(row['runtime_observation'])
     changed['initial_managed']['newcomer']['intent']['request']['not_after_ms'] += 1
@@ -491,3 +491,131 @@ def test_initial_context_marker_cannot_replace_the_produced_load(tmp_path, initi
     with pytest.raises(OnboardingError, match='initial_managed_lifecycle_unobserved'):
         cohort.prepare_activation()
     assert all(peer.gate['readers'] == [] for peer in cohort.owners.values())
+
+
+def test_initial_steady_requires_selected_cohort_and_keeps_same_running_body(tmp_path, initial):
+    cohort, manager, managed, plan = admission_activation_fixture(tmp_path, initial)
+    initial_record = copy.deepcopy(cohort._row()['runtime_observation']['initial_managed'])
+    with pytest.raises(OnboardingError, match='cohort_selection_required'):
+        managed.complete_initial(plan, cohort)
+    assert manager.reloads == 0 and '--initial-context-json' in manager.unit.read_text()
+    cohort.activate()
+    result = managed.complete_initial(plan, cohort)
+    assert result['receiving_readiness'] == 'qualified-local-projection'
+    assert result['communication_acceptance'] == 'unobserved'
+    assert '--initial-context-json' not in manager.unit.read_text()
+    assert cohort._row()['runtime_observation']['initial_managed'] == initial_record
+    assert managed.complete_initial(plan, cohort) == result
+    assert managed.execute_initial(plan, cohort) == initial_record['newcomer']['controlled_loaded']
+    assert manager.starts == manager.reloads == manager.enables == 1 and manager.stops == 0
+
+
+def test_lost_steady_host_reply_does_not_repeat_the_first_start(tmp_path, initial, monkeypatch):
+    cohort, manager, managed, plan = admission_activation_fixture(tmp_path, initial)
+    cohort.activate()
+    actual = managed.backend._guest_service_call
+    lost = []
+    def root_call(*args, **options):
+        result = actual(*args, **options)
+        if args[1] == 'bootstrap-steady' and not lost:
+            lost.append(True)
+            raise OSError('synthetic lost steady return')
+        return result
+    monkeypatch.setattr(managed.backend, '_guest_service_call', root_call)
+    with pytest.raises(OSError, match='lost steady'):
+        managed.complete_initial(plan, cohort)
+    assert 'selected' not in cohort._row()['runtime_observation']['initial_steady']['newcomer']
+    assert '--initial-context-json' not in manager.unit.read_text()
+    managed.execute_initial(plan, cohort)
+    assert 'completed' in cohort._row()['runtime_observation']['initial_steady']['newcomer']
+    assert manager.reloads == manager.starts == 1 and manager.stops == 0
+
+
+def test_post_steady_qualification_failure_keeps_the_physical_selection(tmp_path, initial, monkeypatch):
+    cohort, manager, managed, plan = admission_activation_fixture(tmp_path, initial)
+    cohort.activate()
+    actual = cohort._confirmed_selection
+    confirmed = []
+    def observe(*args):
+        confirmed.append(True)
+        if len(confirmed) > 1:
+            raise OnboardingError('synthetic expired post-handoff observation')
+        return actual(*args)
+    monkeypatch.setattr(cohort, '_confirmed_selection', observe)
+    with pytest.raises(OnboardingError, match='expired post-handoff'):
+        managed.complete_initial(plan, cohort)
+    row = cohort._row()
+    assert 'selected' in row['runtime_observation']['initial_steady']['newcomer']
+    assert 'completed' not in row['runtime_observation']['initial_steady']['newcomer']
+    assert '--initial-context-json' not in manager.unit.read_text()
+    with pytest.raises(OnboardingError, match='cohort_reassessment_required'):
+        managed.execute_initial(plan, cohort)
+    assert manager.reloads == manager.starts == 1 and manager.stops == 0
+    assert 'cohort_reassessment' in cohort._row()['runtime_observation']
+    assert all(owner.gate['readers'] == [] for owner in cohort.owners.values())
+
+
+def test_post_steady_gate_drift_uses_existing_forward_repair(tmp_path, initial, monkeypatch):
+    cohort, manager, managed, plan = admission_activation_fixture(tmp_path, initial)
+    cohort.activate()
+    actual = managed.backend._guest_service_call
+    drifted = []
+    def root_call(*args, **options):
+        result = actual(*args, **options)
+        if args[1] == 'bootstrap-steady' and not drifted:
+            drifted.append(True)
+            cohort.owners['eko'].gate['head'] = '0' * 64
+        return result
+    monkeypatch.setattr(managed.backend, '_guest_service_call', root_call)
+    with pytest.raises(OnboardingError, match='cohort_selection_changed'):
+        managed.complete_initial(plan, cohort)
+    row = cohort._row()
+    assert 'selected' in row['runtime_observation']['initial_steady']['newcomer']
+    assert 'completed' not in row['runtime_observation']['initial_steady']['newcomer']
+    assert all(owner.gate['readers'] == [] for owner in cohort.owners.values())
+    assert '--initial-context-json' not in manager.unit.read_text()
+    with pytest.raises(OnboardingError, match='cohort_reassessment_required'):
+        managed.execute_initial(plan, cohort)
+    assert manager.reloads == manager.starts == 1 and manager.stops == 0
+
+
+def test_unavailable_native_load_after_steady_selection_retains_and_repairs(tmp_path, initial, monkeypatch):
+    cohort, manager, managed, plan = admission_activation_fixture(tmp_path, initial)
+    cohort.activate()
+    def unavailable(*_args, **_options):
+        raise OSError('synthetic unavailable loaded owner')
+    monkeypatch.setattr(managed.backend, '_target_call', unavailable)
+    with pytest.raises(OSError, match='unavailable loaded owner'):
+        managed.complete_initial(plan, cohort)
+    row = cohort._row()
+    assert 'selected' in row['runtime_observation']['initial_steady']['newcomer']
+    assert 'completed' not in row['runtime_observation']['initial_steady']['newcomer']
+    assert 'cohort_reassessment' in row['runtime_observation']
+    assert all(owner.gate['readers'] == [] for owner in cohort.owners.values())
+    assert manager.starts == manager.reloads == 1 and manager.stops == 0
+
+
+def test_expired_post_steady_budget_retains_repair_without_more_owner_calls(tmp_path, initial, monkeypatch):
+    cohort, manager, managed, plan = admission_activation_fixture(tmp_path, initial)
+    cohort.activate()
+    effects = {name: owner.effects for name, owner in cohort.owners.items()}
+    actual = managed.backend._guest_service_call
+    monotonic_ns = time.monotonic_ns
+    expired = []
+    def root_call(*args, **options):
+        result = actual(*args, **options)
+        if args[1] == 'bootstrap-steady':
+            expired.append(True)
+        return result
+    monkeypatch.setattr(managed.backend, '_guest_service_call', root_call)
+    monkeypatch.setattr(time, 'monotonic_ns', lambda: monotonic_ns() + (10**12 if expired else 0))
+    with pytest.raises(OnboardingError, match='host_deadline_expired'):
+        managed.complete_initial(plan, cohort)
+    row = cohort._row()
+    assert 'selected' in row['runtime_observation']['initial_steady']['newcomer']
+    assert row['runtime_observation']['cohort_reassessment'] == {}
+    assert {name: owner.effects for name, owner in cohort.owners.items()} == effects
+    assert '--initial-context-json' not in manager.unit.read_text()
+    assert manager.starts == manager.reloads == 1 and manager.stops == 0
+    expired.clear()
+    assert all(value['state'] == 'disabled' for value in cohort.reconcile_reassessment().values())

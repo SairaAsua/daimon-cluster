@@ -54,6 +54,7 @@ def fixture(tmp_path, monkeypatch):
             self.lose = None
             self.dropins = {}
             self.reload_dropins = None
+            self.reloads = 0
 
         def inspect(self, **_):
             running = self.state in {"active", "activating", "deactivating"}
@@ -99,6 +100,14 @@ def fixture(tmp_path, monkeypatch):
             self.invocation = "candidate-invocation"
             if self.lose == "start":
                 raise OSError("synthetic lost start return")
+
+        def reload(self, **_):
+            self.reloads += 1
+            if self.reload_dropins is not None:
+                self.dropins = self.reload_dropins
+            if self.lose == 'reload':
+                self.lose = None
+                raise OSError('synthetic lost reload return')
 
     manager = Manager()
     previous = dict(service=manager.inspect(), process=process, admission_parent=parent)
@@ -188,6 +197,109 @@ def test_initial_service_recovers_lost_start_reply_without_fake_exit_or_second_s
     controller.execute('select', request, deadline_ns=deadline())
     assert controller.execute('start', request, deadline_ns=deadline()) == result
     assert manager.enables == manager.starts == 1 and manager.stops == 0
+
+
+def steady_fixture(initial):
+    from clusterctl.onboarding import digest
+    import json
+    controller, manager, original = initial
+    expiry = time.time_ns() // 1_000_000 + 10000
+    original = {**original, 'not_after_ms': expiry, 'argv': [*original['argv'], '--initial-context-json',
+        json.dumps(dict(schema='cluster-initial-start-context/v1', owner_sha256='1' * 64,
+            profile_sha256='2' * 64, not_after_ms=expiry))]}
+    for action in ('validate', 'select', 'start'):
+        controller.execute(action, original, deadline_ns=deadline())
+    parent = controller._parent({})
+    request = dict(schema='cluster-guest-service-steady/v1', operation_id=original['operation_id'],
+        plan_digest=original['plan_digest'], initial_request_sha256=digest(original),
+        cohort_selection_sha256='3' * 64, process={**parent, 'pid': 223, 'start_ticks': 10},
+        admission_parent=parent, not_after_ms=expiry)
+    return controller, manager, request
+
+
+def test_steady_unit_removes_only_initial_guard_without_restarting(initial):
+    controller, manager, request = steady_fixture(initial)
+    original = manager.unit.read_bytes()
+    result = controller.execute('steady', request, deadline_ns=deadline())
+    assert '--initial-context-json' not in manager.unit.read_text()
+    assert result['selected']['previous_sha256'] == hashlib.sha256(original).hexdigest()
+    assert result['service']['manager']['InvocationID'] == 'candidate-invocation'
+    assert manager.reloads == manager.starts == manager.enables == 1 and manager.stops == 0
+    assert controller.execute('steady', request, deadline_ns=deadline()) == result
+    assert manager.reloads == manager.starts == 1
+
+
+def test_lost_steady_reload_recovers_exact_selection_after_expiry(initial, monkeypatch):
+    controller, manager, request = steady_fixture(initial)
+    manager.lose = 'reload'
+    with pytest.raises(OSError, match='lost reload'):
+        controller.execute('steady', request, deadline_ns=deadline())
+    selected = manager.unit.read_bytes()
+    monkeypatch.setattr(time, 'time_ns', lambda: (request['not_after_ms'] + 1) * 1_000_000)
+    result = controller.execute('steady', request, deadline_ns=deadline())
+    assert manager.unit.read_bytes() == selected
+    assert result['service']['unit_sha256'] == hashlib.sha256(selected).hexdigest()
+    assert manager.reloads == 2 and manager.starts == 1 and manager.stops == 0
+
+
+def test_expired_steady_request_cannot_remove_a_guard_that_is_still_selected(initial, monkeypatch):
+    controller, manager, request = steady_fixture(initial)
+    original = manager.unit.read_bytes()
+    monkeypatch.setattr(time, 'time_ns', lambda: request['not_after_ms'] * 1_000_000)
+    with pytest.raises(OnboardingError, match='authorization_expired'):
+        controller.execute('steady', request, deadline_ns=deadline())
+    assert manager.unit.read_bytes() == original and manager.reloads == 0
+
+
+@pytest.mark.parametrize('drift', ['invocation', 'dropin', 'unit', 'parent', 'child'])
+def test_steady_refuses_changed_first_execution_without_a_unit_effect(initial, drift):
+    controller, manager, request = steady_fixture(initial)
+    if drift == 'invocation':
+        manager.invocation = 'foreign-invocation'
+    elif drift == 'dropin':
+        manager.dropins = {'/new.conf': '4' * 64}
+    elif drift == 'unit':
+        manager.unit.write_bytes(manager.unit.read_bytes() + b'# foreign\n')
+    elif drift == 'parent':
+        request['admission_parent'] = {**request['admission_parent'], 'start_ticks': 99}
+    else:
+        bind = manager.bind_admitted_process
+        manager.bind_admitted_process = lambda value, inspected: {
+            **bind(value, inspected), 'process': {**value['process'], 'start_ticks': 99}}
+    original = manager.unit.read_bytes()
+    with pytest.raises(OnboardingError, match='started_process_changed|initial_preparation_required'):
+        controller.execute('steady', request, deadline_ns=deadline())
+    assert manager.unit.read_bytes() == original and manager.reloads == 0
+
+
+def test_changed_dropin_after_steady_reload_stays_unqualified(initial):
+    controller, manager, request = steady_fixture(initial)
+    manager.reload_dropins = {'/new.conf': '4' * 64}
+    with pytest.raises(OnboardingError, match='started_process_changed'):
+        controller.execute('steady', request, deadline_ns=deadline())
+    root = root_for(manager, request)
+    assert (root / 'steady-request.json').exists() and not (root / 'steady.json').exists()
+    assert '--initial-context-json' not in manager.unit.read_text()
+    assert manager.reloads == manager.starts == 1 and manager.stops == 0
+
+
+@pytest.mark.parametrize('change', ['expiry', 'invocation'])
+def test_steady_rechecks_after_private_candidate_durability(initial, monkeypatch, change):
+    controller, manager, request = steady_fixture(initial)
+    original = manager.unit.read_bytes()
+    publish = onboarding_service.publish
+    def after_publish(path, content, **options):
+        result = publish(path, content, **options)
+        if path.name.startswith('.onboarding-selection-'):
+            if change == 'expiry':
+                monkeypatch.setattr(time, 'time_ns', lambda: request['not_after_ms'] * 1_000_000)
+            else:
+                manager.invocation = 'changed-during-preparation'
+        return result
+    monkeypatch.setattr(onboarding_service, 'publish', after_publish)
+    with pytest.raises(OnboardingError, match='authorization_expired|started_process_changed'):
+        controller.execute('steady', request, deadline_ns=deadline())
+    assert manager.unit.read_bytes() == original and manager.reloads == 0
     records = list(manager.unit.parent.glob('.*.selection/operations/*/*.json'))
     assert not any(path.stem in {'quiesced', 'process-exited', 'admission_parent-exited'} for path in records)
 

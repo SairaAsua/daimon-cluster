@@ -492,7 +492,7 @@ def test_host_forwards_owner_bootstrap_only_as_guest_owner(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize('action', ['bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce',
-                                  'bootstrap-select', 'bootstrap-start'])
+                                  'bootstrap-select', 'bootstrap-start', 'bootstrap-steady'])
 def test_host_root_service_route_never_executes_private_sdk_or_installer(tmp_path, monkeypatch, action):
     backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
     options = dict(candidate=candidate, timeout_seconds=5)

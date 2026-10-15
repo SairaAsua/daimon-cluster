@@ -621,12 +621,10 @@ and original pre-selection pins cannot drift during derivation.
 
 This record alone cannot enable senders. Native loaded adoption must still prove
 the same Tribe, and an added receiver cannot borrow another operation's replacement
-history as its own first managed start. ManagedRuntime now has the explicit
-first-load producer below. Admission publication/lifecycle derivation, the cohort
-consumer, after-only sender revocation/repair and complete
-portal/cohort activation remain unfinished integration, not deployed acceptance.
-Added-body lifecycle qualification currently refuses even a locally retained
-marker until its genuine initial-managed producer and validator are integrated.
+history as its own first managed start. The first-load producer and cohort
+consumer below require the actual protected initial records, current native
+adoption and all-required revocations. Admission publication/lifecycle derivation
+and complete portal orchestration remain unfinished, not deployed acceptance.
 
 ### Controller preparation before initial group admission
 
@@ -742,12 +740,49 @@ This producer does not enable a sender or establish full cohort receiving or
 communication. Its isolated orchestration tests use real journal/job/reader/root
 records with explicitly fake manager/native RPC/registry seams. Real native
 admission and ordinary child/controller tests provide narrower separate evidence.
-The after-only cohort consumer/revocation/repair and end-to-end portal integration
-remain unfinished; a retained initial record alone cannot bypass their refusal.
-That integration must also retain the authorized CAS from the initial guarded
-unit to the normal service lifecycle after acceptance. Do not leave a completed
-onboarding dependent on a startup-only authorization horizon or silently remove
-its initial guard before the first-load evidence is accepted.
+The cohort consumes all five retained producer stages for an after-only receiver,
+then qualifies its real current load. It retains the added sender's original
+revoke request before dispatch and requires matching revocation evidence for
+every after-set owner before any positive selection. A lost initial revoke can
+be recovered and its reservation released with empty readership even before the
+complete activation vector exists. Replacement markers cannot substitute for
+first-load proof; old members retain their separate lifecycle/revocation records.
+
+### Initial guard to ordinary restart policy
+
+After complete cohort selection, `ManagedRuntime.complete_initial(plan, cohort)`
+uses the same operation -> jobs ownership and fresh all-required selection proof.
+It freezes an exact `cluster-guest-service-steady/v1` request in
+`runtime_observation.initial_steady[name]`, separate from the original five-stage
+first-load record. The request binds that initial operation/request, child/parent,
+qualified cohort selection and a fixed not-after no later than the original
+authorization and the fresh observation window. It does not activate a missing
+cohort or claim message delivery.
+
+The existing host/root service route adds `bootstrap-steady`. Root derives the
+ordinary command by removing only the validated initial-context pair from its
+retained original argv. It retains the exact intent, reuses `select_entrypoint`
+CAS and reloads the manager; no stop, start or enable is issued. Before and after,
+the first active invocation, parent, child association/cgroup, drop-ins and unit
+bytes must match. The original unit preimage and all first-load evidence survive.
+The same-process and fixed-expiry check runs again after private candidate
+durability, immediately before the active unit CAS.
+
+If guarded bytes are still selected, current cohort proof and the original finite
+handoff horizon are required. Exact steady bytes with the matching retained root
+intent are an already committed effect: a lost reply/reload can be reconciled
+after that horizon without renewing permission or starting another process.
+Physical selection is journaled before post-handoff native/cohort proof; a later
+expiry or reassessment cannot erase it or return to the first-start path.
+Every post-selection failure retains the existing reassessment obligation and
+uses only the remaining caller budget for repair. An exhausted budget leaves
+that obligation pending instead of launching further native control calls.
+`execute_initial` detects the retained handoff before old root validation/start
+and reobserves the same execution. A dead/replaced invocation is refused.
+
+This provides the same-operation steady handoff, not subsequent-cohort lifecycle
+provenance, portal sequencing or installed new-member acceptance. Those remain
+unfinished. Do not leave completed onboarding dependent on a startup-only guard.
 
 ### Public authority histories for future group admission
 
