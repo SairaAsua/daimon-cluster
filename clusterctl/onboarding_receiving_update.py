@@ -423,11 +423,12 @@ class GuestGroupClient:
 
     def reconcile_tooling(self, operation_id: str, *, attachment: Path,
                          codex_home: Path, connections: tuple[Path, ...] = (),
-                         native_endpoint: Path | None = None, native_threads: tuple[str, ...] = ()) -> dict:
+                         native_endpoint: Path | None = None, native_threads: tuple[str, ...] = (),
+                         binding_filename: str = 'binding.json') -> dict:
         from .onboarding_owner_client import OwnerClient
         return OwnerClient(self.backend).reconcile(self.plan, operation_id,
             candidate=self.candidate, attachment=attachment, codex_home=codex_home, connections=connections,
-            native_endpoint=native_endpoint, native_threads=native_threads,
+            native_endpoint=native_endpoint, native_threads=native_threads, binding_filename=binding_filename,
             timeout_seconds=self.timeout_seconds, deadline_ns=self.deadline_ns)
 
 
@@ -558,8 +559,9 @@ class SourceGroupClient:
 
     def reconcile_tooling(self, operation_id: str, *, attachment: Path,
                          codex_home: Path, connections: tuple[Path, ...] = (),
-                         native_endpoint: Path | None = None, native_threads: tuple[str, ...] = ()) -> dict:
-        result = self._call(['--binding', str(attachment / 'binding.json'),
+                         native_endpoint: Path | None = None, native_threads: tuple[str, ...] = (),
+                         binding_filename: str = 'binding.json') -> dict:
+        result = self._call(['--binding', str(attachment / binding_filename),
             '--reconcile-tooling', operation_id,
             '--codex-home', str(codex_home),
             *[part for path in connections for part in ('--connection-mirror', str(path))],
@@ -2436,7 +2438,8 @@ class CohortController:
                     raise OnboardingError('receiving_native_tooling_unobserved')
                 result = owner.reconcile_tooling(operation, attachment=Path(recipe['attachment']),
                     codex_home=Path(recipe['codex_home']), connections=tuple(map(Path, recipe['connections'])),
-                    native_endpoint=Path(recipe['native_endpoint']), native_threads=tuple(recipe['native_threads']))
+                    native_endpoint=Path(recipe['native_endpoint']), native_threads=tuple(recipe['native_threads']),
+                    **({'binding_filename': recipe['binding_filename']} if 'binding_filename' in recipe else {}))
                 if (result.get('schema') != 'cluster-native-chat-tooling/v1' or result.get('operation_id') != operation
                         or result.get('status') != 'configured' or not isinstance(result.get('native_catalog'), dict)):
                     raise OnboardingError('receiving_native_tooling_unobserved')

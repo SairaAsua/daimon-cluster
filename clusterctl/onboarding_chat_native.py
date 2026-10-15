@@ -366,10 +366,14 @@ def _publish_exact(
     _sync_directory(path.parent)
 
 
-def _binding_fingerprint(attachment: Path) -> tuple[dict[str, Any], str]:
+def _binding_fingerprint(
+    attachment: Path, *, binding_filename: str = "binding.json"
+) -> tuple[dict[str, Any], str]:
     from daimon_matrix.messaging_config import protected_read
 
-    path = attachment / "binding.json"
+    if binding_filename not in {"binding.json", "owner-binding.json"}:
+        raise ValueError("agent_chat_tooling_binding_invalid")
+    path = attachment / binding_filename
     binding = load_binding(path)
     bridge(binding)  # Validate messaging-only capability; no request is sent.
     raw = json.loads(protected_read(path))
@@ -415,12 +419,16 @@ def reconcile_tooling(
     if str(uuid.UUID(identifier)) != identifier:
         raise ValueError("agent_chat_tooling_operation_invalid")
     attachment = Path(os.path.abspath(attachment))
+    binding_filename = (
+        Path(command[-1]).name if command and isinstance(command[-1], str) else ""
+    )
     if (
         not command
+        or binding_filename not in {"binding.json", "owner-binding.json"}
         or any(
             not isinstance(item, str) or not item or "\0" in item for item in command
         )
-        or command[-2:] != ["--binding", str(attachment / "binding.json")]
+        or command[-2:] != ["--binding", str(attachment / binding_filename)]
     ):
         raise ValueError("agent_chat_tooling_command_invalid")
     home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
@@ -436,7 +444,9 @@ def reconcile_tooling(
     history = attachment / "codex-mcp-history" / ("tooling-" + identifier)
     command_sha = hashlib.sha256(canonical_bytes(command)).hexdigest()
     with _codex_owner_lock(home):
-        binding, binding_sha = _binding_fingerprint(attachment)
+        binding, binding_sha = _binding_fingerprint(
+            attachment, binding_filename=binding_filename
+        )
         intent = dict(
             operation_id=operation_id,
             command_sha256=command_sha,
@@ -462,6 +472,8 @@ def reconcile_tooling(
                     set(original) != {"command", "tools", "incoming_channels"}
                     or original["incoming_channels"] != binding["incoming_channels"]
                     or not isinstance(original["command"], list)
+                    or original["command"][-2:]
+                    != ["--binding", str(attachment / binding_filename)]
                     or {row.get("name") for row in original["tools"]}
                     != {row["name"] for row in _tools()}
                 ):
@@ -541,7 +553,10 @@ def reconcile_tooling(
             directory = directory.parent
         for path, before, after in updates:
             remaining()
-            if _binding_fingerprint(attachment)[1] != binding_sha:
+            if (
+                _binding_fingerprint(attachment, binding_filename=binding_filename)[1]
+                != binding_sha
+            ):
                 raise ValueError("agent_chat_tooling_conflict")
             _publish_exact(
                 path,
