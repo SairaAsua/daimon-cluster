@@ -320,6 +320,11 @@ def test_host_probes_exact_mounted_candidate_without_selecting_it(tmp_path, monk
     assert len(calls) == 1
     argv, options = calls[0]
     assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    sdk = json.loads((candidate[0] / 'sdk/sdk.json').read_bytes())
+    venv = Path('/home/agent/.local/share/daimon-matrix/sdk') / digest(sdk) / 'venv'
+    entry = argv.index('--') + 1
+    assert argv[entry:entry + 4] == [str(venv / 'bin/python'), '-B', '-I', '-S']
+    assert str(venv.parent / 'runtime-imports') in argv
     assert argv[argv.index('--runtime-digest') + 1] == candidate[1]
     assert argv[argv.index('--runtime-code') + 1].endswith(candidate[1])
     assert '--require-loaded' in argv
@@ -327,6 +332,15 @@ def test_host_probes_exact_mounted_candidate_without_selecting_it(tmp_path, monk
     assert 0 < options['timeout_seconds'] <= 5
     assert original == {path: path.read_bytes() for path in original}
     assert not list(tmp_path.rglob('custody.json'))
+
+
+@pytest.mark.parametrize('action', ['sdk-prepare', 'sdk-observe'])
+def test_host_sdk_preparation_keeps_its_system_interpreter(tmp_path, monkeypatch, action):
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    backend._target_call(value, action, candidate=candidate)
+    argv = calls[0][0]
+    assert argv[argv.index('--') + 1] == '/usr/bin/python3'
+    assert not any('/venv/' in argument for argument in argv)
 
 
 @pytest.mark.parametrize('change', ['missing-mount', 'writable-mount', 'other-source', 'changed-code',
@@ -458,6 +472,7 @@ def test_host_forwards_owner_bootstrap_only_as_guest_owner(tmp_path, monkeypatch
     backend._target_call(value, 'receiving-bootstrap-' + phase, **options)
     argv, bounds = calls[0]
     assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    assert argv[argv.index('--') + 1] == '/usr/bin/python3'
     assert 0 < bounds['timeout_seconds'] <= 5
     assert '--bootstrap-timeout-seconds' in argv and '--observation-timeout-seconds' not in argv
     if phase != 'freeze':
@@ -515,6 +530,7 @@ def test_guest_control_uses_bounded_stdin_and_owner_retained_request_path(tmp_pa
         control_value=command, observation_timeout_seconds=5)
     argv, options = calls[0]
     assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    assert argv[argv.index('--') + 1].endswith('/venv/bin/python')
     assert argv[argv.index('--control-command') + 1] == '-'
     assert not any('synthetic' in part for part in argv)
     assert json.loads(options['input_data']) == command
@@ -527,6 +543,7 @@ def test_receiving_identity_uses_prepared_candidate_and_one_finite_owner_budget(
         identity_expires_at_ms=12345, observation_timeout_seconds=5)
     argv, options = calls[0]
     assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    assert argv[argv.index('--') + 1].endswith('/venv/bin/python')
     assert argv[argv.index('--identity-expires-at-ms') + 1] == '12345'
     assert 0 < options['timeout_seconds'] <= 5
 

@@ -339,6 +339,13 @@ They retain the same durable request under one owner lock. Splitting preparation
 and application across cold qualified owner processes can age a new request beyond
 its native authentication window before its first dispatch; do not increase that
 window or regenerate an uncertain request to conceal the delay.
+For an explicitly selected, already prepared qualified guest candidate, status,
+identity and control calls enter its existing closed SDK interpreter directly.
+The host derives its owner-private generation path from the verified public SDK;
+Target still validates installed dependencies, startup context and receiving state.
+SDK preparation/observation and bootstrap retain their original system-interpreter
+route. Missing preparation refuses without installation or fallback. This removes
+duplicate setup; it neither extends freshness nor proves a timeout's lower cause.
 `config/mcpServer/reload` refreshes only the addressed App Server's threads.
 A fresh config-only catalog probe cannot prove existing sessions reloaded.
 Keep unavailable native-instance routes explicit; neither console fallback nor

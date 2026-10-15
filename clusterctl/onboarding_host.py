@@ -1070,15 +1070,30 @@ class HostBackend:
             if not sha(bootstrap_ready_sha256):
                 raise OnboardingError('invalid_receiving_bootstrap_request')
             arguments += ['--bootstrap-ready-sha256', bootstrap_ready_sha256]
+        prepared_venv = None
+        if candidate is not None and action in {'running', 'admitted-running', 'receiving-identity',
+                'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}:
+            # _runtime_paths verified the entire public candidate and its SDK.
+            # Enter the already prepared owner generation directly; Target still
+            # checks the installed SDK, startup context and actual receiving state.
+            # Missing preparation must refuse, never install or fall back.
+            sdk = json.loads(onboarding_release.regular(candidate[0] / 'sdk/sdk.json', uid=os.geteuid()))
+            prepared_venv = Path('/home/agent/.local/share/daimon-matrix/sdk') / digest(sdk) / 'venv'
         remaining = None
         if deadline_ns is not None:
             remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
             if remaining <= 0:
                 raise OnboardingError('receiving_host_deadline_expired')
             arguments += ['--bootstrap-timeout-seconds' if bootstrapping else '--observation-timeout-seconds', str(remaining)]
+        if prepared_venv is None:
+            owner_command = code_command(Path('/usr/bin/python3'), runtime_code,
+                'clusterctl.onboarding_target', arguments)
+        else:
+            from .onboarding_sdk import runtime_command
+            owner_command = runtime_command(prepared_venv, prepared_venv.parent / 'runtime-imports',
+                runtime_code, 'clusterctl.onboarding_target', arguments)
         command = ["exec", self.instance(plan), "--user", "1000", "--group", "1000",
-            "--env", "HOME=/home/agent", "--", *code_command(Path('/usr/bin/python3'), runtime_code,
-                'clusterctl.onboarding_target', arguments)]
+            "--env", "HOME=/home/agent", "--", *owner_command]
         dispatch: dict = {} if input_data is None else {'input_data': input_data}
         result = (self._dispatch(plan, command, **dispatch) if deadline_ns is None
             else self._dispatch(plan, command, timeout_seconds=remaining, deadline_ns=deadline_ns, **dispatch))
