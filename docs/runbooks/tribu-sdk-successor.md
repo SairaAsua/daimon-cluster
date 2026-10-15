@@ -70,6 +70,15 @@ loaded code are still verified afterwards. Ordinary status without a deadline
 keeps its immediate missing-socket refusal. Do not replay a retained native start
 or mint another controller because its first socket observation raced startup.
 
+A source test refusal `daimon_matrix_contract_mismatch` can mean the development
+interpreter still has the previous VCS commit. A successful pip requirements run
+may retain it when both commits declare the same package version. Inspect that
+interpreter's `direct_url.json` and keep the existing commit guard. When this is
+the verified cause, force-reinstall only the exact Matrix VCS requirement declared
+in `requirements-weave.txt`, with `--no-deps --force-reinstall`; leave unrelated
+dependencies and serving environments unchanged. Do not repair it by changing
+provenance metadata, suppressing the guard or creating another environment.
+
 Qualified V4 Target startup verifies the closed imports it actually executes,
 not the unused installed site-packages. Resolve the prepared generation from
 the just-verified SDK manifest, hold shared preparation ownership and require
@@ -569,10 +578,11 @@ Tribu publication represents that message. A transport ACK is not delivery.
 The receiving signed selection names the group application, visibility and native
 socket. Both incoming/outgoing channels are `tribe`. Owner clients derive this
 selection, not old `peer-in`/`peer-out` IDs. Archive obsolete bindings and proxies;
-never alias old directed send IDs into group requests. The worker recognizes this
-signed selection before examining the historical pair installer. An absent group
-is an explicit enrollment gap, never permission to reconstruct Source/member
-pairs. Further portal admission must invite/accept in the existing Tribe and
+never alias old directed send IDs into group requests. The worker observes only
+this signed group selection, without consulting archived pair receipts. Historical
+repair uses the explicit `repair_directed` and `directed_application` routes.
+An absent group is an explicit enrollment gap, never permission to reconstruct
+Source/member pairs. Further portal admission must invite/accept in the existing Tribe and
 qualify its shared Root inventory/roster transaction. It is not yet an automatic
 future-member admission claim.
 

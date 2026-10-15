@@ -58,3 +58,29 @@ def test_legacy_pair_is_not_group_onboarding_completion():
     host.application=lambda _:('/matrix/peer/application','/matrix/peer/visibility/installation.json')
     with pytest.raises(OnboardingError,match='onboarding_group_enrollment_required'):
         host._execute({'name':'eko'})
+
+
+def test_legacy_pair_receipt_cannot_make_worker_group_selection_complete(tmp_path):
+    from clusterctl import being_seed
+    from clusterctl.onboarding import digest
+
+    host = object.__new__(PeerHost)
+    plan = {'name': 'eko', 'owner': 'fixture-human'}
+    host.state = tmp_path
+    host.settings = {'source_being_ref': 'fixture-source'}
+    host.backend = SimpleNamespace(_matrix_command=lambda *_: {
+        'phase': 'v8', 'receipt': {'peer_being_ref': 'fixture-source'},
+    })
+    host._identity = lambda *_: None
+    host._proxies = lambda *_: True
+    host._source = lambda *_: {'running': True, 'applications': [digest(plan)]}
+    directory = tmp_path / digest(plan)
+    directory.mkdir(mode=0o700)
+    being_seed._write(directory / 'complete.json', {
+        'schema': 'cluster-onboarding-peer-complete/v1',
+        'plan_digest': digest(plan),
+        'source_being_ref': 'fixture-source',
+    })
+    before = (directory / 'complete.json').read_bytes()
+    assert host.application(plan) is None
+    assert (directory / 'complete.json').read_bytes() == before
