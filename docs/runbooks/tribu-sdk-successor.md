@@ -36,7 +36,10 @@ On failure, inspect the exact controller stage, retained result and current
 process. Resume that operation through the maintained controller. A timeout
 alone authorizes neither replay nor a new identity. Do not benchmark unrelated
 substeps, build a parallel diagnostic runner, or repeat preparation to make an
-uncertain outcome look successful. Use existing bounded diagnostics to resolve
+uncertain outcome look successful. Persist a successful effect before optional
+follow-up checks; an auxiliary retry probe must not silently shorten the supported
+operation budget. Resolve service/socket/process names from the retained binding,
+not a guessed conventional name. Use existing bounded diagnostics to resolve
 the concrete missing fact, then continue from it. An early missing socket is
 not a reason to restart a process whose exit has not been observed.
 
