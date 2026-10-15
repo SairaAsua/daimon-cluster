@@ -1029,6 +1029,82 @@ def test_completed_cohort_retry_changed_gate_still_fences_forward(tmp_path):
     assert_new_operation_can_revoke(owners)
 
 
+def test_cohort_queries_overlap_but_preparation_validation_and_controls_are_serial(tmp_path, monkeypatch):
+    import threading
+    controller, owners, _, _ = activation_fixture(tmp_path)
+    coordinator = threading.get_ident()
+    barrier = threading.Barrier(len(owners))
+    lock, active = threading.Lock(), set()
+    for name, owner in owners.items():
+        query = owner.qualified_identity
+        def observe(*args, selected=name, call=query, **kwargs):
+            assert threading.get_ident() != coordinator
+            with lock:
+                assert selected not in active
+                active.add(selected)
+                assert len(active) <= 3
+            try:
+                barrier.wait(timeout=5)
+                return call(*args, **kwargs)
+            finally:
+                with lock:
+                    active.remove(selected)
+        monkeypatch.setattr(owner, 'qualified_identity', observe)
+        apply = owner.prepare_apply_control
+        def control(*args, call=apply, **kwargs):
+            assert threading.get_ident() == coordinator and not active
+            return call(*args, **kwargs)
+        monkeypatch.setattr(owner, 'prepare_apply_control', control)
+    for method in ('_adoption_context', '_adoption'):
+        original = getattr(controller, method)
+        def serial(*args, call=original, **kwargs):
+            assert threading.get_ident() == coordinator and not active
+            return call(*args, **kwargs)
+        monkeypatch.setattr(controller, method, serial)
+    assert len(controller.activate()['readers']) == len(owners)
+    assert not active and all(getattr(owner, 'deadline_ns', None) is None for owner in owners.values())
+
+
+def test_failed_cohort_query_joins_other_reader_before_returning(tmp_path, monkeypatch):
+    import threading
+    controller, owners, _, _ = activation_fixture(tmp_path)
+    started, failed, release, finished, returned = (threading.Event() for _ in range(5))
+    errors = []
+    first, second = sorted(owners)
+    original = owners[second].qualified_identity
+    def reject(**kwargs):
+        assert started.wait(5)
+        failed.set()
+        raise OnboardingError('receiving_fixture_query_failed')
+    def held(**kwargs):
+        started.set()
+        assert release.wait(5)
+        try:
+            return original(**kwargs)
+        finally:
+            finished.set()
+    monkeypatch.setattr(owners[first], 'qualified_identity', reject)
+    monkeypatch.setattr(owners[second], 'qualified_identity', held)
+    def run():
+        try:
+            controller.prepare_activation()
+        except OnboardingError as error:
+            errors.append(str(error))
+        finally:
+            returned.set()
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert failed.wait(5)
+        assert not returned.wait(0.05), 'coordinator abandoned an in-flight owner query'
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive() and finished.is_set()
+    assert errors == ['receiving_fixture_query_failed']
+    assert all(owner.gate['readers'] == [] for owner in owners.values())
+
+
 def test_combined_owner_control_keeps_durable_request_after_lost_acceptance(
     tmp_path, monkeypatch
 ):

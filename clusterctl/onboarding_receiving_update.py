@@ -19,6 +19,7 @@ import time
 import zipfile
 import uuid
 from collections.abc import Mapping
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -2130,9 +2131,8 @@ class CohortController:
             raise OnboardingError('receiving_required_cohort_changed')
         return value, manifest
 
-    def _adoption(self, name: str, plan: dict, manifest: dict,
-                  *, observations: dict | None = None) -> dict:
-        """Qualify actual owner observations against the selected receiver vector."""
+    def _adoption_context(self, name: str, plan: dict, manifest: dict) -> tuple[dict, dict, dict | None, dict]:
+        """Resolve immutable inputs and caches on the coordinator thread."""
         recipe = plan['receivers'][name]
         if (not isinstance(recipe, dict)
                 or set(recipe) != {'profile', 'selection', 'prepared', 'lifecycle_operation_id', 'tooling'}
@@ -2151,13 +2151,35 @@ class CohortController:
             native_options['native_tooling'] = {'recipe': tooling, 'accepted': accepted}
         lifecycle_row = self._lifecycle(name, recipe)
         prepared = self._qualified_preflight(name, recipe, plan, manifest, lifecycle_row)
+        return tooling, native_options, lifecycle_row, prepared
+
+    def _observe_adoption(self, name: str, plan: dict, *,
+                          context: tuple[dict, dict, dict | None, dict],
+                          deadline_ns: int | None = None) -> tuple[dict, int, int]:
+        """Query one distinct owner; no journal/cache writes or validation."""
         observed_at_ms = time.time_ns() // 1_000_000
         observed_at_ns = time.monotonic_ns()
         observation_deadline = observed_at_ns + min(plan['observation_window_ms'],
             plan['expires_at_ms'] - observed_at_ms) * 1_000_000
+        if deadline_ns is not None:
+            observation_deadline = min(observation_deadline, deadline_ns)
         with self._owner_deadline(self.owners[name], observation_deadline):
             current = self.owners[name].qualified_identity(expires_at_ms=plan['expires_at_ms'],
-                require_admitted=recipe['profile'] == 'guest', **native_options)
+                require_admitted=plan['receivers'][name]['profile'] == 'guest', **context[1])
+        return current, observed_at_ms, observed_at_ns
+
+    def _adoption(self, name: str, plan: dict, manifest: dict,
+                  *, observations: dict | None = None,
+                  context: tuple[dict, dict, dict | None, dict] | None = None,
+                  observed: tuple[dict, int, int] | None = None) -> dict:
+        """Qualify actual owner observations against the selected receiver vector."""
+        recipe = plan['receivers'][name]
+        tooling, native_options, lifecycle_row, prepared = (
+            self._adoption_context(name, plan, manifest) if context is None else context)
+        accepted = native_options.get('native_tooling', {}).get('accepted', {})
+        current, observed_at_ms, observed_at_ns = (
+            self._observe_adoption(name, plan, context=(tooling, native_options, lifecycle_row, prepared))
+            if observed is None else observed)
         native = current.get('native_tooling')
         if tooling['profile'] == 'codex' and (not isinstance(native, dict)
                 or native.get('schema') != 'cluster-native-tool-catalog/v1'
@@ -2267,6 +2289,42 @@ class CohortController:
             **({'native_tooling': native} if tooling['profile'] == 'codex' else {}),
             observed_at_ms=observed_at_ms, observed_at_ns=observed_at_ns)
 
+    def _adoption_round(self, plan: dict, manifest: dict, *, observations: dict) -> dict:
+        """Overlap independent queries, then validate every result serially."""
+        names = sorted(self.owners)
+        if len({id(owner) for owner in self.owners.values()}) != len(names):
+            raise OnboardingError('receiving_sender_vector_invalid')
+        contexts = {name: self._adoption_context(name, plan, manifest) for name in names}
+        queried = {}
+        deadline = time.monotonic_ns() + min(plan['observation_window_ms'],
+            plan['expires_at_ms'] - time.time_ns() // 1_000_000) * 1_000_000
+        self._accept_activation_deadline(deadline)
+        # Bound submitted work as well as worker count. Joining the executor
+        # precedes validation, journal writes, controls and failure fencing.
+        with ThreadPoolExecutor(max_workers=min(3, len(names))) as executor:
+            remaining = iter(names)
+            pending: dict[Future[tuple[dict, int, int]], str] = {}
+            while True:
+                while len(pending) < 3:
+                    name = next(remaining, None)
+                    if name is None:
+                        break
+                    self._accept_activation_deadline(deadline)
+                    future = executor.submit(self._observe_adoption, name, plan,
+                        context=contexts[name], deadline_ns=deadline)
+                    pending[future] = name
+                if not pending:
+                    break
+                finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+                # Inspect all completed results before submitting more. Any
+                # refusal stops refill; executor exit still joins other queries.
+                queried.update({pending[future]: future.result() for future in finished})
+                for future in finished:
+                    del pending[future]
+        self._accept_activation_deadline(deadline)
+        return {name: self._adoption(name, plan, manifest, observations=observations,
+            context=contexts[name], observed=queried[name]) for name in names}
+
     def _lifecycle(self, name: str, recipe: dict) -> dict | None:
         owner = self.owners[name]
         inspect = getattr(owner, 'lifecycle_operation', None)
@@ -2328,8 +2386,7 @@ class CohortController:
             self.reconcile_tooling()
             row = self._row()
             observations: dict = {}
-            records = {name: self._adoption(name, plan, manifest, observations=observations)
-                       for name in sorted(self.owners)}
+            records = self._adoption_round(plan, manifest, observations=observations)
             now = time.time_ns() // 1_000_000
             if any(now - item['observed_at_ms'] > plan['observation_window_ms']
                    or item['reader']['expires_at_ms'] <= now for item in records.values()):
@@ -2478,14 +2535,12 @@ class CohortController:
 
     def _current_activation(self, row: dict, plan: dict, manifest: dict, activation: dict,
                             *, observations: dict | None = None) -> int:
-        records = {}
-        for name in sorted(self.owners):
-            current = self._adoption(name, plan, manifest, observations=observations)
-            records[name] = current
+        records = self._adoption_round(plan, manifest,
+            observations={} if observations is None else observations)
+        for name, current in records.items():
             retained = activation['records'][name]
             if ({key: val for key, val in current.items() if key not in {'observed_at_ms', 'observed_at_ns'}} !=
-                    {key: val for key, val in retained.items() if key not in {'observed_at_ms', 'observed_at_ns'}}
-                    ):
+                    {key: val for key, val in retained.items() if key not in {'observed_at_ms', 'observed_at_ns'}}):
                 raise OnboardingError('receiving_cohort_activation_changed')
         now = time.time_ns() // 1_000_000
         if any(now - item['observed_at_ms'] > plan['observation_window_ms']

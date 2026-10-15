@@ -346,6 +346,11 @@ Target still validates installed dependencies, startup context and receiving sta
 SDK preparation/observation and bootstrap retain their original system-interpreter
 route. Missing preparation refuses without installation or fallback. This removes
 duplicate setup; it neither extends freshness nor proves a timeout's lower cause.
+All-required identity rounds overlap at most three independent receiver queries.
+Lifecycle/preflight preparation and all validation stay on the coordinator;
+every started query is joined before controls, journal writes or failure repair.
+The whole round shares one deadline. A failed query stops further submission,
+and later queries never obtain a fresh window. Sender controls remain sequential.
 `config/mcpServer/reload` refreshes only the addressed App Server's threads.
 A fresh config-only catalog probe cannot prove existing sessions reloaded.
 Keep unavailable native-instance routes explicit; neither console fallback nor
