@@ -368,10 +368,17 @@ def test_matching_prefix_without_qualified_startup_must_reexec_before_loading_bo
     parameters = onboarding_code_successor.sdk_parameters
     monkeypatch.setattr(onboarding_code_successor, 'selection', lambda *a, **k: selection(*a, uid=os.geteuid()))
     monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda code, **k: parameters(code, uid=os.geteuid()))
-    venv = Path(sys.prefix)
-    imports = venv.parent / 'runtime-imports'
-    monkeypatch.setattr(onboarding_sdk, 'observe', lambda *a, **k: venv)
-    monkeypatch.setattr(onboarding_sdk, 'runtime_imports', lambda *a, **k: imports)
+    sdk_parameters = parameters(output, uid=os.geteuid())
+    venv = onboarding_sdk.install(home, output, result['runtime_digest'], code_uid=os.geteuid(), **sdk_parameters)
+    onboarding_sdk.runtime_imports(venv, output, code_uid=os.geteuid(), **sdk_parameters)
+    # The prefix alone cannot qualify the actual process. Use the prepared
+    # generation that V4 resolves instead of mocking the legacy observe path.
+    monkeypatch.setattr(sys, 'prefix', str(venv))
+    regular, runtime_imports = onboarding_release.regular, onboarding_sdk.runtime_imports
+    monkeypatch.setattr(onboarding_release, 'regular', lambda path, **kw:
+        regular(path, **{**kw, 'uid': os.geteuid()}) if path == output / 'sdk/sdk.json' else regular(path, **kw))
+    monkeypatch.setattr(onboarding_sdk, 'runtime_imports', lambda *a, **kw:
+        runtime_imports(*a, code_uid=os.geteuid(), **kw))
     commands = []
     def execute(path, argv):
         commands.append((path, argv))
