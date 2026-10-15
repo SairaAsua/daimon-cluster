@@ -57,6 +57,8 @@ def test_loaded_startup_covers_actual_processes_and_preserves_broader_boundaries
     assert select(changed, ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
     assert select(changed, tmp_path) == ('full', ['tests'])
     assert select(['clusterctl/onboarding_service.py', 'tests/test_source_bootstrap.py'], ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    assert select(['clusterctl/onboarding_target.py', 'tests/test_source_bootstrap.py',
+        'tests/test_onboarding_code_successor.py'], ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
     assert select(['clusterctl/onboarding_service.py', 'tests/test_onboarding_service.py',
         'clusterctl/owner_process.py', 'tests/test_receiving_process_observation.py'], ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
     assert select(['clusterctl/onboarding_peer.py', 'tests/test_onboarding_peer.py',

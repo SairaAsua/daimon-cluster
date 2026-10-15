@@ -113,6 +113,10 @@ work around either failure. The regular test pass deselects that module; its
 canonical-owner pass runs it once. Do not change the runtime owner guard or fake
 geteuid to make it pass. Slow-daemon tests delay the actual pinned child process;
 a forwarding proxy changes SO_PEERCRED and is not the same native responder.
+Changes to the already-covered code-successor test module keep receiving coverage;
+they must not select unrelated physical/archive qualification. The receiving SDK
+suite previously took804 seconds before the newly enabled canonical-owner pass;
+its combined job has a20-minute ceiling rather than an impossible15-minute bound.
 Qualified `sdk-prepare` installs and verifies the closed runtime import tree before
 returning ready. Do this dependency preparation before freezing a finite owner
 operation or stopping a receiver; the first import-tree construction must not

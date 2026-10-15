@@ -297,6 +297,7 @@ LOADED_STARTUP_FILES = {'RESUME.md', 'clusterctl/onboarding_sdk.py', 'clusterctl
     'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_cohort_control.py',
     'tests/test_receiving_host_selection.py', 'tests/test_receiving_update_journal.py',
     'tests/test_onboarding_sdk.py', 'tests/test_onboarding_target.py', 'tests/test_onboarding_runtime.py',
+    'tests/test_onboarding_code_successor.py',
     'tests/test_onboarding_source.py', 'tests/test_onboarding_group_authorities.py',
     'docs/design/onboarding-jobs.md', 'tests/test_receiving_process_observation.py',
     'tests/test_source_owner_adapter.py',
