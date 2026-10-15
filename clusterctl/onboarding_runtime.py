@@ -309,6 +309,11 @@ def child_main(home, plan, genesis, descriptor, ready_descriptor, guardian_pid,
         else:
             options = (dict(egress=native_egress.closed_visibility(clock=clock)) if receive_only else
                    dict(egress_factory=daemon._visibility_factory(visibility_installation, clock=clock)))
+        from .onboarding_peer import approved_group_authorities
+        authorities = approved_group_authorities(target.package / 'runtime', target.root / 'tribe',
+            target.document_bundle())
+        if authorities:
+            options['relationship_authorities'] = authorities
         hosted = runtime.load_runtime(target.package/'runtime', 'runtime.json', target._reader,
             clock=clock, body_reader=body_reader,
             **({} if startup is None else {'qualified_startup': startup}), **options)

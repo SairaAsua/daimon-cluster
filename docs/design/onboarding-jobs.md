@@ -615,6 +615,14 @@ visibility paths after signature-checked target observation. Missing enrollment
 reports `onboarding_group_enrollment_required`; it cannot silently declare
 another founder/member Tribe or count a historical pair as group completion.
 
+The Source and admitted guest loaders obtain additional public Root authorities
+from that owner-signed selected group before opening private runtime state. They
+reuse Matrix's `read_application_authorities` preflight, which verifies the current
+local bundle and preserves already-known Root histories. A peer need not appear
+in a historical pair registration or the native bundle's source list. An absent
+selector adds no authorities; a tampered selector or publication refuses loading.
+This Root closure does not itself grant membership, resource access or delivery.
+
 Managed admission retains the native controller, custody, receiving context,
 history and owner session bindings. Its actual dependency/code selections must
 match the group's installed generation. Readiness and technical delivery use

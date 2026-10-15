@@ -61,6 +61,10 @@ class Source:
             return time.time_ns() // 1_000_000
         options = ({'egress_factory': daemon._visibility_factory(self.visibility, clock=clock)} if signed else
                    {'egress': native_egress.closed_visibility(clock=clock, catalog_mode='migrate')})
+        bundle = being_seed._read(self.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+        authorities = onboarding_peer.approved_group_authorities(self.root, self.outputs / 'tribe', bundle)
+        if authorities:
+            options['relationship_authorities'] = authorities
         return runtime.load_runtime(self.root, 'runtime.json', self._reader, clock=clock,
             **({} if self.qualified_startup is None else {'qualified_startup': self.qualified_startup}),
             **options)

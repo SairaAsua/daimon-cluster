@@ -577,7 +577,10 @@ def test_controlled_software_update_and_its_runbook_keep_receiving_coverage():
     changed = ['clusterctl/onboarding_receiving_update.py', 'tests/test_source_bootstrap.py',
         'tests/test_guest_owner_bootstrap.py', 'tests/test_guest_bootstrap_controller.py',
         'tests/test_receiving_cohort_control.py', 'docs/runbooks/tribu-sdk-successor.md',
-        'tools/ci_scope.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py', '.github/workflows/tests.yml']
+        'clusterctl/onboarding_peer.py', 'clusterctl/onboarding_source.py',
+        'clusterctl/onboarding_runtime.py', 'tests/test_onboarding_group_authorities.py',
+        'docs/design/onboarding-jobs.md', 'tools/ci_scope.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py', '.github/workflows/tests.yml']
     assert select(changed, ROOT) == ('peer', list(LOADED_STARTUP_TESTS))
+    assert 'tests/test_onboarding_group_authorities.py' in LOADED_STARTUP_TESTS
     assert select([*changed, 'clusterctl/onboarding_custody.py'], ROOT)[0] == 'full'
     assert select([*changed, 'docs/unclassified-contract.md'], ROOT)[0] == 'full'
