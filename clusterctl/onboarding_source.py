@@ -1,8 +1,9 @@
 """Owner-local Source group hosting, observation and retained directed repair.
 
-The caller coordinates the existing daemon lifecycle. These operations acquire
-its real writer lock, use only existing Body custody, never read an inbox, and
-never create Root authority or synthesize participant signatures.
+The caller coordinates the existing daemon lifecycle. Offline operations acquire
+its real writer lock; online relationship requests use its authenticated base
+socket. Both retain existing Body custody, never read an inbox, and never create
+Root authority or synthesize participant signatures.
 """
 from __future__ import annotations
 
@@ -55,7 +56,7 @@ class Source:
         from daimon_matrix.messaging_config import protected_read
         return bytearray(protected_read(Path(self.settings['password_file'])))
 
-    def _load(self, *, signed: bool):
+    def _load(self, *, signed: bool, relationship_authorities: dict | None = None):
         from daimon_matrix import daemon, native_egress, runtime
         def clock():
             return time.time_ns() // 1_000_000
@@ -63,6 +64,9 @@ class Source:
                    {'egress': native_egress.closed_visibility(clock=clock, catalog_mode='migrate')})
         bundle = being_seed._read(self.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
         authorities = onboarding_peer.approved_group_authorities(self.root, self.outputs / 'tribe', bundle)
+        if relationship_authorities is not None:
+            from .onboarding_group_admission import merge_authorities
+            authorities = merge_authorities(authorities, relationship_authorities)
         if authorities:
             options['relationship_authorities'] = authorities
         return runtime.load_runtime(self.root, 'runtime.json', self._reader, clock=clock,
@@ -83,6 +87,24 @@ class Source:
         if not isinstance(plan_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', plan_digest):
             raise OnboardingError('approved_onboarding_peer_required')
         return private_directory(self.outputs / plan_digest, create=True)
+
+    def group_relationship(self, value: dict, *, offline: bool = False,
+                           authority_closure: dict | None = None,
+                           deadline_ns: int | None = None) -> dict:
+        """The qualified owner route supplies approval; no peer text grants it."""
+        from .onboarding_group_admission import check_retained_ledger, command, public_authorities, relationship_request
+        value = command(value)
+        journal = self.outputs / 'group-admission'
+        if not offline:
+            if authority_closure:
+                raise OnboardingError('onboarding_group_relationship_writer_required')
+            return relationship_request(self.root, journal, value, deadline_ns=deadline_ns)
+        with self.writer():
+            check_retained_ledger(self.root, journal, value)
+            bundle = being_seed._read(self.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+            authorities = public_authorities(bundle, authority_closure or {})
+            hosted = self._load(signed=False, relationship_authorities=authorities)
+            return relationship_request(self.root, journal, value, offline=hosted, deadline_ns=deadline_ns)
 
     def offer(self, plan_digest: str, peer: dict, endpoints: list[str]) -> dict:
         self.tool.verify_identity(peer)
@@ -412,6 +434,7 @@ def main(argv=None) -> int:
     parser.add_argument('--expected-config-sha256')
     parser.add_argument('--receiving-lifecycle')
     parser.add_argument('--operation-journal', type=Path)
+    parser.add_argument('--group-request', type=Path)
     args = parser.parse_args(argv)
     try:
         from . import onboarding_code_successor, onboarding_sdk
@@ -420,20 +443,21 @@ def main(argv=None) -> int:
             raise OnboardingError('qualified_source_code_owner_required')
         controlling = any(path is not None for path in (args.prepare_control, args.apply_control, args.prepare_apply_control))
         lifecycle = args.receiving_lifecycle is not None
+        grouping = args.group_request is not None
         if args.native_tooling_json is not None and (not args.qualified_identity
                 or len(args.native_tooling_json.encode()) > 65536):
             raise OnboardingError('receiving_native_tooling_recipe_required')
-        receiving = args.owner_status or args.qualified_identity or controlling or lifecycle
-        if (sum((args.observe, args.owner_status, args.qualified_identity, controlling, lifecycle)) > 1
+        receiving = args.owner_status or args.qualified_identity or controlling or lifecycle or grouping
+        if (sum((args.observe, args.owner_status, args.qualified_identity, controlling, lifecycle, grouping)) > 1
                 or lifecycle != (args.operation_journal is not None)
                 or lifecycle and (args.ready_fd is not None or args.require_loaded)
                 or args.qualified_identity != (args.identity_expires_at_ms is not None)
                 or args.identity_expires_at_ms is not None and not 0 < args.identity_expires_at_ms < 2**53
-                or (args.owner_status or args.qualified_identity) and (args.ready_fd is not None or args.require_loaded)
+                or (args.owner_status or args.qualified_identity or grouping) and (args.ready_fd is not None or args.require_loaded)
                 or args.expected_config_sha256 is not None and not receiving
                 or args.observation_deadline_ns is not None and not receiving):
             raise OnboardingError('invalid_receiving_control_request')
-        if (args.owner_status or args.qualified_identity or lifecycle) and args.observation_deadline_ns is None:
+        if (args.owner_status or args.qualified_identity or lifecycle or grouping) and args.observation_deadline_ns is None:
             args.observation_deadline_ns = time.monotonic_ns() + 30_000_000_000
         def accept_deadline():
             if args.observation_deadline_ns is not None and time.monotonic_ns() >= args.observation_deadline_ns:
@@ -468,6 +492,20 @@ def main(argv=None) -> int:
         accept_deadline()
         source = Source(settings, code=code, code_uid=args.code_owner, code_digest=args.code_digest,
                         qualified_startup=startup)
+        if grouping:
+            from .onboarding_group_admission import request_packet
+            if args.group_request == Path('-'):
+                raw = sys.stdin.buffer.read(being_seed.MAX_SELECTION + 1)
+                if len(raw) > being_seed.MAX_SELECTION:
+                    raise OnboardingError('onboarding_group_relationship_command_required')
+                packet = json.loads(raw)
+            else:
+                packet = being_seed._read(args.group_request, limit=being_seed.MAX_SELECTION)
+            packet = request_packet(packet)
+            result = source.group_relationship(packet['command'], offline=packet['offline'],
+                authority_closure=packet['authority_closure'], deadline_ns=args.observation_deadline_ns)
+            print(json.dumps(result))
+            return 0
         if lifecycle:
             accept_deadline()
             result = source.receiving_lifecycle(args.operation_journal, args.receiving_lifecycle)

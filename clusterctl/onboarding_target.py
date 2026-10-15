@@ -135,6 +135,33 @@ class Target:
             raise OnboardingError("onboarding_target_binding_conflict")
         return verified, request
 
+    def group_relationship(self, value: dict, *, authority_closure: dict,
+                           deadline_ns: int | None = None) -> dict:
+        """Accept/ingest through native authentication before first managed start."""
+        from daimon_matrix import native_egress, runtime
+        from . import onboarding_peer
+        from .onboarding_group_admission import (
+            check_retained_ledger, command, merge_authorities, public_authorities, relationship_request,
+        )
+        value = command(value)
+        with self._runtime_writer():
+            check_retained_ledger(self.package / 'runtime', self.root / 'group-admission', value)
+            if self.observe()['phase'] != 'v8':
+                raise OnboardingError('current_onboarding_target_required')
+            root = self.package / 'runtime'
+            bundle = self.document_bundle()
+            authorities = merge_authorities(
+                onboarding_peer.approved_group_authorities(root, self.root / 'tribe', bundle),
+                public_authorities(bundle, authority_closure))
+            def clock():
+                return time.time_ns() // 1_000_000
+            hosted = runtime.load_runtime(root, 'runtime.json', self._reader, clock=clock,
+                relationship_authorities=authorities,
+                egress=native_egress.closed_visibility(clock=clock, catalog_mode='migrate'),
+                **({} if self.qualified_startup is None else {'qualified_startup': self.qualified_startup}))
+            return relationship_request(root, self.root / 'group-admission', value,
+                                        offline=hosted, deadline_ns=deadline_ns)
+
     def prepare(self) -> dict:
         from daimon_matrix import canonical, keystore, operator_first_embodiment as first
         current = self.home
@@ -713,7 +740,7 @@ class Target:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "receiving-control-prepare", "receiving-control-apply", "receiving-control-prepare-apply", "receiving-identity", "receiving-bootstrap-freeze", "receiving-bootstrap-stage", "receiving-bootstrap-publish"))
+    parser.add_argument("action", choices=("sdk-observe", "sdk-prepare", "prepare", "activate", "observe", "credential-prepare", "credential-apply", "serve", "running", "admission-prepare", "admitted-serve", "admission-check", "admission-enroll", "admitted-running", "peer-identity", "peer-accept", "group-relationship", "receiving-control-prepare", "receiving-control-apply", "receiving-control-prepare-apply", "receiving-identity", "receiving-bootstrap-freeze", "receiving-bootstrap-stage", "receiving-bootstrap-publish"))
     parser.add_argument("--diagnostics", action="store_true", help="write bounded nonsecret refusal detail to stderr")
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--plan", type=Path, required=True)
@@ -743,11 +770,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--bootstrap-request-json')
     parser.add_argument('--bootstrap-ready-sha256')
     parser.add_argument('--bootstrap-timeout-seconds', type=float)
+    parser.add_argument('--group-request', type=Path)
     args = parser.parse_args(argv)
     stage = 'arguments'
     try:
         controlling = args.action in {'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
         identity_query = args.action == 'receiving-identity'
+        grouping = args.action == 'group-relationship'
+        if grouping != (args.group_request is not None) or grouping and args.ready_fd is not None:
+            raise OnboardingError('onboarding_group_relationship_command_required')
         if args.native_tooling_json is not None and (not identity_query
                 or len(args.native_tooling_json.encode()) > 65536):
             raise OnboardingError('receiving_native_tooling_recipe_required')
@@ -767,7 +798,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.bootstrap_ready_sha256, args.bootstrap_timeout_seconds)):
             raise OnboardingError('invalid_receiving_bootstrap_request')
         timeout = args.observation_timeout_seconds
-        if timeout is not None and (args.action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
+        if timeout is not None and (args.action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship'}
                 or not math.isfinite(timeout) or not 0 < timeout <= 60):
             raise OnboardingError('invalid_receiving_observation_timeout')
         now_ns = time.monotonic_ns()
@@ -777,7 +808,7 @@ def main(argv: list[str] | None = None) -> int:
                     or args.observation_deadline_ns > observation_deadline_ns):
                 raise OnboardingError('onboarding_observation_deadline_expired')
             observation_deadline_ns = args.observation_deadline_ns
-        if identity_query and timeout is None:
+        if (identity_query or grouping) and timeout is None:
             raise OnboardingError('invalid_receiving_identity_request')
         if (args.require_loaded and args.action not in {'running', 'admitted-running'}
                 or controlling and (args.control_file is None
@@ -790,7 +821,7 @@ def main(argv: list[str] | None = None) -> int:
         runtime = onboarding_code_successor.selection(args.runtime_code, args.runtime_digest,
             args.code, plan['release_digest'], uid=0)
         sdk_parameters = onboarding_code_successor.sdk_parameters(runtime)
-        if (controlling or identity_query or bootstrapping or args.require_loaded) and not sdk_parameters:
+        if (controlling or identity_query or bootstrapping or grouping or args.require_loaded) and not sdk_parameters:
             raise OnboardingError('qualified_onboarding_target_observer_required')
         matrix_commit = sdk_parameters.get('matrix_commit', onboarding_sdk.MATRIX_COMMIT)
         if args.action == 'sdk-prepare':
@@ -894,6 +925,21 @@ def main(argv: list[str] | None = None) -> int:
                     code=runtime, startup=startup, code_uid=0, deadline_ns=observation_deadline_ns,
                     receiving=result)
             print(json.dumps(result))
+            return 0
+        if grouping:
+            from .onboarding_group_admission import request_packet
+            if args.group_request == Path('-'):
+                raw = sys.stdin.buffer.read(being_seed.MAX_SELECTION + 1)
+                if len(raw) > being_seed.MAX_SELECTION:
+                    raise OnboardingError('onboarding_group_relationship_command_required')
+                packet = json.loads(raw)
+            else:
+                packet = being_seed._read(args.group_request, limit=being_seed.MAX_SELECTION)
+            packet = request_packet(packet)
+            if not packet['offline']:
+                raise OnboardingError('onboarding_group_relationship_writer_required')
+            print(json.dumps(target.group_relationship(packet['command'],
+                authority_closure=packet['authority_closure'], deadline_ns=observation_deadline_ns)))
             return 0
         if args.action == 'peer-identity':
             from .onboarding_peer import identity

@@ -19,7 +19,7 @@ from clusterctl.onboarding_input import relative
 HMK_COMMIT = "518f350889001b7f70ac3dd4f843a9e0c16d256c"
 ROOT = Path(__file__).resolve().parents[1]
 MODULES = ("__init__.py", "being_seed.py", "onboarding_transfer.py", "onboarding.py", "onboarding_input.py",
-           "onboarding_release.py", "onboarding_code_successor.py", "onboarding_owner_client.py", "onboarding_peer.py", "onboarding_guest.py", "onboarding_mounts.py", "onboarding_sdk.py",
+           "onboarding_release.py", "onboarding_code_successor.py", "onboarding_owner_client.py", "onboarding_peer.py", "onboarding_group_admission.py", "onboarding_guest.py", "onboarding_mounts.py", "onboarding_sdk.py",
            "onboarding_target.py", "onboarding_existing.py", "onboarding_credential.py", "owner_process.py", "onboarding_admission.py",
            "onboarding_runtime.py", "onboarding_views.py", "onboarding_service.py", "onboarding_ssh.py", "onboarding_provider.py", "onboarding_telegram.py", "admission.py", "admission_supervisor.py", "fences.py", "production_fences.py")
 

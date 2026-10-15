@@ -548,6 +548,25 @@ def test_receiving_identity_uses_prepared_candidate_and_one_finite_owner_budget(
     assert 0 < options['timeout_seconds'] <= 5
 
 
+def test_group_request_uses_prepared_owner_stdin_without_requiring_running_group(tmp_path, monkeypatch):
+    import uuid
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    packet = dict(command=dict(operation_id=str(uuid.uuid4()), step='accept',
+        method='tribe.membership.accept', params={'payload': {}}), offline=True, authority_closure={})
+    backend._target_call(value, 'group-relationship', candidate=candidate,
+        group_request=packet, observation_timeout_seconds=5)
+    argv, options = calls[0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '1000', '--group', '1000']
+    assert argv[argv.index('--') + 1].endswith('/venv/bin/python')
+    assert argv[argv.index('--group-request') + 1] == '-'
+    assert json.loads(options['input_data']) == packet
+    assert packet['command']['operation_id'] not in argv
+    assert 0 < options['timeout_seconds'] <= 5
+    with pytest.raises(OnboardingError, match='writer_required'):
+        backend._target_call(value, 'group-relationship', candidate=candidate, group_request=packet)
+    assert len(calls) == 1
+
+
 def test_incus_stdin_is_bounded_and_never_routed_through_a_shell(monkeypatch):
     from clusterctl import onboarding_host
     calls = []

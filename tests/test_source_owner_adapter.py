@@ -7,6 +7,7 @@ import io
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -105,6 +106,17 @@ def test_owner_private_control_paths_and_public_stdin_stay_in_owner_cli(adapter)
         calls[1][0][-2:] == ["--apply-control", str(path)]
         and calls[1][1]["input"] is None
     )
+
+
+def test_group_relationship_uses_qualified_owner_and_only_public_stdin(adapter):
+    client, _, calls = adapter
+    command = dict(operation_id=str(uuid.uuid4()), step='invite', method='tribe.invite', params={'payload': {}})
+    client.group_relationship(command, offline=True, authority_closure={})
+    argv, options = calls[0]
+    assert argv[-2:] == ['--group-request', '-']
+    assert options['user'] == client.owner_uid and options['extra_groups'] == ()
+    assert json.loads(options['input']) == dict(command=command, offline=True, authority_closure={})
+    assert '--observation-deadline-ns' in argv and command['operation_id'] not in argv
 
 
 def test_source_lifecycle_is_read_as_owner_and_never_falls_back_to_root(adapter):
@@ -209,6 +221,10 @@ def cli(tmp_path, monkeypatch):
             calls.append(('lifecycle', args))
             return {'retained': True}
 
+        def group_relationship(self, *args, **options):
+            calls.append(('group', args, options))
+            return {'schema': 'cluster-group-relationship-result/v1', 'status': 'recorded'}
+
         def serve(self, *args, **options):
             pytest.fail("receiving mode started a service")
 
@@ -238,6 +254,19 @@ def cli(tmp_path, monkeypatch):
         str(time.monotonic_ns() + 30_000_000_000),
     ]
     return arguments, calls
+
+
+def test_source_cli_group_request_keeps_finite_owner_context_and_never_serves(cli, monkeypatch, capsys):
+    arguments, calls = cli
+    command = dict(operation_id=str(uuid.uuid4()), step='invite', method='tribe.invite', params={'payload': {}})
+    packet = dict(command=command, offline=True, authority_closure={})
+    monkeypatch.setattr(source_cli.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(packet).encode())))
+    assert source_cli.main([*arguments, '--group-request', '-']) == 0
+    assert json.loads(capsys.readouterr().out)['status'] == 'recorded'
+    assert [row[0] for row in calls] == ['construct', 'group']
+    assert calls[1][1] == (command,)
+    assert calls[1][2]['offline'] is True and calls[1][2]['authority_closure'] == {}
+    assert calls[1][2]['deadline_ns'] == int(arguments[-1])
 
 
 @pytest.mark.parametrize('verb,action', [('--prepare-control', 'receiving-control-prepare'),

@@ -636,13 +636,45 @@ The old selector may pin the preceding application during this offline transacti
 Do not start a service until application, accepted visibility and selector agree.
 `selected` here explicitly leaves receiving readiness unobserved.
 
-Cluster #227 still owns the retained authenticated owner requests, orchestrated
-application/visibility/selector publication, distinct before/after receiving
-cohorts, first managed start and integrated admission qualification. Native local
-API frames have a30-second first-use freshness window: freeze durable intent
-early, but prepare and retain its authenticated frame immediately before first
-dispatch. An already-journaled native request remains exactly retryable later;
-an unseen expired frame is not permission to refresh or re-author an uncertain
-request. Preserve it for owner-side reconciliation under actual writer ownership.
-The prepared2144 update is a separate immutable candidate; future-admission source
-does not replace it.
+### Retained native owner relationship requests
+
+`SourceGroupClient.group_relationship` uses the qualified Source CLI and its
+existing privilege drop. `GuestGroupClient.group_relationship` uses the qualified
+candidate and the existing Target UID1000 route, without requiring an admitted
+group process. Commands and approved public Root closures travel through bounded
+stdin; private client capabilities, authenticated frames and responses remain on
+their owner. The closed command identifies one operation UUID and named step.
+Only `tribe.invite`, `tribe.membership.accept` and `relationship.event.ingest` are
+supported on both owner profiles. Actual signed social authority determines who
+may invite; the hosting role never makes Source the founder. Every body signs
+only its own native events.
+
+Online Source requests use the native base socket's independently keyed
+`relationships` operator role. Offline Source/Target operations first acquire the
+actual runtime writer, validate the existing body/plan and approved public Root
+history closure, then use the same `HostedWeave.handle` authentication and native
+RPC journal. They start no temporary daemon, group listener, model or transport.
+Supplied history self-consistency never substitutes for the protected owner's
+approval; current/native accepted histories cannot be silently replaced.
+
+The owner journal binds exact intent and receiving identity and persists the
+authenticated frame before dispatch. It verifies native authenticated results
+before retaining them. A lost reply retries the same frame; completed local
+results are reauthenticated. Native frames have a30-second first-use freshness
+window, so prepare them immediately before dispatch. Already-journaled frames
+remain exactly retryable beyond that window. Only an offline owner holding the
+actual writer may renew an expired frame after the existing native RPC inventory
+proves that request ID absent. Preserve the old frame and original ID/intent;
+record the replacement before dispatch. Pin the original ledger file identity
+in the owner operation and check it before offline loading. Verify the native
+loaded-store bindings before and after reading the RPC inventory; a missing or
+replaced store cannot become evidence of absence. A conflicting native row refuses. Online
+uncertainty never authorizes a refresh; recover it through this offline owner
+route after the ordinary scoped lifecycle barrier. No acceptance time is backdated.
+`recorded` means a native relationship event/result, not active membership,
+receiving readiness or completed admission; inspect the actual reducer afterwards.
+
+Cluster #227 still owns orchestrated application/visibility/selector publication,
+distinct before/after receiving cohorts, first managed start and integrated
+admission qualification. The prepared2144 update is a separate immutable candidate;
+future-admission source does not replace it.

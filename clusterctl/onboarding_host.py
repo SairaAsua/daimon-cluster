@@ -957,8 +957,8 @@ class HostBackend:
                      bootstrap_timeout_seconds: float | None = None,
                      control_file: Path | None = None, control_command: Path | None = None,
                      control_value: dict | None = None, identity_expires_at_ms: int | None = None,
-                     native_tooling: dict | None = None) -> dict:
-        """Probe prepared receiving code without changing active selectors.
+                     native_tooling: dict | None = None, group_request: dict | None = None) -> dict:
+        """Invoke the qualified receiving owner within its finite host budget.
 
         Candidate calls require the already verified public read-only mount.
         The receiving owner still verifies its exact code/SDK independently.
@@ -967,6 +967,13 @@ class HostBackend:
         deadline_ns = None
         bootstrapping = action in {'receiving-bootstrap-freeze', 'receiving-bootstrap-stage', 'receiving-bootstrap-publish'}
         controlling = action in {'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
+        if (action == 'group-relationship') != (group_request is not None):
+            raise OnboardingError('onboarding_group_relationship_command_required')
+        if group_request is not None:
+            from .onboarding_group_admission import request_packet
+            group_request = request_packet(group_request)
+            if candidate is None or not group_request['offline'] or observation_timeout_seconds is None:
+                raise OnboardingError('onboarding_group_relationship_writer_required')
         if native_tooling is not None and (action != 'receiving-identity' or not isinstance(native_tooling, dict)):
             raise OnboardingError('receiving_native_tooling_recipe_required')
         if (action == 'receiving-identity') != (identity_expires_at_ms is not None):
@@ -993,7 +1000,7 @@ class HostBackend:
         elif control_file is not None or control_command is not None or control_value is not None:
             raise OnboardingError('invalid_receiving_control_request')
         if observation_timeout_seconds is not None:
-            if (action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
+            if (action not in {'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship'}
                     or not math.isfinite(observation_timeout_seconds)
                     or not 0 < observation_timeout_seconds <= 60):
                 raise OnboardingError('receiving_host_deadline_required')
@@ -1015,7 +1022,7 @@ class HostBackend:
         if candidate is not None:
             if (action not in {'sdk-observe', 'sdk-prepare', 'observe', 'running', 'admitted-running',
                     'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'receiving-bootstrap-freeze',
-                    'receiving-bootstrap-stage', 'receiving-bootstrap-publish', 'receiving-identity'}
+                    'receiving-bootstrap-stage', 'receiving-bootstrap-publish', 'receiving-identity', 'group-relationship'}
                     or profile is not None or peer_packet is not None or peer_being_ref is not None
                     or not onboarding_code_successor.sdk_parameters(candidate[0], uid=os.geteuid())
                     or not self._mounted(plan, mounts, deadline_ns=deadline_ns)):
@@ -1054,6 +1061,11 @@ class HostBackend:
             if len(input_data.encode()) > being_seed.MAX_SELECTION:
                 raise OnboardingError('invalid_receiving_control_request')
             arguments += ['--control-command', '-']
+        if group_request is not None:
+            input_data = json.dumps(group_request, sort_keys=True, separators=(',', ':'))
+            if len(input_data.encode()) > being_seed.MAX_SELECTION:
+                raise OnboardingError('onboarding_group_relationship_command_required')
+            arguments += ['--group-request', '-']
         if identity_expires_at_ms is not None:
             arguments += ['--identity-expires-at-ms', str(identity_expires_at_ms)]
         if native_tooling is not None:
@@ -1072,7 +1084,7 @@ class HostBackend:
             arguments += ['--bootstrap-ready-sha256', bootstrap_ready_sha256]
         prepared_venv = None
         if candidate is not None and (bootstrapping or action in {'running', 'admitted-running', 'receiving-identity',
-                'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}):
+                'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship'}):
             # _runtime_paths verified the entire public candidate and its SDK.
             # Enter the already prepared owner generation directly; Target still
             # checks the installed SDK, startup context and actual receiving state.

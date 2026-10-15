@@ -415,6 +415,10 @@ class GuestGroupClient:
     def prepare_control(self, command: dict, path: Path) -> dict:
         return self._call('receiving-control-prepare', control_file=path, control_value=command)
 
+    def group_relationship(self, command: dict, *, authority_closure: dict) -> dict:
+        return self._call('group-relationship', group_request=dict(command=command,
+            offline=True, authority_closure=authority_closure))
+
     def apply_control(self, path: Path) -> dict:
         return self._call('receiving-control-apply', control_file=path)
 
@@ -550,6 +554,11 @@ class SourceGroupClient:
 
     def prepare_control(self, command: dict, path: Path) -> dict:
         return self._call(['--prepare-control', str(path), '--control-command', '-'], command=command)
+
+    def group_relationship(self, command: dict, *, offline: bool = False,
+                           authority_closure: dict | None = None) -> dict:
+        return self._call(['--group-request', '-'], command=dict(command=command,
+            offline=offline, authority_closure={} if authority_closure is None else authority_closure))
 
     def apply_control(self, path: Path) -> dict:
         return self._call(['--apply-control', str(path)])
