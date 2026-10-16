@@ -53,6 +53,18 @@ I/O's merged Telecodex PR100 candidate is staged, not selected; the Matrix-only
 rollout permission does not authorize a Telegram restart. Follow the current
 [Matrix receiving frontier](https://github.com/AlterMundi/daimon-matrix/blob/main/CURRENT-STATE.md)
 and the retained local operation checkpoint for exact effects and remaining work.
+Cluster `061a29a` adds a fixture-only durable external Telegram API and separately
+sealed candidate/baseline code compositions. The original SDK/context remain
+unchanged and startup verifies integrity before and after the exact URL mapper.
+Actual installed Root/Source/entrant/old-guest startup and local API calls pass,
+including the old guest's original SDK and candidate; the coordinator's actual
+destination qualification and connected reply pass.12 fixture and59 CI-scope/
+workflow tests, bounded independent source review and scoped lint pass. Both API
+servers were closed after their probes. No Matrix service, authority, identity,
+production selector or model was started by these probes. This is external-service
+fixture readiness, not complete admission, public Telegram or TLS acceptance.
+The same protected admission/receiving/communication operation remains unbound.
+
 Before another real operation that could interrupt communication, prepare its
 receiving/recovery boundary and obtain the scoped human authorization required
 by the goal. Every global Stop requires its own fresh explicit human request.
