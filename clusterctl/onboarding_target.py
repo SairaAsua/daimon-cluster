@@ -808,6 +808,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--group-request', type=Path)
     args = parser.parse_args(argv)
     stage = 'arguments'
+    probe_scope = ExitStack()
     try:
         expected_initial_context = None
         if args.initial_context_json is not None:
@@ -863,6 +864,7 @@ def main(argv: list[str] | None = None) -> int:
                     or args.observation_deadline_ns > observation_deadline_ns):
                 raise OnboardingError('onboarding_observation_deadline_expired')
             observation_deadline_ns = args.observation_deadline_ns
+        probe_scope.enter_context(onboarding_sdk.probe_budget(observation_deadline_ns))
         if (identity_query or grouping) and timeout is None:
             raise OnboardingError('invalid_receiving_identity_request')
         if (args.require_loaded and args.action not in {'running', 'admitted-running'}
@@ -1079,6 +1081,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(refusal_diagnostic(error, stage=stage)), file=sys.stderr)
         print(json.dumps({"error": "native_onboarding_target_refused"}))
         return 1
+    finally:
+        probe_scope.close()
 
 
 if __name__ == "__main__":

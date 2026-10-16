@@ -138,7 +138,69 @@ def fixture(tmp_path, monkeypatch):
     backend._target_call = target_call
     monkeypatch.setattr(GroupCoordinator, '_owners', lambda self, admission: owners)
     return SimpleNamespace(store=store, stages=stages, plans=plans, owners=owners, journal=journal,
-        row=row, path=path, selected=selected, backend=backend, calls=calls, native=native, body=body, managed=managed)
+        row=row, path=path, selected=selected, backend=backend, calls=calls, native=native, body=body,
+        managed=managed, activation=_activation)
+
+
+def test_worker_prepares_and_binds_every_old_child_without_stopping_members(fixture, monkeypatch):
+    """Real worker/journal/binder; native governance/child producer are seams."""
+    import uuid
+    from clusterctl import onboarding_receiving_update as updates
+    from clusterctl.onboarding_receiving_update import CohortController
+    from tests.test_receiving_cohort_control import admission_child_fixture
+    f = fixture
+    transition = copy.deepcopy(f.row['intended_transition'])
+    social = dict(operation_id=str(uuid.uuid4()), authority_closure={owner.being: {} for owner in f.owners.values()},
+        owner_contexts={name: '4'*64 for name in f.owners})
+    transition['portal_admission'].update(schema='cluster-portal-group-admission/v2', social=social)
+    old = [item['name'] for item in f.row['expected_precondition']['senders']]
+    transition['admission_preparations'] = {name: dict(profile='guest', steps=dict(
+        application='application', visibility='visibility', selection='selection', snapshot='snapshot')) for name in old}
+    before = copy.deepcopy(f.row['expected_precondition'])
+    before['host_config'] = str(f.store.root.parent/'host.json')  # Resolved by the explicit producer seam below.
+    journal = OperationJournal(f.store.root.parent/'child-cohort')
+    row = plan_update(journal, manifest_digest=f.row['intent']['runtime_call']['manifest_digest'],
+        target=f.row['target'], expected_precondition=before, intended_transition=transition,
+        audit_identity={'actor': 'synthetic-host'})
+    configured = copy.deepcopy(f.selected)
+    configured.update(journal=str(journal.path.parent), admissions={digest(f.plans['newcomer']): row['operation_id']})
+    being_seed._write(f.path, configured)
+    monkeypatch.setattr('clusterctl.onboarding_group_admission.membership_recipe', lambda value, *a: copy.deepcopy(value))
+    children, requests, lose = {}, [], [True]
+    def prepare(backend, plan, selected_journal, request, **options):
+        assert backend is f.backend and selected_journal.path == journal.path
+        assert request['cohort_intent_sha256'] == digest(row['intent'])
+        assert request['operation_id'] == social['operation_id']
+        assert request['owner_context_sha256'] == social['owner_contexts'][plan['name']]
+        assert 0 < options['deadline_ns'] - __import__('time').monotonic_ns() <= 30_000_000_000
+        with being_seed._locked(f.store.directory(plan['name'])):
+            pass  # Caller must release its job scope before the producer.
+        requests.append(copy.deepcopy(request))
+        name = plan['name']
+        if name not in children:
+            cohort = CohortController(journal, row['operation_id'], f.owners)
+            _, _, _, _, recipe, _, _ = admission_child_fixture(f.store.root.parent,
+                profile='guest', name=name, with_group=False, with_exit=False,
+                setup=(cohort, f.owners, journal, row, f.activation))
+            children[name] = recipe['lifecycle_operation_id']
+        if lose[0]:
+            lose[0] = False
+            raise OSError('synthetic lost child preparation response')
+        return dict(schema='cluster-guest-admission-prepared/v1', operation_id=children[name],
+            request_sha256=digest(request), cohort_operation_id=row['operation_id'],
+            cohort_intent_sha256=digest(row['intent']), receiving_readiness='unobserved')
+    monkeypatch.setattr(updates, 'prepare_guest_admission', prepare)
+    with pytest.raises(OSError, match='lost child preparation response'):
+        GroupCoordinator(f.backend).advance('newcomer')
+    result = GroupCoordinator(f.backend).advance('newcomer')
+    assert result['lifecycle_prepared'] and result['receiving_readiness'] == 'unobserved'
+    bound = journal.get(row['operation_id'])['runtime_observation']['admission_lifecycles']
+    assert {name: binding['lifecycle_operation_id'] for name, binding in bound.items()} == children
+    count = len(requests)
+    assert GroupCoordinator(f.backend).advance('newcomer') == result
+    assert len(requests) == count and requests[0] == requests[1]
+    assert journal.get(row['operation_id'])['state'] == 'planned'
+    assert all(owner.effects == 0 for owner in f.owners.values())
 
 
 def test_worker_prepares_native_outside_job_lock_and_cannot_complete_matrix(fixture):
@@ -278,12 +340,14 @@ def test_actual_target_cli_accepts_preparation_budget_and_rejects_late_result(tm
     from clusterctl import onboarding_target as target
     clock = [0]
     monkeypatch.setattr(target, 'time', SimpleNamespace(monotonic_ns=lambda: clock[0]))
+    monkeypatch.setattr(target.onboarding_sdk, 'time', target.time)
     plan_path, genesis = tmp_path/'plan.json', tmp_path/'genesis.json'
     being_seed._write(plan_path, plan(browser=False))
     being_seed._write(genesis, {})
     monkeypatch.setattr(target.onboarding_code_successor, 'selection', lambda *a, **k: tmp_path/'code')
     monkeypatch.setattr(target.onboarding_code_successor, 'sdk_parameters', lambda *a, **k: {})
     def sdk(*a, **k):
+        assert target.onboarding_sdk.probe_timeout(180) == 2
         if late:
             clock[0] = 3_000_000_000
         return Path(sys.prefix)
@@ -295,6 +359,7 @@ def test_actual_target_cli_accepts_preparation_budget_and_rejects_late_result(tm
     assert target.main(arguments) == (1 if late else 0)
     output = capsys.readouterr().out
     assert ('"error"' in output) == late
+    assert target.onboarding_sdk.probe_timeout(180) == 180
 
 
 def test_native_ready_durability_cannot_return_acceptance_after_budget(fixture, monkeypatch):
@@ -405,6 +470,7 @@ def qualified_target_cli(tmp_path, monkeypatch, *, late=False):
     being_seed._write(venv.parent/'runtime-imports.json', {})
     clock, calls = [1_000_000_000], []
     monkeypatch.setattr(target, 'time', SimpleNamespace(monotonic_ns=lambda: clock[0], time_ns=lambda: 1_000_000_000_000))
+    monkeypatch.setattr(target.onboarding_sdk, 'time', target.time)
     monkeypatch.setattr(target, 'sys', SimpleNamespace(prefix=str(venv), argv=[]))
     monkeypatch.setattr(target.onboarding_code_successor, 'selection', lambda *a, **k: code)
     monkeypatch.setattr(target.onboarding_code_successor, 'sdk_parameters', lambda *a, **k: {

@@ -113,6 +113,24 @@ class GroupCoordinator:
                 caller.get('social', {}), admission, before.get('senders', [])))
         if caller != expected:
             raise OnboardingError('onboarding_group_admission_binding_changed')
+        preparations = after.get('admission_preparations')
+        if preparations is not None:
+            old = {item['name'] for item in before.get('senders', [])}
+            if (caller['schema'] != SOCIAL_CALLER_SCHEMA or not isinstance(preparations, dict)
+                    or set(preparations) != old):
+                raise OnboardingError('onboarding_group_admission_preparations_required')
+            for name, preparation in preparations.items():
+                profile = self.settings['owners'][name]['profile']
+                fields = {'profile', 'steps'} | ({'unit', 'home'} if profile == 'source' else set())
+                if (not isinstance(preparation, dict) or set(preparation) != fields
+                        or preparation['profile'] != profile or not isinstance(preparation['steps'], dict)
+                        or set(preparation['steps']) != {'application', 'visibility', 'selection', 'snapshot'}
+                        or any(not isinstance(step, str) or re.fullmatch('[a-z][a-z0-9-]{0,79}', step) is None
+                               for step in preparation['steps'].values())
+                        or len(set(preparation['steps'].values())) != 4
+                        or profile == 'source' and any(not _path(preparation[key]) for key in ('unit', 'home'))
+                        or profile == 'guest' and not _path(before.get('host_config'))):
+                    raise OnboardingError('onboarding_group_admission_preparations_required')
         entrant = admission['receivers'][plan['name']]
         selected = self.settings['owners'][plan['name']]
         if (selected['profile'] != 'guest' or selected['plan'] != plan
@@ -279,8 +297,69 @@ class GroupCoordinator:
                 self._prepare_body(plan, journal, row, admission, candidate, deadline_ns=deadline,
                     historical_only=expired)
                 remaining()
+                lifecycles = self._prepare_lifecycles(plan, journal, row, admission, cohort, deadline_ns=deadline)
+                remaining()
                 return dict(operation_id=row['operation_id'], native_prepared=True,
-                    physical_prepared=True, controller_prepared=True, receiving_readiness='unobserved')
+                    physical_prepared=True, controller_prepared=True, receiving_readiness='unobserved',
+                    **({'lifecycle_prepared': True} if lifecycles else {}))
+
+    def _prepare_lifecycles(self, plan, journal, row, admission, cohort, *, deadline_ns: int) -> bool:
+        """Prepare/bind old lifecycles only; never stop without a full finisher."""
+        from .onboarding_receiving_update import prepare_guest_admission
+        preparations = row['intended_transition'].get('admission_preparations')
+        if preparations is None:
+            return False
+        social = row['intended_transition']['portal_admission']['social']
+        before = {item['name']: item for item in row['expected_precondition']['senders']}
+        for name in sorted(preparations):
+            if time.monotonic_ns() >= deadline_ns:
+                raise OnboardingError('receiving_host_deadline_expired')
+            with self._job_scope(plan):
+                self._binding(plan)
+            selected = preparations[name]
+            owner = cohort.owners[name]
+            identity = admission['receivers'][name]
+            request = dict(schema='cluster-'+selected['profile']+'-admission-preparation/v1',
+                operation_id=social['operation_id'], cohort_operation_id=row['operation_id'],
+                cohort_intent_sha256=digest(row['intent']), tribe_ref=admission['tribe_ref'],
+                owner={key: identity[key] for key in ('being_ref', 'embodiment_id')},
+                predecessor={key: before[name][key] for key in ('process', 'server')},
+                **{key: value for key, value in admission['activation'].items() if key != 'observation_window_ms'},
+                manifest_digest=row['intent']['runtime_call']['manifest_digest'],
+                authority_closure={ref: value for ref, value in social['authority_closure'].items()
+                    if ref != identity['being_ref']}, owner_context_sha256=social['owner_contexts'][name],
+                steps=selected['steps'])
+            if selected['profile'] == 'source':
+                request.update(home=selected['home'], unit=selected['unit'])
+            else:
+                request['root'] = str(owner.root)
+            key = 'lifecycle-prepared-' + name
+            current = journal.get(row['operation_id'])
+            retained = (current['runtime_observation'] or {}).get('portal_admission', {}).get(key)
+            if retained is None:
+                if selected['profile'] == 'source':
+                    result = owner.prepare_admission_lifecycle(request)
+                else:
+                    configured = self.settings['owners'][name]
+                    result = prepare_guest_admission(self.backend, configured['plan'], journal, request,
+                        config=Path(row['expected_precondition']['host_config']),
+                        candidate=(Path(configured['candidate']['code']), configured['candidate']['digest']),
+                        deadline_ns=deadline_ns)
+                if (result.get('schema') != 'cluster-'+selected['profile']+'-admission-prepared/v1'
+                        or result.get('request_sha256') != digest(request)
+                        or result.get('cohort_operation_id') != row['operation_id']
+                        or result.get('cohort_intent_sha256') != digest(row['intent'])
+                        or result.get('receiving_readiness') != 'unobserved'):
+                    raise OnboardingError('onboarding_group_admission_binding_changed')
+                # The established binder independently validates the actual
+                # private Source projection or local guest child, not this ACK.
+                cohort.bind_admission_lifecycle(name, result['operation_id'])
+                self._retain(journal, row, key, dict(request_sha256=digest(request), prepared=result))
+            else:
+                if retained.get('request_sha256') != digest(request):
+                    raise OnboardingError('onboarding_group_admission_binding_changed')
+                cohort.bind_admission_lifecycle(name, retained['prepared']['operation_id'])
+        return True
 
     def _prepare_body(self, plan, journal, row, admission, candidate, *, deadline_ns: int,
                       historical_only: bool = False) -> None:

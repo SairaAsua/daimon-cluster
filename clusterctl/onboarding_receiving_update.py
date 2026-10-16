@@ -2295,13 +2295,24 @@ class SourceBootstrapController:
 def prepare_guest_bootstrap(backend, plan: dict, *, candidate: tuple[Path, str],
                             manifest_path: Path, manifest_digest: str, expires_at_ms: int,
                             timeout_seconds: float = 30, manifest_uid: int = 0,
-                            admission_link: dict | None = None) -> tuple[dict, dict]:
+                            admission_link: dict | None = None, installed_only: bool = False,
+                            deadline_ns: int | None = None) -> tuple[dict, dict]:
     """Prepare one guest without selecting code or interrupting its service.
 
     A receiving operation freezes these vectors before any lifecycle effect.
     Read-only candidate mounts must already be installed by supported preparation.
     """
     from .onboarding_service import command
+    def remaining():
+        if deadline_ns is None:
+            return timeout_seconds
+        if type(deadline_ns) is not int:
+            raise OnboardingError('receiving_owner_deadline_expired')
+        value = min(timeout_seconds, (deadline_ns-time.monotonic_ns())/1_000_000_000)
+        if value <= 0:
+            raise OnboardingError('receiving_owner_deadline_expired')
+        return value
+    remaining()
     if type(expires_at_ms) is not int or expires_at_ms <= time.time_ns() // 1_000_000:
         raise OnboardingError('receiving_guest_bootstrap_authorization_expired')
     manifest = _manifest(manifest_path, manifest_digest, uid=manifest_uid)
@@ -2312,14 +2323,17 @@ def prepare_guest_bootstrap(backend, plan: dict, *, candidate: tuple[Path, str],
     if not any({**manifest['artifacts'], **receiver.get('artifacts', {})}.get('receiving_code') == candidate[1]
             for receiver in manifest['required_receivers']):
         raise OnboardingError('receiving_artifact_selection_mismatch')
-    installed = backend._target_call(plan, 'sdk-prepare', candidate=candidate)
+    installed = backend._target_call(plan, 'sdk-observe' if installed_only else 'sdk-prepare', candidate=candidate,
+        **({'observation_timeout_seconds': remaining()} if deadline_ns is not None else {}))
     if installed.get('ready') is not True:
         raise OnboardingError('qualified_guest_bootstrap_candidate_required')
     owner = backend._target_call(plan, 'receiving-bootstrap-freeze', candidate=candidate,
-        bootstrap_timeout_seconds=timeout_seconds)
-    checked = preflight(candidate[0], candidate[1], manifest_path, manifest_digest,
-        being_ref=owner['being_ref'], embodiment_id=owner['origin']['embodiment_id'],
-        code_uid=os.geteuid(), manifest_uid=manifest_uid)
+        bootstrap_timeout_seconds=remaining())
+    remaining()
+    with onboarding_sdk.probe_budget(deadline_ns):
+        checked = preflight(candidate[0], candidate[1], manifest_path, manifest_digest,
+            being_ref=owner['being_ref'], embodiment_id=owner['origin']['embodiment_id'],
+            code_uid=os.geteuid(), manifest_uid=manifest_uid)
     if installed.get('matrix_commit') != checked['matrix_revision']:
         raise OnboardingError('qualified_guest_bootstrap_candidate_required')
     startup = owner.get('observer_startup')
@@ -2333,7 +2347,7 @@ def prepare_guest_bootstrap(backend, plan: dict, *, candidate: tuple[Path, str],
             or re.fullmatch('[0-9a-f]{64}', startup['interpreter']['executable_sha256']) is None):
         raise OnboardingError('qualified_guest_bootstrap_candidate_required')
     root = backend._guest_service_call(plan, 'bootstrap-inspect', candidate=candidate,
-        timeout_seconds=timeout_seconds, owner_observation=owner['predecessor'])
+        timeout_seconds=remaining(), owner_observation=owner['predecessor'])
     if (root.get('scope') is None or root['scope']['process'] != owner['predecessor']['process']
             or root['scope']['admission_parent'] != owner['predecessor']['admission_parent']):
         raise OnboardingError('receiving_guest_bootstrap_identity_required')
@@ -2347,10 +2361,115 @@ def prepare_guest_bootstrap(backend, plan: dict, *, candidate: tuple[Path, str],
     entrypoint(b'[Service]\nExecStart=/prepared\n', argv)
     association = ({} if admission_link is None else dict(admission_link=admission_lifecycle_link(
         admission_link, being_ref=owner['being_ref'], embodiment_id=owner['origin']['embodiment_id'])))
+    remaining()
     return dict(plan=plan, owner=owner, root=root), dict(
         runtime_code=str(candidate[0]), runtime_digest=candidate[1], manifest_path=str(manifest_path),
         manifest_uid=manifest_uid, code_uid=os.geteuid(), prepared=checked,
         argv=argv, expires_at_ms=expires_at_ms, **association)
+
+
+def prepare_guest_admission(backend, plan: dict, journal, request: dict, *, config: Path,
+                            candidate: tuple[Path, str], deadline_ns: int) -> dict:
+    """Plan an old guest's existing lifecycle before group admission effects.
+
+    Reconcile the stable retained target before observing a later process. The
+    host retains public owner/root preparations, never opens guest custody and
+    never installs SDKs, selects a unit or changes the signed group here.
+    """
+    from .onboarding_code_successor import plan_update
+    from .onboarding_group_admission import publication_command
+    from .onboarding_host import HostConfig
+    from .operation_journal import JournalConflict
+    fields = {'schema', 'operation_id', 'cohort_operation_id', 'cohort_intent_sha256',
+        'tribe_ref', 'owner', 'predecessor', 'root', 'manifest_path', 'manifest_uid',
+        'manifest_digest', 'expires_at_ms', 'authority_closure', 'owner_context_sha256', 'steps'}
+    try:
+        if (not isinstance(request, dict) or set(request) != fields
+                or request['schema'] != 'cluster-guest-admission-preparation/v1'
+                or str(uuid.UUID(request['operation_id'])) != request['operation_id']
+                or any(not isinstance(request[key], str) or not 1 <= len(request[key]) <= 240
+                       for key in ('cohort_operation_id', 'tribe_ref'))
+                or any(not isinstance(request[key], str) or re.fullmatch('[0-9a-f]{64}', request[key]) is None
+                       for key in ('cohort_intent_sha256', 'manifest_digest', 'owner_context_sha256'))
+                or any(not isinstance(request[key], str) or not Path(request[key]).is_absolute()
+                       or '..' in Path(request[key]).parts for key in ('root', 'manifest_path'))
+                or type(request['manifest_uid']) is not int or request['manifest_uid'] < 0
+                or type(request['expires_at_ms']) is not int or not 0 < request['expires_at_ms'] < 2**53
+                or not isinstance(request['owner'], dict) or set(request['owner']) != {'being_ref', 'embodiment_id'}
+                or any(not isinstance(value, str) or not value for value in request['owner'].values())
+                or not isinstance(request['predecessor'], dict) or set(request['predecessor']) != {'process', 'server'}
+                or any(not isinstance(value, dict) for value in request['predecessor'].values())
+                or not isinstance(request['authority_closure'], dict) or not isinstance(request['steps'], dict)
+                or set(request['steps']) != {'application', 'visibility', 'selection', 'snapshot'}
+                or len(set(request['steps'].values())) != 4):
+            raise ValueError
+        steps = request['steps']
+        snapshot = publication_command(dict(operation_id=request['operation_id'], step=steps['snapshot'], action='snapshot',
+            params=dict(application_step=steps['application'], visibility_step=steps['visibility'],
+                selection_step=steps['selection'], owner_context_sha256=request['owner_context_sha256'])))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise OnboardingError('receiving_guest_admission_preparation_required') from None
+
+    def budget(*, fresh: bool = False):
+        if type(deadline_ns) is not int or time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('receiving_owner_deadline_expired')
+        if fresh and time.time_ns()//1_000_000 >= request['expires_at_ms']:
+            raise OnboardingError('receiving_preservation_authorization_expired')
+    budget()
+    if backend.config != HostConfig.load(config):
+        raise OnboardingError('receiving_guest_bootstrap_binding_conflict')
+    target = 'guest-admission:' + plan['name'] + ':' + request['operation_id']
+    row = journal.latest_for_target(target)
+    if row is None:
+        budget(fresh=True)
+        owner = GuestGroupClient(backend, plan, candidate, root=Path(request['root']))
+        owner.deadline_ns = deadline_ns
+        preview = owner.group_publication(dict(operation_id=request['operation_id'],
+            step='context', action='context-preview', params={}), authority_closure=request['authority_closure'])
+        if preview.get('owner_context_sha256') != request['owner_context_sha256']:
+            raise OnboardingError('onboarding_group_owner_context_conflict')
+        before, prepared = prepare_guest_bootstrap(backend, plan, candidate=candidate,
+            manifest_path=Path(request['manifest_path']), manifest_digest=request['manifest_digest'],
+            expires_at_ms=request['expires_at_ms'], manifest_uid=request['manifest_uid'],
+            installed_only=True, deadline_ns=deadline_ns)
+        frozen = before['owner']
+        if (frozen.get('mode') != 'preserve' or frozen['runtime_sha256'] != preview.get('runtime_bundle_sha256')
+                or request['owner'] != dict(being_ref=frozen['being_ref'], embodiment_id=frozen['origin']['embodiment_id'])
+                or request['predecessor'] != dict(process=frozen['predecessor']['process'], server=frozen['origin'])
+                or frozen['group']['selected']['tribe_ref'] != request['tribe_ref']
+                or frozen['group']['selected']['socket'] != str(owner.socket)
+                or not isinstance(frozen.get('store_bindings'), dict) or 'ledger' not in frozen['store_bindings']):
+            raise OnboardingError('receiving_guest_admission_predecessor_changed')
+        preservation_authorization(frozen['preservation'], request['expires_at_ms'])
+        snapshot['params'].update(expected_stores=frozen['store_bindings'], expected_preservation=frozen['preservation'])
+        link = admission_lifecycle_link(dict(schema='cluster-admission-lifecycle-link/v1',
+            cohort_operation_id=request['cohort_operation_id'], cohort_intent_sha256=request['cohort_intent_sha256'],
+            tribe_ref=request['tribe_ref'], owner=request['owner'], snapshot_request=snapshot), **request['owner'])
+        prepared['admission_link'] = link
+        host = being_seed._read(config)
+        if backend.config != HostConfig.load(config, expected_value=host):
+            raise OnboardingError('receiving_guest_bootstrap_binding_conflict')
+        budget(fresh=True)
+        row = plan_update(journal, manifest_digest=request['manifest_digest'], target=target,
+            expected_precondition=dict(host_config=str(config), host_configuration=host, host_config_sha256=digest(host),
+                guest_bootstraps={plan['name']: before}, guest_admission_preparation=request),
+            intended_transition=dict(guest_bootstraps={plan['name']: prepared}),
+            audit_identity={'actor': 'qualified-guest-admission-owner'})
+    if (row['expected_precondition'].get('guest_admission_preparation') != request
+            or row['expected_precondition'].get('host_config') != str(config)
+            or row['expected_precondition']['guest_bootstraps'][plan['name']]['plan'] != plan
+            or row['state'] in {'degraded', 'compensated'}
+            or row['intended_transition']['guest_bootstraps'][plan['name']]['runtime_code'] != str(candidate[0])
+            or row['intended_transition']['guest_bootstraps'][plan['name']]['runtime_digest'] != candidate[1]):
+        raise JournalConflict('guest admission preparation changed')
+    checked, _before, prepared = GuestBootstrapController(journal, row['operation_id'], backend, plan['name'])._row()
+    link = prepared['admission_link']
+    budget()
+    return dict(schema='cluster-guest-admission-prepared/v1', operation_id=checked['operation_id'],
+        host_config_sha256=checked['expected_precondition']['host_config_sha256'], code_digest=candidate[1],
+        request_sha256=digest(request), cohort_operation_id=request['cohort_operation_id'],
+        cohort_intent_sha256=request['cohort_intent_sha256'], link_sha256=digest(link),
+        owner_context_sha256=request['owner_context_sha256'], receiving_readiness='unobserved')
 
 
 def guest_bootstrap_operation_id(operation_id: str) -> str:

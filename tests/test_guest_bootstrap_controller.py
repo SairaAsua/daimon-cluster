@@ -613,6 +613,77 @@ def admission_guest_fixture(fixture):
     return controller, backend, calls, current, snapshots
 
 
+def test_guest_admission_preparation_recovers_same_child_after_lost_plan_and_expiry(fixture, monkeypatch):
+    """Real journal/config/link validation; guest owner/SDK/manager are seams."""
+    from types import SimpleNamespace
+    controller, backend, calls, config = fixture
+    controller, backend, calls, _current, _snapshots = admission_guest_fixture(fixture)
+    row, frozen, selected = controller._row()
+    candidate = Path(selected['runtime_code']), selected['runtime_digest']
+    manifest = dict(provenance={'matrix_revision': selected['prepared']['matrix_revision']},
+        artifacts={'matrix_sdk': selected['prepared']['matrix_wheel_sha256']},
+        required_receivers=[{'artifacts': {'receiving_code': candidate[1]}}])
+    monkeypatch.setattr(updates, '_manifest', lambda *a, **k: manifest)
+    monkeypatch.setattr(updates.onboarding_sdk, 'verify', lambda *a, **k: {})
+    identifier = str(uuid.uuid4())
+    request = dict(schema='cluster-guest-admission-preparation/v1', operation_id=identifier,
+        cohort_operation_id='operation:approved-parent', cohort_intent_sha256='2'*64,
+        tribe_ref=frozen['owner']['group']['selected']['tribe_ref'],
+        owner=dict(being_ref=frozen['owner']['being_ref'], embodiment_id=frozen['owner']['origin']['embodiment_id']),
+        predecessor=copy.deepcopy(dict(process=frozen['owner']['predecessor']['process'], server=frozen['owner']['origin'])),
+        root=str(Path(frozen['owner']['group']['selected']['socket']).parent),
+        manifest_path=selected['manifest_path'], manifest_uid=selected['manifest_uid'], manifest_digest='a'*64,
+        expires_at_ms=selected['expires_at_ms'], authority_closure={}, owner_context_sha256='1'*64,
+        steps=dict(application='application', visibility='visibility', selection='selection', snapshot='snapshot'))
+    preparations = []
+    def target(_plan, action, **options):
+        preparations.append(action)
+        assert action != 'sdk-prepare', 'admission preparation must not install'
+        if action == 'group-publication':
+            assert 0 < options['observation_timeout_seconds'] <= 10
+            assert options['group_request']['command']['action'] == 'context-preview'
+            return dict(schema='cluster-group-owner-context-preview/v1', operation_id=identifier,
+                owner_context_sha256='1'*64, runtime_bundle_sha256=frozen['owner']['runtime_sha256'])
+        if action == 'sdk-observe':
+            assert 0 < options['observation_timeout_seconds'] <= 10
+            return dict(ready=True, matrix_commit=selected['prepared']['matrix_revision'])
+        assert action == 'receiving-bootstrap-freeze'
+        assert 0 < options['bootstrap_timeout_seconds'] <= 10
+        return copy.deepcopy(frozen['owner'])
+    backend._target_call = target
+    backend._guest_service_call = lambda _plan, action, **options: (
+        copy.deepcopy(frozen['root']) if action == 'bootstrap-inspect' else pytest.fail('preparation performed '+action))
+    backend._receiving_base = lambda _plan: Path('/opt/daimon-onboarding')/frozen['plan']['release_digest']
+    backend._runtime_paths = lambda *_args, **_options: (Path('/opt/daimon-onboarding-runtime')/candidate[1], [], {})
+    journal = OperationJournal(config.parent/'admission-child')
+    from clusterctl import onboarding_code_successor
+    plan_update = onboarding_code_successor.plan_update
+    def lost(*args, **options):
+        plan_update(*args, **options)
+        raise OSError('synthetic lost child plan response')
+    monkeypatch.setattr(onboarding_code_successor, 'plan_update', lost)
+    def prepare(value=request, code=candidate):
+        return updates.prepare_guest_admission(backend, frozen['plan'], journal, value, config=config,
+            candidate=code, deadline_ns=time.monotonic_ns()+10_000_000_000)
+    with pytest.raises(OSError, match='lost child plan response'):
+        prepare()
+    target_key = 'guest-admission:'+frozen['plan']['name']+':'+identifier
+    child = journal.latest_for_target(target_key)
+    assert child['state'] == 'planned' and child['runtime_observation'] is None
+    assert child['intended_transition']['guest_bootstraps'][frozen['plan']['name']]['admission_link']['cohort_intent_sha256'] == request['cohort_intent_sha256']
+    previous = list(preparations)
+    frozen['owner']['predecessor']['process']['pid'] = 999  # Later process cannot become this child's predecessor.
+    monkeypatch.setattr(updates, 'time', SimpleNamespace(time_ns=lambda: (request['expires_at_ms']+1)*1_000_000,
+        monotonic_ns=time.monotonic_ns))
+    first = prepare()
+    assert prepare() == first and first['operation_id'] == child['operation_id']
+    assert first['receiving_readiness'] == 'unobserved' and preparations == previous
+    with pytest.raises(JournalConflict, match='preparation changed'):
+        prepare({**request, 'manifest_digest': '0'*64})
+    assert journal.latest_for_target(target_key)['operation_id'] == child['operation_id']
+    assert preparations == previous and backend.stops == backend.starts == backend.stages == backend.publications == 0
+
+
 def test_guest_admission_preserves_then_derives_and_loads_without_rewriting_the_predecessor(fixture):
     controller, backend, _, current, snapshots = admission_guest_fixture(fixture)
     original = controller._row()[0]
