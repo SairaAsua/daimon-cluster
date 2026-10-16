@@ -7,10 +7,37 @@ bot consumer, access authority, identity, model call or session-control provider
 ## First useful route
 
 Register one named app, displayed as **DaimonMatrix**, with a selected receiving
-home's `/apps/` URL. Keep its existing Main App and named Nexus/Sessions entries.
+home's `/apps/` URL. Matrix Apps is the shared Main Mini App. Nexus is a routed
+destination; preserve already registered named entries such as Sessions. Never
+change the principal app to Nexus to compensate for missing destination routing.
 The bot menu can later point to this named app using `mode=compact`; registering
 and testing it precedes changing a working menu. The gridded icon launcher is
 ordinary authored HTML/CSS rather than a Telegram message keyboard.
+
+### Main-app destination routes
+
+The optional gateway `--miniapp-routes FILE` selects a closed
+`dm.miniapp-routes/v1` map of exact HTTPS origins to selector prefixes and
+same-origin application paths, for example:
+
+```json
+{"schema":"dm.miniapp-routes/v1","origins":{"https://apps.example.org":[{"prefix":"nexus-","path":"/nexus/"}]}}
+```
+
+The proxy must mount the existing receiving application separately from the
+public read-only launcher projection. Preserve that application's actual Origin,
+cookies and authorization; never copy the public projection's credential stripping
+onto its private routes. The receiving application must explicitly accept the
+additional exact Origin and retain its own signature and membership checks.
+
+Only a fresh Telegram launch with a configured prefix routes automatically.
+Ordinary Apps openings and unknown selectors keep the launcher. A one-use,
+30-second marker binds the current SDK tab cache to the exact path and SHA-256
+of its unchanged launch data. No raw authenticated payload is copied into a
+custom store, query, catalog or log. The receiving app consumes the marker before
+initializing its SDK and then removes the cache. Missing or mismatched storage
+fails visibly. This navigation mechanism is neither authentication nor another
+bot's grant. A registered selector without this receiving route is insufficient.
 
 The shell follows Homemaker through the existing `home-style.js` and canonical
 `style.json?surface=apps` resolution. It neither stores a selected theme nor
