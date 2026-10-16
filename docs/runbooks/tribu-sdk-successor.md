@@ -85,6 +85,21 @@ config writer and model-turn deadline are separate. Existing prepared tooling
 transactions preserve their exact candidate; a corrected release uses its normal
 successor operation rather than rewriting retained intent.
 
+Native thread IDs are transient loaded contexts, not durable receiving bindings.
+Resolve the intended loaded contexts immediately before freezing a tooling recipe;
+a thread recorded earlier in the maintenance preparation can be unloaded by Codex
+before execution. For a receiving owner without a selected loaded context, use the
+existing empty `native_threads` recipe and retain honest `server-catalog-only`
+acceptance. Never resume/create a thread or start a model merely to satisfy a
+deployment check. This does not prove adoption by another loaded context.
+If an already frozen recipe names an unloaded context, preserve its actual effects,
+release its native reservations with `reconcile_reassessment`, then plan a fresh
+cohort with current recipes and complete current predecessor vectors. Reuse valid
+code, SDK and lifecycle proof; no extra bootstrap, identity or custody is needed.
+Do not edit the old operation or claim that server acceptance proves the missing
+context. Model/session inactivity must not become a permanent Matrix deployment
+prerequisite.
+
 Catalog acceptance shares the caller's finite absolute deadline. Observe selected
 loaded contexts first: an exact current catalog needs no reload, and a starting
 adapter remains pending without a reload. One observed terminal stale catalog may
