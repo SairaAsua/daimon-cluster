@@ -1,8 +1,8 @@
 {
   "repository": "https://github.com/AlterMundi/daimon-matrix",
-  "commit": "cb3b62394f3a79d8e884a38a5562c991a7283df4",
+  "commit": "23b2c616bd0b873962108aa53458f791857ae500",
   "path": "tools/install_agent_chat.py",
-  "sha256": "c39245861024a6e7fe6155f5afc45b8d41f29353cdebfe913b8c3d2f0b7a71cc",
+  "sha256": "c45646381246e1e25a0d642f595b1605b6b2c0b8e93c871e695234b047a480a7",
   "purpose": "Native messaging installation and resumable existing-tool reconciliation through the owner-selected SDK and supported Codex writer; no identity, daemon or model creation.",
   "captured_module": "clusterctl/onboarding_chat_native.py"
 }

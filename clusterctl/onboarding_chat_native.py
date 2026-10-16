@@ -264,6 +264,43 @@ def _write_codex_role(
                     process.stdout.close()
 
 
+def _read_codex_config(path: Path) -> bytes:
+    """Read owner-only TOML, including an empty document, without following links.
+
+    Credential readers intentionally reject empty bytes. Keep this exception
+    local to Codex configuration; connection documents and secrets use the
+    unchanged SDK reader.
+    """
+    _directory(path.parent)
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        raise ValueError("agent_chat_codex_config_rejected") from None
+    try:
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+            or info.st_nlink != 1
+            or not 0 <= info.st_size <= 4 * 1024 * 1024
+        ):
+            raise ValueError("agent_chat_codex_config_rejected")
+        chunks = []
+        remaining = info.st_size
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                raise ValueError("agent_chat_codex_config_rejected")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ValueError("agent_chat_codex_config_rejected")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
+
+
 def _register_codex_mcp_locked(
     home: Path,
     attachment: Path,
@@ -276,9 +313,9 @@ def _register_codex_mcp_locked(
     # config writers. Reject their observed intervening edits before publication.
     _registration_budget(deadline_ns)
     config = home / "config.toml"
-    from daimon_matrix.messaging_config import protected_read
-
-    before = protected_read(config) if config.exists() or config.is_symlink() else b""
+    before = (
+        _read_codex_config(config) if config.exists() or config.is_symlink() else b""
+    )
     old = tomllib.loads(before.decode())
     servers = old.get("mcp_servers", {})
     existing = servers.get("matrix")
@@ -334,7 +371,9 @@ def _register_codex_mcp_locked(
     try:
         _put(temporary, candidate)
         observed = (
-            protected_read(config) if config.exists() or config.is_symlink() else b""
+            _read_codex_config(config)
+            if config.exists() or config.is_symlink()
+            else b""
         )
         if observed not in (before, candidate):
             raise ValueError("agent_chat_codex_mcp_configuration_changed")
@@ -360,8 +399,6 @@ def _codex_candidate(
     timeout_seconds: float | None = None,
 ) -> bytes:
     """Resume private preparation without overwriting an unrecognized candidate."""
-    from daimon_matrix.messaging_config import protected_read
-
     old = tomllib.loads(before.decode())
     servers = old.get("mcp_servers", {})
     role = servers.get("matrix", {})
@@ -385,7 +422,7 @@ def _codex_candidate(
     config = home / "config.toml"
     if not config.exists():
         _put(config, before)
-    candidate = protected_read(config)
+    candidate = _read_codex_config(config)
     if candidate == before and old != expected:
         codex = shutil.which("codex")
         if codex is None:
@@ -397,7 +434,7 @@ def _codex_candidate(
             **({"startup_timeout_seconds": 60} if startup_default else {}),
             timeout_seconds=30 if timeout_seconds is None else timeout_seconds,
         )
-        candidate = protected_read(config)
+        candidate = _read_codex_config(config)
     if tomllib.loads(candidate.decode()) != expected:
         raise ValueError("agent_chat_codex_mcp_configuration_conflict")
     return candidate
@@ -529,8 +566,14 @@ def reconcile_tooling(
             for index, before in enumerate(originals[:-1]):
                 original = json.loads(before)
                 if (
-                    set(original) != {"command", "tools", "incoming_channels"}
+                    set(original)
+                    not in (
+                        {"command", "tools", "incoming_channels"},
+                        {"command", "tools", "incoming_channels", "outgoing_channels"},
+                    )
                     or original["incoming_channels"] != binding["incoming_channels"]
+                    or original.get("outgoing_channels", binding["outgoing_channels"])
+                    != binding["outgoing_channels"]
                     or not isinstance(original["command"], list)
                     or original["command"][-2:]
                     != ["--binding", str(attachment / binding_filename)]
