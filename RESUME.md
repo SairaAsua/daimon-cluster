@@ -63,16 +63,24 @@ workflow tests, bounded independent source review and scoped lint pass. Both API
 servers were closed after their probes. No Matrix service, authority, identity,
 production selector or model was started by these probes. This is external-service
 fixture readiness, not complete admission, public Telegram or TLS acceptance.
-Native owner reads now authenticate both original public applications without
-returning key values. The retained three-owner admission has prepared transport/
-visibility inputs and an actually qualified synthetic entrant destination. Its
-static membership/publication/communication/tooling recipes pass the installed
-SDK's native validators. Both synthetic baseline unit files select the captured
-instrumented code, with exact predecessors retained; neither unit was started
-or reloaded. This is preparation, not membership or receiving acceptance. The
-protected journal operation still needs fresh sender/load pins and binding before
-the finite integrated run. A separately composed v2-capable fallback retains the
-previous helper and unchanged SDK; the old v1 baseline is not that fallback.
+Native owner reads authenticate both original publications without returning
+key values. The finite integrated synthetic window now has fresh baseline sender/
+load observations and a bound protected receiving operation, using the same three
+identities and entrant V8 job. Membership, publication and first managed load
+remain unfinished; read the retained checkpoint for live process and deadline
+receipts, not dated status paragraphs.
+
+Cluster `ee961fa` fixes a verified native observation defect: Codex observation
+rejected the exact standard root-owned Incus service drop-in, although the service
+was active and its unit matched. The existing Matrix validator is now shared;
+modified, duplicate, foreign and reference-cache native drop-ins still refuse.
+Affected native/service tests, CI-scope tests, typing and scoped lint passed;
+bounded independent review approved the source. Captured helper `83557b98` changes
+only those two modules against the existing synthetic candidate. It is selected
+only as the synthetic host preparation helper; all receiver candidate/SDK pins
+remain unchanged. Actual worker admission acceptance is still pending. The v2-
+compatible fallback is Root-published, not a completed rollback receipt. The old
+v1 baseline must never be restored after v2 authority acceptance.
 
 Before another real operation that could interrupt communication, prepare its
 receiving/recovery boundary and obtain the scoped human authorization required
