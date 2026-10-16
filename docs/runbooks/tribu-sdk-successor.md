@@ -1517,3 +1517,6 @@ on every cadence. These retained snapshots prove preparation only. They neither
 extend the frozen authorization horizon nor replace final fresh required-receiver,
 loaded-runtime, tooling and activation qualification. A completed native service
 observation is never permission to restart it after a later generic failure.
+The target's individual SDK, V8 and candidate-SDK checks also retain completed
+progress through the same callback/journal route. A deadline between these checks
+must not discard earlier successful preparation or enlarge the next invocation.

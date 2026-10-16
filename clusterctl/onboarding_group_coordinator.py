@@ -741,7 +741,12 @@ class GroupCoordinator:
                 candidate = (Path(self.settings['owners'][name]['candidate']['code']),
                     self.settings['owners'][name]['candidate']['digest'])
                 if not finishing and not native_prepared and 'target_ready' not in retained:
-                    if not self.backend.prepare_group_target(plan, candidate, deadline_ns=deadline):
+                    target_progress = dict(plan_digest=digest(plan), code=str(candidate[0]), code_digest=candidate[1])
+                    completed = frozenset(step for step in ('sdk', 'v8', 'candidate-sdk')
+                        if 'target_prepared-' + step in retained)
+                    if not self.backend.prepare_group_target(plan, candidate, deadline_ns=deadline,
+                            completed_steps=completed, record_step=lambda step: self._retain(
+                                journal, row, 'target_prepared-' + step, target_progress)):
                         return None
                     # Preparation is durable progress, never receiving acceptance.
                     # Do not spend every worker budget repeating the same SDK/V8

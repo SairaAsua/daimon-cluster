@@ -776,3 +776,35 @@ def test_candidate_physical_admission_retains_budget_and_original_expiry(tmp_pat
         backend._target_call(value, action, candidate=candidate, observation_timeout_seconds=2,
             authorization_expires_at_ms=1, **options)
     assert len(calls) == 1, 'expired/missing authorization must never dispatch'
+
+
+def test_group_target_resumes_completed_native_checks_after_lost_progress_reply(tmp_path):
+    import time
+    config, value, _, backend = configured(tmp_path)
+    backend.config = replace(config, code=tmp_path/'base', views=tmp_path/'views')
+    backend._guest_paths = lambda p: (tmp_path, Path('/guest/base'), {})
+    backend._runtime_paths = lambda *a, **k: (Path('/guest/code'), [], {})
+    backend._matrix_mount = lambda p: {}
+    backend._mounted = lambda *a, **k: True
+    backend._sdk_successor = lambda p: True
+    calls, completed = [], set()
+    def target(p, action, **options):
+        calls.append((action, 'candidate' in options))
+        return {'phase': 'v8'} if action == 'observe' else {'ready': True}
+    backend._target_call = target
+    def record(step):
+        completed.add(step)
+        if step == 'sdk':
+            raise OSError('lost reply after durable SDK progress')
+    candidate = (tmp_path/'candidate', 'a'*64)
+    deadline = time.monotonic_ns() + 60_000_000_000
+    with pytest.raises(OSError, match='durable SDK progress'):
+        backend.prepare_group_target(value, candidate, deadline_ns=deadline, record_step=record)
+    assert completed == {'sdk'}
+    assert backend.prepare_group_target(value, candidate, deadline_ns=deadline,
+        completed_steps=frozenset(completed), record_step=completed.add)
+    assert calls == [('sdk-observe', False), ('observe', False), ('sdk-observe', True)]
+    assert completed == {'sdk', 'v8', 'candidate-sdk'}
+    assert backend.prepare_group_target(value, candidate, deadline_ns=deadline,
+        completed_steps=frozenset(completed), record_step=completed.add)
+    assert len(calls) == 3

@@ -433,6 +433,11 @@ RECEIVING_SUPPORT_HASHES = {
 }
 
 
+ADMISSION_PROGRESS_HASHES = {'clusterctl/onboarding_host.py': (
+    '6bb8673868561f11fa80ce75899935cc65c4e224e75b8e0c20ea4e2b74958293',
+    'f98114c97e8c5164623cc57895adb8cb7814269dd2a1f8ee7be6ea69d6b03b38')}
+
+
 NATIVE_DROPIN_HASHES = {'clusterctl/onboarding_service.py': (
     '9048ed4846f33d7f9138b1d9cb68dd44b9aac24ec6537f367fb5c678a6fd427f',
     'ffb6dbe5c2ac189e425721bda61934e991e852e30f05d492fcf2289752351a0b')}
@@ -520,6 +525,13 @@ def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list
         # Orchestration/journal cadence only; changed native SDK, service,
         # authority or owner adapters retain their broader coverage.
         return 'ci', coordinator_tests
+    progress_host = {'clusterctl/onboarding_host.py', 'tests/test_onboarding_host.py'}
+    progress_tests = [*coordinator_tests, 'tests/test_onboarding_host.py']
+    if ('clusterctl/onboarding_host.py' in changed
+            and set(changed) <= coordinator_files | progress_host | CI_FILES | RUNBOOK_DOCS
+            and all((root / path).is_file() for path in progress_tests)
+            and receiving_support_only(root, base, set(ADMISSION_PROGRESS_HASHES), hashes=ADMISSION_PROGRESS_HASHES)):
+        return 'ci', progress_tests
     native_dropins = {'clusterctl/onboarding_service.py', 'clusterctl/onboarding_telegram.py',
                      'tests/test_onboarding_service.py', 'tests/test_onboarding_telegram.py'}
     native_tests = ['tests/test_onboarding_service.py', 'tests/test_onboarding_telegram.py',

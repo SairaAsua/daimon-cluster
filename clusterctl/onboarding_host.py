@@ -302,7 +302,9 @@ class HostBackend:
         from .onboarding_group_coordinator import GroupCoordinator
         return GroupCoordinator(self).advance(name)
 
-    def prepare_group_target(self, plan: dict, candidate: tuple[Path, str], *, deadline_ns: int) -> bool:
+    def prepare_group_target(self, plan: dict, candidate: tuple[Path, str], *, deadline_ns: int,
+                             completed_steps: frozenset[str] = frozenset(),
+                             record_step: Callable[[str], None] | None = None) -> bool:
         """Finish ordinary V8 first, then prepare the approved SDK without selecting it."""
         if self.config.code is None or self.config.views is None:
             return False
@@ -316,18 +318,28 @@ class HostBackend:
             if remaining <= 0:
                 raise OnboardingError('receiving_host_deadline_expired')
             return self._target_call(plan, action, observation_timeout_seconds=remaining, **options)
-        if self._sdk_successor(plan) and query('sdk-observe').get('ready') is not True:
-            return False
-        if query('observe').get('phase') != 'v8':
-            return False
+        def recorded(step):
+            if record_step is not None:
+                record_step(step)
+        if 'sdk' not in completed_steps:
+            if self._sdk_successor(plan) and query('sdk-observe').get('ready') is not True:
+                return False
+            recorded('sdk')
+        if 'v8' not in completed_steps:
+            if query('observe').get('phase') != 'v8':
+                return False
+            recorded('v8')
         _, _, candidate_mounts = self._runtime_paths(plan, base, candidate=candidate)
         for name, mount in candidate_mounts.items():
             if not self._mounted(plan, {name: mount}, deadline_ns=deadline_ns):
                 self._dispatch(plan, ['config', 'device', 'add', self.instance(plan), name, 'disk',
                     *[key + '=' + value for key, value in mount.items() if key != 'type']], deadline_ns=deadline_ns)
-        if query('sdk-observe', candidate=candidate).get('ready') is True:
-            return True
-        return query('sdk-prepare', candidate=candidate).get('ready') is True
+        if 'candidate-sdk' not in completed_steps:
+            if (query('sdk-observe', candidate=candidate).get('ready') is not True
+                    and query('sdk-prepare', candidate=candidate).get('ready') is not True):
+                return False
+            recorded('candidate-sdk')
+        return True
 
     @staticmethod
     def _run(argv: list[str], *, timeout_seconds: float | None = None,
