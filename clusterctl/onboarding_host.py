@@ -761,6 +761,13 @@ class HostBackend:
             raise OnboardingError('qualified_guest_environment_required')
         _, base, mounts = self._guest_paths(plan)
         code, software_args, software_mounts = self._telegram_paths(plan, base)
+        if (action in {'native-install', 'native-observe', 'probe'}
+                and self.config.telegram_code is None
+                and self._runtime_selection(plan) != (None, None)):
+            # Native preparation follows the qualified receiving helper, not
+            # the frozen context's older CLI. This does not select a new bot
+            # binary or change an explicit Telegram successor.
+            code, software_args, software_mounts = self._runtime_paths(plan, base)
         mounts.update(software_mounts)
         # Preparing/probing the native harness precedes Matrix admission and
         # needs no bot data. Keep the private mount mandatory for bot verbs.

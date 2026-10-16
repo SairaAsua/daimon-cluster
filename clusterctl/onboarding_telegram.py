@@ -492,10 +492,16 @@ def main(argv=None) -> int:
         from . import onboarding_code_successor
         code = onboarding_code_successor.selection(args.runtime_code, args.runtime_digest,
             args.code, plan['release_digest'], uid=0)
+        native_runtime = (args.action in {'native-install', 'native-observe', 'probe'}
+            and args.runtime_digest is not None
+            and code == Path('/opt/daimon-onboarding-runtime') / args.runtime_digest
+            and bool(onboarding_code_successor.sdk_parameters(code)))
         if args.runtime_digest is not None and code != Path('/opt/daimon-onboarding-telegram') / args.runtime_digest:
-            raise OnboardingError('qualified_telegram_successor_required')
-        artifact(code, uid=0)
-        binary = code / 'telegram/telecodex'
+            if not native_runtime:
+                raise OnboardingError('qualified_telegram_successor_required')
+        binary_code = args.code if native_runtime else code
+        artifact(binary_code, uid=0)
+        binary = binary_code / 'telegram/telecodex'
         home = Path('/home/agent')
         state = home / '.local/state/daimon-onboarding/telegram'
         codex_path = shutil.which('codex', path='/usr/local/bin:/usr/bin:/bin')

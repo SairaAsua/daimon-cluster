@@ -1418,3 +1418,10 @@ Restart with that same recorded map; never replace the old registrar, copy its
 private key or reconstruct holder enrollments. SDK/import-tree construction is
 ordinary preparation; use its supported preparation window before freezing the
 short owner-observation deadline. A read timeout is not an installation failure.
+
+Native-only preparation/observation uses the selected receiving helper when no
+explicit Telegram successor is configured. Its probe still verifies and uses
+the original frozen Telecodex binary, and native service ownership retains the
+base binding. A runtime helper upgrade is not a bot/listener binary upgrade.
+Keep explicit Telegram successors on their existing independent selection path;
+do not set `telegram_code` to a runtime-only artifact to obtain a newer CLI verb.

@@ -102,6 +102,34 @@ def test_native_harness_commands_do_not_require_bot_connections(tmp_path, action
     assert ('--user' in calls[0]) == (action == 'probe')
 
 
+@pytest.mark.parametrize('action', ['native-install', 'native-observe', 'probe'])
+@pytest.mark.parametrize('explicit_telegram', [False, True])
+def test_native_commands_use_receiving_helper_and_preserve_explicit_telegram(tmp_path, action, explicit_telegram):
+    config, value, _, _ = configured(tmp_path)
+    config = replace(config, runtime_code=Path('/approved/runtime'), runtime_digest='a'*64,
+        telegram_code=Path('/approved/telegram') if explicit_telegram else None,
+        telegram_digest='b'*64 if explicit_telegram else None)
+    backend = HostBackend(config)
+    backend._environment = lambda p: SimpleNamespace(state='complete')
+    base, current, telegram = Path('/guest/base'), Path('/guest/runtime'), Path('/guest/telegram')
+    backend._guest_paths = lambda p:(tmp_path, base, {})
+    backend._telegram_paths = lambda p,b:(telegram, ['--runtime-code',str(telegram)], {'telegram':{}}) if explicit_telegram else (b,[],{})
+    backend._runtime_paths = lambda p,b:(current, ['--runtime-code',str(current)], {'runtime':{}})
+    mounted, dispatched = [], []
+    backend._mounted = lambda p,m:mounted.append(m) or True
+    def dispatch(p, argv):
+        dispatched.append(argv)
+        return json.dumps(dict(plan_digest=digest(p)))
+    backend._dispatch = dispatch
+    backend._telegram_command(value, action)
+    command = dispatched[0]
+    selected = telegram if explicit_telegram else current
+    assert command[command.index('-c')+2] == str(selected)
+    assert command[command.index('--runtime-code')+1] == str(selected)
+    assert command[command.index('--code')+1] == str(base)
+    assert mounted == [{'telegram' if explicit_telegram else 'runtime':{}}]
+
+
 def test_receiving_base_keeps_original_release_without_requiring_participant_archive(tmp_path):
     from tests.test_onboarding_code_successor import fixture as code_fixture
     (tmp_path/'code-fixture').mkdir()

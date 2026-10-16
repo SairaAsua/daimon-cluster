@@ -365,3 +365,39 @@ def test_guest_native_budget_refuses_incomplete_or_invalid_bounds(timeout, expir
     from clusterctl.onboarding_telegram import native_budget
     with pytest.raises(OnboardingError, match='native_codex_preparation_expired'):
         native_budget(timeout, expiry)
+
+
+@pytest.mark.parametrize('action', ['native-install', 'native-observe', 'probe', 'prepare', 'install'])
+@pytest.mark.parametrize('qualified', [False, True])
+def test_native_runtime_cli_preserves_frozen_binary_and_rejects_bot_verbs(monkeypatch, action, qualified):
+    """Actual CLI routing: helper selection grants no bot-binary successor."""
+    import pwd
+    from types import SimpleNamespace
+    from clusterctl import onboarding_code_successor, onboarding_release, onboarding_telegram as telegram
+    value = plan()
+    base = Path('/opt/daimon-onboarding')/value['release_digest']
+    candidate = Path('/opt/daimon-onboarding-runtime')/('a'*64)
+    monkeypatch.setattr(pwd, 'getpwnam', lambda name:SimpleNamespace(pw_uid=1000,pw_gid=1000,pw_dir='/home/agent'))
+    monkeypatch.setattr(onboarding_release, 'regular', lambda *a,**k:json.dumps(value).encode())
+    monkeypatch.setattr(onboarding_release, 'verify', lambda *a,**k:dict(profile=PROFILE))
+    monkeypatch.setattr(onboarding_code_successor, 'selection', lambda *a,**k:candidate)
+    monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda *a,**k:{'matrix_commit':'b'*40} if qualified else {})
+    monkeypatch.setattr(telegram.os, 'geteuid', lambda:1000 if action=='probe' else 0)
+    monkeypatch.setattr(telegram.shutil, 'which', lambda *a,**k:'/usr/local/bin/codex')
+    binaries, units = [], []
+    monkeypatch.setattr(telegram, 'artifact', lambda path,**k:binaries.append(path))
+    monkeypatch.setattr(telegram, 'native_observation', lambda home,codex,code,**k:units.append(code) or dict(native_state='inactive'))
+    monkeypatch.setattr(telegram, 'install_native', lambda home,codex,code,**k:units.append(code))
+    probes = []
+    def run(argv, **options):
+        probes.append(argv)
+        return SimpleNamespace(returncode=0,stdout='{}')
+    monkeypatch.setattr(telegram.subprocess, 'run', run)
+    result = telegram.main([action, '--code',str(base), '--plan','/home/agent/.onboarding-input/plan.json',
+        '--runtime-code',str(candidate), '--runtime-digest','a'*64])
+    accepted = qualified and action in {'native-install','native-observe','probe'}
+    assert result == (0 if accepted else 1)
+    assert binaries == ([base] if accepted else [])
+    assert units == ([base] if accepted and action!='probe' else [])
+    assert probes == ([[str(base/'telegram/telecodex'),'--probe-native','/usr/local/bin/codex','/home/agent/Projects/being']]
+        if accepted and action=='probe' else [])
