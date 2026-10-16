@@ -19,7 +19,8 @@ from pathlib import Path
 from . import being_seed
 from .onboarding import OnboardingError, digest, private_directory
 
-METHODS = frozenset({'tribe.invite', 'tribe.membership.accept', 'relationship.event.ingest'})
+METHODS = frozenset({'tribe.invite', 'tribe.membership.accept', 'relationship.event.ingest',
+                     'relationship.snapshot'})
 PUBLICATIONS = {
     'context-preview': set(),
     'application': {'expected_application_sha256', 'specification', 'additions',
@@ -506,7 +507,12 @@ def publication_request(hosted, group_root: Path, journal: Path, value: dict, *,
 
 def relationship_request(runtime_root: Path, journal: Path, value: dict, *,
                          offline=None, deadline_ns: int | None = None) -> dict:
-    """Record or retry one native request; never return local capability material."""
+    """Record or retry one native request; never return local capability material.
+
+    A relationship snapshot is the native reducer's observation at its retained
+    verified_at_ms. Exact retry returns that observation, not fresh membership
+    or receiving readiness. A later phase needs its own approved step.
+    """
     from daimon_matrix.client import ClientConfig, LocalClient
     from daimon_matrix.local_api import MAX_CLOCK_SKEW_MS, authenticate_request, verify_response
     from daimon_matrix.messaging_config import protected_read
@@ -515,7 +521,8 @@ def relationship_request(runtime_root: Path, journal: Path, value: dict, *,
     selected = command(value)
     private_directory(runtime_root)
     bundle = being_seed._read(runtime_root / 'runtime.json', limit=being_seed.MAX_SELECTION)
-    profile = operator_capability_profile('relationships')
+    role = 'observe' if selected['method'] == 'relationship.snapshot' else 'relationships'
+    profile = operator_capability_profile(role)
     directory = runtime_root / profile['client_directory']
     config = ClientConfig.load(directory / profile['client_config_filename'],
         bytearray(protected_read(directory / profile['client_key_filename'])))
@@ -524,7 +531,7 @@ def relationship_request(runtime_root: Path, journal: Path, value: dict, *,
                     ledger=check_retained_ledger(runtime_root, journal, selected))
     if (config.runtime_id != identity['runtime_id'] or config.runtime_label != identity['runtime_label']
             or config.expected_server != identity['server']
-            or config.capability.client_id != 'client:operator:' + config.runtime_label + ':relationships'
+            or config.capability.client_id != 'client:operator:' + config.runtime_label + ':' + role
             or selected['method'] not in config.capability.methods):
         raise OnboardingError('onboarding_group_relationship_client_conflict')
     clock = (lambda: time.time_ns() // 1_000_000) if offline is None else offline.service.clock

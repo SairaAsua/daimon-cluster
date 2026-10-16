@@ -157,7 +157,7 @@ def test_owner_context_lost_durability_reply_resumes_before_native_dispatch(grou
     assert len(base.service.ledger.events()) == len(events) + 1
 
 
-def test_source_and_offline_newcomer_record_real_membership_without_running_group(group_source, tmp_path):
+def test_source_and_offline_newcomer_record_real_membership_without_running_group(group_source, tmp_path, monkeypatch):
     from daimon_matrix.relationships import MEMBERSHIP_ACCEPTANCE_SCHEMA
     source, first, _peer_authority, peer_bundle, _old = group_source
     target = Target(tmp_path / 'candidate/guest', first.plan,
@@ -165,6 +165,14 @@ def test_source_and_offline_newcomer_record_real_membership_without_running_grou
     before = {root: {name: (root / name).read_bytes() for name in ('runtime.json', 'custody.json')}
               for root in (source.root, target.package / 'runtime')}
     request = invitation(source, peer_bundle)
+    tribe_ref = request['params']['payload']['tribe_ref']
+    peer_ref = peer_bundle['manifest']['being_ref']
+    snapshot = dict(operation_id=request['operation_id'], step='membership-before',
+        method='relationship.snapshot', params=dict(tribe_ref=tribe_ref, at_ms=None))
+    initial = source.group_relationship(snapshot, offline=True, authority_closure=closure(peer_bundle))
+    assert initial['status'] == 'recorded'
+    assert initial['result']['tribe_ref'] == tribe_ref
+    assert not any(row['principal_id'] == peer_ref for row in initial['result']['members'])
     # The actual founder uses the Target/guest profile here: hosting role does
     # not choose who may invite. Native social authority chooses that role.
     invited = first.group_relationship(request, authority_closure=closure(peer_bundle))
@@ -178,6 +186,9 @@ def test_source_and_offline_newcomer_record_real_membership_without_running_grou
         ingested = target.group_relationship(dict(operation_id=request['operation_id'], step=step,
             method='relationship.event.ingest', params=dict(event=value)), authority_closure=authorities)
         assert ingested['status'] == 'recorded'
+    invited_view = target.group_relationship(snapshot, authority_closure=authorities)
+    assert invited_view['status'] == 'recorded'
+    assert not any(row['principal_id'] == peer_ref for row in invited_view['result']['members'])
     acceptance = dict(operation_id=request['operation_id'], step='accept', method='tribe.membership.accept',
         params=dict(payload=dict(schema=MEMBERSHIP_ACCEPTANCE_SCHEMA,
             tribe_ref=request['params']['payload']['tribe_ref'], founder_epoch=0,
@@ -196,6 +207,37 @@ def test_source_and_offline_newcomer_record_real_membership_without_running_grou
         card_verifier=hosted.service.relationships.card_verifier)
     tribe = view.tribes[request['params']['payload']['tribe_ref']]
     assert tribe['memberships'][peer_bundle['manifest']['being_ref']]['state'] == 'active'
+    # Native intake being recorded is not membership proof. Query the actual
+    # reducer through the same authenticated route on both owner profiles.
+    # The before-step remains a historical observation after acceptance.
+    assert source.group_relationship(snapshot, offline=True, authority_closure=closure(peer_bundle)) == initial
+    assert target.group_relationship(snapshot, authority_closure=authorities) == invited_view
+    snapshot = {**snapshot, 'step': 'membership-after'}
+    from daimon_matrix.service import HostedWeave
+    handle = HostedWeave.handle
+    events = hosted.service.ledger.events()
+
+    def lost_snapshot_response(self, value):
+        result = handle(self, value)
+        if value['method'] == 'relationship.snapshot':
+            raise OSError('synthetic lost snapshot response')
+        return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(HostedWeave, 'handle', lost_snapshot_response)
+        with pytest.raises(OSError, match='lost snapshot response'):
+            source.group_relationship(snapshot, offline=True, authority_closure=closure(peer_bundle))
+    current = source.group_relationship(snapshot, offline=True, authority_closure=closure(peer_bundle))
+    newcomer = target.group_relationship(snapshot, authority_closure=authorities)
+    for result in (current, newcomer):
+        assert result['status'] == 'recorded'
+        assert result['result']['tribe_ref'] == tribe_ref
+        member = next(row for row in result['result']['members'] if row['principal_id'] == peer_ref)
+        assert member['state'] == 'active'
+        assert member['membership_ref'] == accepted['result']['event']['event_id']
+        assert result['result']['verified_at_ms'] >= initial['result']['verified_at_ms']
+    assert source.group_relationship(snapshot, offline=True, authority_closure=closure(peer_bundle)) == current
+    assert hosted.service.ledger.events() == events
     assert not (target.package / 'runtime/matrix.sock').exists()
     assert not (target.root / 'tribe/selection.json').exists()
     for root, original in before.items():
