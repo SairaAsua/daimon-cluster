@@ -4,7 +4,7 @@ import copy
 import pytest
 
 from daimon_matrix.messaging_config import config_digest
-from tests.integration.portal_admission_baseline import addressed, publish
+from tests.integration.portal_admission_baseline import addressed, publish, select_original_profile
 from tests import test_onboarding_group_authorities as group_fixtures
 
 @pytest.fixture
@@ -81,3 +81,34 @@ def test_fixture_route_map_cannot_change_roster_ports_or_escape_bridge(group_sou
     wrong['foreign'] = wrong.pop(local)
     with pytest.raises(ValueError, match='original baseline roster'):
         addressed(before, wrong, local_body=local)
+
+
+def test_baseline_preserves_original_loader_profile_and_refuses_later_selector(group_source):
+    from clusterctl import being_seed
+    from clusterctl.onboarding import digest
+    from clusterctl.onboarding_peer import publish_group_selection
+    from daimon_matrix.messaging_config import create_binding
+    hosted, directory, before, endpoints = setup(group_source)
+    group = directory.parent
+    original = being_seed._read(group/'selection.json')
+    operation = group/'qualification'/'fixture-operation'
+    publish(hosted, directory, endpoints=endpoints, operation=operation,
+        expected_application_sha256=config_digest(before))
+    peer = group_source[3]
+    publish_group_selection(hosted, group, operation_id='61132738-f49a-4c70-a5cf-c3afbeddb4c4',
+        expected_selection_sha256=digest(original), authority_history={peer['manifest']['being_ref']:peer['authority_history']})
+    prepared = being_seed._read(group/'selection.json')
+    assert prepared['document']['schema'].endswith('/v2')
+    options = dict(original=original,prepared=prepared,operation=operation)
+    result = select_original_profile(hosted,group,**options)
+    assert select_original_profile(hosted,group,**options) == result
+    selected = being_seed._read(group/'selection.json')
+    assert selected['document']['schema'].endswith('/v1')
+    assert set(selected['document']) == set(original['document'])
+    winner = copy.deepcopy(selected['document'])
+    winner['socket'] = 'later-owner.sock'
+    packet = dict(document=winner,binding=create_binding(hosted,winner))
+    being_seed._write(group/'selection.json',packet)
+    with pytest.raises(ValueError,match='later fixture selector'):
+        select_original_profile(hosted,group,**options)
+    assert being_seed._read(group/'selection.json') == packet

@@ -1453,8 +1453,13 @@ The retained initial application used loopback across separate namespaces.
 baseline: exact bridge addresses, native signed metadata generation, unchanged
 client/stores/keys and retained predecessor. It requires the offline owner writer,
 publication lock and exact original intent; retry preserves a later winner. Reissue
-the unchanged visibility disclosure and use the existing signed selection CAS,
-then capture actual new baseline load/context before admission. This test setup
+the unchanged visibility disclosure. Addressing the baseline must keep its
+original v1 selector readable by the old loader; the fixture's signed CAS accepts
+only the retained original, prepared v2 packet or exact intended v1 packet and
+preserves later winners. Retain all intermediate metadata. The actual admission
+still uses the normal v2 publisher after old senders quiesce and qualified
+replacement loaders are selected. Capture fresh baseline load/context before
+admission. This test setup
 does not qualify production route updates or revive old pending transmissions.
 The offline closed owner loader retains its existing `catalog_mode='migrate'`:
 it has no installed visibility proof key and cannot authenticate those catalogs

@@ -124,3 +124,48 @@ def publish(hosted, directory: Path, *, endpoints: dict, operation: Path,
             generation=generation, receiving_readiness='unobserved', production_effects=0)
     finally:
         os.close(descriptor)
+
+
+def select_original_profile(hosted, group: Path, *, original: dict, prepared: dict,
+                            operation: Path) -> dict:
+    """Keep this baseline readable by its original v1 Cluster loader.
+
+    The new admission publisher chooses v2 only after the old senders stop.
+    Initial fixture addressing is not that admission. Preserve the prepared v2
+    packet as history rather than silently upgrading the old baseline loader.
+    """
+    from daimon_matrix import operator_messaging as native
+    from daimon_matrix.messaging_config import create_binding, read_publication, verify_binding
+    from clusterctl.onboarding_peer import _approved_group, _validate_group_packet
+    if original['document']['schema'] != 'cluster-onboarding-group-selection/v1':
+        raise ValueError('only the original synthetic v1 baseline is supported')
+    if operation.parent.parent != group:
+        raise ValueError('keep fixture recovery beside the original group')
+    with being_seed._locked(group):
+        for packet in (original, prepared):
+            verify_binding(hosted, packet['document'], packet['binding'])
+        application, _ = read_publication(hosted, group/'application')
+        document = {**original['document'], 'application_sha256': digest(application)}
+        candidate = dict(document=document, binding=create_binding(hosted, document))
+        _validate_group_packet(group,candidate,lambda value,binding:verify_binding(hosted,value,binding))
+        intent = dict(original=original, prepared=prepared, candidate=candidate)
+        path = operation/'original-profile-selection.json'
+        if path.exists():
+            if being_seed._read(path, limit=being_seed.MAX_SELECTION) != intent:
+                raise ValueError('preserve the original fixture selection intent')
+        else:
+            being_seed._write(path, intent, limit=being_seed.MAX_SELECTION)
+        for parent in (operation, operation.parent, group):
+            native._sync(parent)
+        selected = group/'selection.json'
+        current = being_seed._read(selected, limit=being_seed.MAX_SELECTION)
+        if current not in (original, prepared, candidate):
+            raise ValueError('preserve a later fixture selector')
+        if current != candidate:
+            being_seed._write(selected, candidate, limit=being_seed.MAX_SELECTION)
+        else:
+            native._sync(group)
+        actual = _approved_group(group, lambda value, binding: verify_binding(hosted, value, binding))
+        if actual != document:
+            raise ValueError('original fixture profile was not observed')
+        return dict(selection_sha256=digest(candidate), receiving_readiness='unobserved')
