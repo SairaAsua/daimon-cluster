@@ -1177,9 +1177,29 @@ The schema phase requires the approved post-controller owner-context digest.
 Capability publication exchanges the runtime tree and can change its bundle hash
 and ledger inode. Never silently replace a pre-controller social-context pin,
 rerun capability publication after schema changes, or restore a database to make
-a retry work. The explicit pre/post-controller context join is still unfinished
-in the complete automatic caller; a mismatch refuses before migration or old
-member interruption. Source preparation is not installed admission acceptance.
+a retry work. The initial owner request now carries an optional closed
+`group_context` binding the social operation, entrant owner name, authority
+closure and original approved context. Old requests remain unchanged. The owner
+durably retains the original preview under its native writer before staging.
+Retries with the original bundle selected recheck the actual context, including
+the physical ledger identity; identical bytes on another inode cannot reuse the
+cached preview.
+
+After native controller publication, the owner re-acquires its writer, verifies
+the selected inventory against the retained native result and derives the
+successor context. A separate `cluster-initial-owner-context-transition/v1`
+record binds both previews and the exact controller request/result hashes. It
+lives outside the exchanged runtime and leaves the native publication unchanged,
+so a lost reply can recover the same exchange. Preserve mode keeps the same
+context without publishing another capability. Conflicting previously frozen
+contexts are refused, never rewritten.
+
+The coordinator retains this transition before schema preparation. Social,
+schema and publication phases resolve only the matching entrant's derived pin;
+the immutable social recipe and old-member pins remain unchanged. A malformed
+transition refuses before dependent owner effects. This source join does not
+enable the unfinished automatic lifecycle finisher or establish installed
+admission acceptance.
 
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry

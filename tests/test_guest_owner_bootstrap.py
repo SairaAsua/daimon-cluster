@@ -153,13 +153,19 @@ def test_schema_phase_uses_post_controller_context_and_does_not_republish_it(fix
     from daimon_matrix import operator_communication_migration as migration
     target, request, _group, _ = fixture
     initial = initial_request(target, request)
-    owner = GuestOwnerBootstrap(target, initial)
     identifier = str(uuid.uuid4())
     preview_request = dict(operation_id=identifier, step='context', action='context-preview', params={})
     before = target.group_publication(preview_request, authority_closure={})
+    initial['group_context'] = dict(operation_id=identifier, owner_name=target.plan['name'], authority_closure={},
+        expected_context_sha256=before['owner_context_sha256'])
+    owner = GuestOwnerBootstrap(target, initial)
     ready = owner.execute('stage', deadline_ns=deadline())
-    owner.execute('publish', deadline_ns=deadline(), ready_sha256=ready['ready_sha256'])
+    published = owner.execute('publish', deadline_ns=deadline(), ready_sha256=ready['ready_sha256'])
     after = target.group_publication(preview_request, authority_closure={})
+    transition = published['owner_context_transition']
+    assert transition['before'] == before and transition['after'] == after
+    assert transition['controller_request_sha256'] == digest(initial)
+    assert transition['controller_result_sha256'] == digest({k:v for k,v in published.items() if k != 'owner_context_transition'})
     assert before['owner_context_sha256'] != after['owner_context_sha256']
     request = dict(operation_id=identifier, step='communication-prepare', action='communication-prepare',
         params=dict(expected_plan_sha256=after['communication_plan']['plan_sha256'],
@@ -177,6 +183,132 @@ def test_schema_phase_uses_post_controller_context_and_does_not_republish_it(fix
     assert (ledger.stat().st_dev, ledger.stat().st_ino) == identity
     assert (owner.records/'capability_published.json').read_bytes() == publication
     assert all((owner.runtime/name).read_bytes() == raw for name,raw in native.items())
+
+
+@pytest.mark.parametrize('boundary', ['before-stage', 'after-exchange', 'after-context'])
+def test_initial_context_transition_recovers_original_before_after_lost_replies(fixture, monkeypatch, boundary):
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    target, request, _, _ = fixture
+    request = initial_request(target, request)
+    social = str(uuid.uuid4())
+    preview = target.group_publication(dict(operation_id=social, step='context', action='context-preview', params={}),
+        authority_closure={})
+    request['group_context'] = dict(operation_id=social, owner_name=target.plan['name'], authority_closure={},
+        expected_context_sha256=preview['owner_context_sha256'])
+    owner = GuestOwnerBootstrap(target, request)
+    record, publish = owner._record, upgrade.publish
+    def lost_record(name, value):
+        result = record(name, value)
+        if (boundary == 'before-stage' and name == 'group_context_before'
+                or boundary == 'after-context' and name == 'group_context_transition'):
+            raise OSError('synthetic lost context boundary')
+        return result
+    def lost_publish(**kwargs):
+        publish(**kwargs)
+        raise OSError('synthetic lost context boundary')
+    if boundary == 'before-stage':
+        with monkeypatch.context() as fault:
+            fault.setattr(owner, '_record', lost_record)
+            with pytest.raises(OSError, match='context boundary'):
+                owner.execute('stage', deadline_ns=deadline())
+        assert not owner.transaction.exists()
+    ready = owner.execute('stage', deadline_ns=deadline())
+    before = (owner.records/'group_context_before.json').read_bytes()
+    if boundary != 'before-stage':
+        with monkeypatch.context() as fault:
+            fault.setattr(upgrade, 'publish', lost_publish if boundary == 'after-exchange' else publish)
+            fault.setattr(owner, '_record', lost_record)
+            with pytest.raises(OSError, match='context boundary'):
+                owner.execute('publish', deadline_ns=deadline(), ready_sha256=ready['ready_sha256'])
+    result = GuestOwnerBootstrap(target, request).execute('publish', deadline_ns=deadline(),
+        ready_sha256=ready['ready_sha256'])
+    assert (owner.records/'group_context_before.json').read_bytes() == before
+    assert result['owner_context_transition']['before'] == preview
+    assert result['owner_context_transition']['after']['runtime_bundle_sha256'] == result['runtime_sha256']
+    assert result['owner_context_transition']['after']['owner_context_sha256'] != preview['owner_context_sha256']
+    ciphertext = (owner.runtime/'custody.json').read_bytes()
+    assert GuestOwnerBootstrap(target, request).execute('publish', deadline_ns=deadline(),
+        ready_sha256=ready['ready_sha256']) == result
+    assert (owner.runtime/'custody.json').read_bytes() == ciphertext
+
+
+def test_cached_initial_context_refuses_identical_ledger_replacement_before_stage(fixture, monkeypatch):
+    target, request, _, _ = fixture
+    request = initial_request(target, request)
+    social = str(uuid.uuid4())
+    preview = target.group_publication(dict(operation_id=social, step='context', action='context-preview', params={}),
+        authority_closure={})
+    request['group_context'] = dict(operation_id=social, owner_name=target.plan['name'], authority_closure={},
+        expected_context_sha256=preview['owner_context_sha256'])
+    owner = GuestOwnerBootstrap(target, request)
+    record = owner._record
+    def lost_record(name, value):
+        result = record(name, value)
+        if name == 'group_context_before':
+            raise OSError('synthetic lost original context reply')
+        return result
+    with monkeypatch.context() as fault:
+        fault.setattr(owner, '_record', lost_record)
+        with pytest.raises(OSError, match='lost original context'):
+            owner.execute('stage', deadline_ns=deadline())
+    before = (owner.records/'group_context_before.json').read_bytes()
+    native = {name:(owner.runtime/name).read_bytes() for name in ('runtime.json', 'custody.json')}
+    ledger = owner.runtime/target.document_bundle()['ledger']
+    original = owner.records/'original-ledger.sqlite'
+    with target._runtime_writer():
+        ledger.rename(original)
+        ledger.write_bytes(original.read_bytes())
+        ledger.chmod(0o600)
+    assert ledger.stat().st_ino != original.stat().st_ino
+    assert ledger.read_bytes() == original.read_bytes()
+    with pytest.raises(OnboardingError, match='context_changed'):
+        GuestOwnerBootstrap(target, request).execute('stage', deadline_ns=deadline())
+    assert not owner.transaction.exists()
+    assert (owner.records/'group_context_before.json').read_bytes() == before
+    assert all((owner.runtime/name).read_bytes() == raw for name,raw in native.items())
+    assert ledger.read_bytes() == original.read_bytes()
+
+
+@pytest.mark.parametrize('mode', ['wrong-pin', 'already-frozen'])
+def test_initial_context_conflict_refuses_before_native_authority_effect(fixture, mode):
+    from clusterctl.onboarding_group_admission import owner_authorities
+    target, request, _, _ = fixture
+    request = initial_request(target, request)
+    social = str(uuid.uuid4())
+    preview = target.group_publication(dict(operation_id=social, step='context', action='context-preview', params={}),
+        authority_closure={})
+    request['group_context'] = dict(operation_id=social, owner_name=target.plan['name'], authority_closure={},
+        expected_context_sha256='0'*64 if mode == 'wrong-pin' else preview['owner_context_sha256'])
+    if mode == 'already-frozen':
+        with target._runtime_writer():
+            owner_authorities(target.package/'runtime', target.root/'tribe', target.root/'group-admission',
+                social, {}, expected_context_sha256=preview['owner_context_sha256'])
+    owner = GuestOwnerBootstrap(target, request)
+    before = {name:(owner.runtime/name).read_bytes() for name in ('runtime.json', 'custody.json')}
+    with pytest.raises(OnboardingError, match='context_changed|context_already_frozen'):
+        owner.execute('stage', deadline_ns=deadline())
+    assert not owner.transaction.exists()
+    assert all((owner.runtime/name).read_bytes() == raw for name,raw in before.items())
+
+
+def test_initial_context_preservation_derives_same_pin_without_new_authority(fixture):
+    target, request, _, _ = fixture
+    first = GuestOwnerBootstrap(target, initial_request(target, request))
+    ready = first.execute('stage', deadline_ns=deadline())
+    first.execute('publish', deadline_ns=deadline(), ready_sha256=ready['ready_sha256'])
+    request = initial_request(target, {**request, 'operation_id':str(uuid.uuid4())})
+    assert request['mode'] == 'preserve'
+    social = str(uuid.uuid4())
+    preview = target.group_publication(dict(operation_id=social, step='context', action='context-preview', params={}),
+        authority_closure={})
+    request['group_context'] = dict(operation_id=social, owner_name=target.plan['name'], authority_closure={},
+        expected_context_sha256=preview['owner_context_sha256'])
+    owner = GuestOwnerBootstrap(target, request)
+    before = {name:(owner.runtime/name).read_bytes() for name in ('runtime.json', 'custody.json')}
+    result = owner.execute('stage', deadline_ns=deadline())
+    assert result['owner_context_transition']['before'] == result['owner_context_transition']['after'] == preview
+    assert owner.execute('stage', deadline_ns=deadline()) == result
+    assert all((owner.runtime/name).read_bytes() == raw for name,raw in before.items())
 
 
 @pytest.mark.parametrize('committed', [False, True])

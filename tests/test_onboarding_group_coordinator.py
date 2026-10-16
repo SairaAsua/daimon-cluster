@@ -131,6 +131,17 @@ def fixture(tmp_path, monkeypatch):
         body['publications'] = 1  # Explicit native-owner seam retains exact publication.
         result = dict(schema='cluster-guest-owner-bootstrap-publication/v1', operation_id=request['operation_id'],
             ready_sha256='3'*64, runtime_sha256='4'*64, counter_after=1, receiving_readiness='unobserved')
+        if 'group_context' in request:
+            context = request['group_context']
+            def preview(pin, runtime):
+                return dict(schema='cluster-group-owner-context-preview/v1', operation_id=context['operation_id'],
+                    owner_context_sha256=pin, runtime_bundle_sha256=runtime, predecessor_selection_sha256=None,
+                    receiving_readiness='unobserved')
+            transition = dict(schema='cluster-initial-owner-context-transition/v1', controller_operation_id=request['operation_id'],
+                controller_request_sha256=digest(request), controller_result_sha256=digest(result),
+                before=preview(context['expected_context_sha256'], request['runtime_sha256']),
+                after=preview('6'*64, result['runtime_sha256']))
+            result['owner_context_transition'] = transition
         if body['publish_lost']:
             body['publish_lost'] = False
             raise OSError('synthetic lost controller publication reply')
@@ -171,11 +182,11 @@ def test_worker_prepares_and_binds_every_old_child_without_stopping_members(fixt
     communication, schema_calls = {}, []
     def prepare_communication(request, **options):
         assert f.body['publications'] == 1, 'controller tree publication must precede schema preparation'
-        assert options['expected_context_sha256'] == social['owner_contexts']['newcomer']
+        assert options['expected_context_sha256'] == '6'*64
         assert not any(owner.effects for owner in f.owners.values())
         schema_calls.append(copy.deepcopy(request))
         if request['action'] == 'context-preview':
-            return dict(owner_context_sha256=social['owner_contexts']['newcomer'],
+            return dict(owner_context_sha256='6'*64,
                 predecessor_selection_sha256=None, communication_plan=dict(target_version=4, plan_sha256='8'*64))
         assert request['params']['expected_plan_sha256'] == '8'*64
         assert request['params']['expires_at_ms'] == transition['cohort_admission']['activation']['expires_at_ms']
@@ -227,6 +238,20 @@ def test_worker_prepares_and_binds_every_old_child_without_stopping_members(fixt
         assert sum(call['action'] == 'context-preview' for call in schema_calls) == 1
     assert journal.get(row['operation_id'])['state'] == 'planned'
     assert all(owner.effects == 0 for owner in f.owners.values())
+    from clusterctl.onboarding_group_admission import admission_owner_contexts
+    current = journal.get(row['operation_id'])
+    assert admission_owner_contexts(current, social) == {**social['owner_contexts'], 'newcomer':'6'*64}
+    assert current['intended_transition']['portal_admission']['social'] == social
+    for mutate in (
+        lambda value: value['controller_intent'].update(plan_digest='0'*64),
+        lambda value: value['controller_intent']['group_context'].update(owner_name=old[0]),
+        lambda value: value['controller_prepared']['owner_context_transition'].update(controller_result_sha256='0'*64),
+        lambda value: value['controller_prepared']['owner_context_transition']['after'].update(runtime_bundle_sha256='0'*64),
+    ):
+        forged = copy.deepcopy(current)
+        mutate(forged['runtime_observation']['portal_admission'])
+        with pytest.raises(OnboardingError, match='context_transition_required'):
+            admission_owner_contexts(forged, social)
 
 
 def test_worker_prepares_native_outside_job_lock_and_cannot_complete_matrix(fixture):

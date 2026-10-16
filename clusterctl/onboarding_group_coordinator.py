@@ -329,7 +329,8 @@ class GroupCoordinator:
         if time.monotonic_ns() >= deadline_ns:
             raise OnboardingError('receiving_host_deadline_expired')
         social = caller['social']
-        context = social['owner_contexts'][plan['name']]
+        from .onboarding_group_admission import admission_owner_contexts
+        context = admission_owner_contexts(journal.get(row['operation_id']), social)[plan['name']]
         authorities = {ref: value for ref, value in social['authority_closure'].items()
             if ref != admission['receivers'][plan['name']]['being_ref']}
         request = retained().get('communication_intent')
@@ -493,6 +494,12 @@ class GroupCoordinator:
                     **{key: frozen[key] for key in ('plan_digest', 'genesis_digest', 'code_digest',
                         'runtime_sha256', 'group_sha256', 'predecessor', 'mode', 'preservation')},
                     expires_at_ms=expires)
+                caller = row['intended_transition']['portal_admission']
+                if caller['schema'] == SOCIAL_CALLER_SCHEMA:
+                    social = caller['social']
+                    request['group_context'] = dict(operation_id=social['operation_id'], owner_name=plan['name'],
+                        authority_closure={ref:value for ref,value in social['authority_closure'].items()
+                            if ref != approved['being_ref']}, expected_context_sha256=social['owner_contexts'][plan['name']])
                 self._retain(journal, row, 'controller_intent', request)
             staged = retained().get('controller_stage')
             if staged is None:

@@ -1440,7 +1440,7 @@ class GuestOwnerBootstrap:
             if initial else isinstance(predecessor, dict) and set(predecessor) == {'process', 'admission_parent'})
         fields = {'schema', 'operation_id', 'plan_digest', 'genesis_digest', 'code_digest',
                   'runtime_sha256', 'group_sha256', 'predecessor', 'expires_at_ms'}
-        if (os.geteuid() != 1000 or set(request) not in (fields, fields | {'mode', 'preservation'})
+        if (os.geteuid() != 1000 or set(request) - {'group_context'} not in (fields, fields | {'mode', 'preservation'})
                 or request.get('mode', 'issue') not in {'issue', 'preserve', 'renew'}
                 or (request.get('mode', 'issue') in {'preserve', 'renew'}) != isinstance(request.get('preservation'), dict)
                 or request.get('mode') in {'preserve', 'renew'} and (
@@ -1456,6 +1456,19 @@ class GuestOwnerBootstrap:
                 or request['code_digest'] != target.code_digest
                 or not valid_predecessor):
             raise OnboardingError('receiving_guest_bootstrap_request_required')
+        context = request.get('group_context')
+        if 'group_context' in request:
+            try:
+                if (not initial or not isinstance(context, dict)
+                        or set(context) != {'operation_id', 'owner_name', 'authority_closure', 'expected_context_sha256'}
+                        or str(uuid.UUID(context['operation_id'])) != context['operation_id']
+                        or context['owner_name'] != target.plan['name']
+                        or not isinstance(context['authority_closure'], dict)
+                        or not isinstance(context['expected_context_sha256'], str)
+                        or re.fullmatch('[0-9a-f]{64}', context['expected_context_sha256']) is None):
+                    raise ValueError
+            except (KeyError, TypeError, ValueError, AttributeError):
+                raise OnboardingError('receiving_guest_bootstrap_context_required') from None
         if not initial:
             child = validate_process(request['predecessor']['process'])
             parent = validate_process(request['predecessor']['admission_parent'])
@@ -1477,6 +1490,83 @@ class GuestOwnerBootstrap:
     def _observations(self) -> dict:
         return {path.stem: json.loads(onboarding_release.regular(path, uid=1000))
                 for path in self.records.glob('*.json')}
+
+    def _group_context_before(self, *, deadline_ns: int) -> dict | None:
+        """Retain/check the approved predecessor before native tree exchange."""
+        from .onboarding_group_admission import preview_owner_context
+        from .onboarding_service import GuestServiceBootstrap
+        context = self.request.get('group_context')
+        if context is None:
+            return None
+        before = self._observations().get('group_context_before')
+        with self.target._runtime_writer():
+            original = digest(self.target.document_bundle()) == self.request['runtime_sha256']
+            if original:
+                frozen = self.target.root/'group-admission'/context['operation_id']/'owner/context.json'
+                if self.request.get('mode') != 'preserve' and frozen.exists():
+                    raise OnboardingError('receiving_guest_bootstrap_context_already_frozen')
+                current = preview_owner_context(self.runtime, self.target.root/'tribe',
+                    context['operation_id'], context['authority_closure'], deadline_ns=deadline_ns)
+                if (current['owner_context_sha256'] != context['expected_context_sha256']
+                        or current['runtime_bundle_sha256'] != self.request['runtime_sha256']
+                        or current['predecessor_selection_sha256'] is not None):
+                    raise OnboardingError('receiving_guest_bootstrap_context_changed')
+                if before is None:
+                    before = current
+            if (not isinstance(before, dict)
+                    or before.get('schema') != 'cluster-group-owner-context-preview/v1'
+                    or before.get('operation_id') != context['operation_id']
+                    or before.get('owner_context_sha256') != context['expected_context_sha256']
+                    or before.get('runtime_bundle_sha256') != self.request['runtime_sha256']
+                    or before.get('predecessor_selection_sha256') is not None):
+                raise OnboardingError('receiving_guest_bootstrap_context_changed')
+            # Re-sync original evidence without replacing its historical plan.
+            # A cached-before retry still checks the currently selected original
+            # inode/context; only a verified successor uses historical-before.
+            self._record('group_context_before', before)
+        GuestServiceBootstrap._budget(deadline_ns)
+        return before
+
+    def _group_context_transition(self, upgrade, result: dict, *, deadline_ns: int) -> dict:
+        """Derive the selected context under the caller's actual native writer.
+
+        This does not wrap native stage/publish locks or change their selected
+        tree. All context evidence is outside that tree, preserving exact retry.
+        """
+        from .onboarding_group_admission import owner_authorities, preview_owner_context
+        from .onboarding_service import GuestServiceBootstrap
+        context = self.request.get('group_context')
+        if context is None:
+            return result
+        before = self._observations().get('group_context_before')
+        if not isinstance(before, dict) or before.get('owner_context_sha256') != context['expected_context_sha256']:
+            raise OnboardingError('receiving_guest_bootstrap_context_changed')
+        GuestServiceBootstrap._budget(deadline_ns)
+        if self.request.get('mode') == 'preserve':
+            selected = result['inventory_sha256']
+        else:
+            raw = onboarding_release.regular(self.transaction/'ready.json', uid=1000)
+            ready = json.loads(raw)
+            if (hashlib.sha256(raw).hexdigest() != result['ready_sha256']
+                    or ready['schema'] != 'dm.operator.capability-upgrade/v1'
+                    or ready['source'] != str(self.runtime)
+                    or ready['transaction'] != str(self.transaction)):
+                raise OnboardingError('receiving_guest_bootstrap_context_changed')
+            selected = ready['successor_sha256']
+        if (upgrade.inventory_digest(self.runtime) != selected
+                or digest(self.target.document_bundle()) != result['runtime_sha256']):
+            raise OnboardingError('receiving_guest_bootstrap_context_changed')
+        GuestServiceBootstrap._budget(deadline_ns)
+        owner_authorities(self.runtime, self.target.root/'tribe', self.target.root/'group-admission',
+            context['operation_id'], context['authority_closure'])
+        after = preview_owner_context(self.runtime, self.target.root/'tribe', context['operation_id'],
+            context['authority_closure'], deadline_ns=deadline_ns)
+        transition = dict(schema='cluster-initial-owner-context-transition/v1',
+            controller_operation_id=self.operation_id, controller_request_sha256=digest(self.request),
+            controller_result_sha256=digest(result), before=before, after=after)
+        self._record('group_context_transition', transition)
+        GuestServiceBootstrap._budget(deadline_ns)
+        return {**result, 'owner_context_transition': transition}
 
     def _exits(self) -> None:
         if self.initial:
@@ -1586,6 +1676,7 @@ class GuestOwnerBootstrap:
             self._record('request', self.request)
             self._exits()
             self._group()
+            self._group_context_before(deadline_ns=deadline_ns)
             if self.request.get('mode', 'issue') == 'preserve':
                 if action != 'stage':
                     raise OnboardingError('receiving_preservation_has_no_publication')
@@ -1602,7 +1693,7 @@ class GuestOwnerBootstrap:
                         preservation_authorization(self.request['preservation'], self.request['expires_at_ms'])
                     self._record('owner_preserved', result)
                     GuestServiceBootstrap._budget(deadline_ns)
-                    return result
+                    return self._group_context_transition(upgrade, result, deadline_ns=deadline_ns)
             with self.target._runtime_writer():
                 # The exact parent/child exits and native writer establish safe
                 # cleanup of ephemeral runtime sockets, never private history.
@@ -1631,7 +1722,10 @@ class GuestOwnerBootstrap:
                 counter_after=publication['counter_after'], receiving_readiness='unobserved')
             self._record('capability_published', result)
             GuestServiceBootstrap._budget(deadline_ns)
-            return result
+            if 'group_context' not in self.request:
+                return result
+            with self.target._runtime_writer():
+                return self._group_context_transition(upgrade, result, deadline_ns=deadline_ns)
 
 
 class SourceBootstrapController:

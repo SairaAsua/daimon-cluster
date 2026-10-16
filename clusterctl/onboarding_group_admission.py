@@ -115,6 +115,62 @@ def membership_recipe(value: dict, admission: dict, senders: list[dict]) -> dict
     return copy.deepcopy(value)
 
 
+def admission_owner_contexts(row: dict, social: dict) -> dict:
+    """Resolve only the entrant's proven initial-controller context transition.
+
+    The immutable social recipe is unchanged. Native owner publication binds
+    the exact predecessor, selected tree and durable successor context.
+    """
+    contexts = copy.deepcopy(social['owner_contexts'])
+    portal = (row['runtime_observation'] or {}).get('portal_admission', {})
+    request = portal.get('controller_intent', {})
+    if 'group_context' not in request:
+        return contexts
+    try:
+        context = request['group_context']
+        name = context['owner_name']
+        receivers = row['intended_transition']['cohort_admission']['receivers']
+        result = portal['controller_prepared']
+        transition = result['owner_context_transition']
+        before, after = transition['before'], transition['after']
+        base = {key:value for key,value in result.items() if key != 'owner_context_transition'}
+        preserve = request.get('mode') == 'preserve'
+        if (name not in receivers or name in {item['name'] for item in row['expected_precondition']['senders']}
+                or receivers[name]['being_ref'] != row['intended_transition']['cohort_admission']['entrant']['being_ref']
+                or request.get('schema') != 'cluster-guest-owner-initial/v1'
+                or request.get('plan_digest') != row['intended_transition']['portal_admission']['plan_digest']
+                or context != dict(operation_id=social['operation_id'], owner_name=name,
+                    authority_closure={ref:value for ref,value in social['authority_closure'].items()
+                        if ref != receivers[name]['being_ref']}, expected_context_sha256=contexts[name])
+                or set(transition) != {'schema', 'controller_operation_id', 'controller_request_sha256',
+                    'controller_result_sha256', 'before', 'after'}
+                or transition['schema'] != 'cluster-initial-owner-context-transition/v1'
+                or transition['controller_operation_id'] != request['operation_id']
+                or transition['controller_request_sha256'] != digest(request)
+                or transition['controller_result_sha256'] != digest(base)
+                or base.get('operation_id') != request['operation_id']
+                or base.get('schema') != ('cluster-receiving-owner-preserved/v1' if preserve
+                    else 'cluster-guest-owner-bootstrap-publication/v1')
+                or base.get('receiving_readiness') != 'unobserved'
+                or any(value.get('schema') != 'cluster-group-owner-context-preview/v1'
+                    or value.get('operation_id') != social['operation_id']
+                    or value.get('predecessor_selection_sha256') is not None
+                    or not isinstance(value.get('owner_context_sha256'), str)
+                    or re.fullmatch('[0-9a-f]{64}', value['owner_context_sha256']) is None
+                    for value in (before, after))
+                or before['owner_context_sha256'] != contexts[name]
+                or before['runtime_bundle_sha256'] != request['runtime_sha256']
+                or after['runtime_bundle_sha256'] != base['runtime_sha256']
+                or preserve and (before['owner_context_sha256'] != after['owner_context_sha256']
+                    or base.get('request_sha256') != digest(request))
+                or not preserve and base.get('ready_sha256') != portal['controller_stage'].get('ready_sha256')):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise OnboardingError('onboarding_group_context_transition_required') from None
+    contexts[name] = after['owner_context_sha256']
+    return contexts
+
+
 def admit_membership(cohort, *, deadline_ns: int) -> dict:
     """Resume the fixed native social phase; never publish or enable a group.
 
@@ -157,6 +213,7 @@ def admit_membership(cohort, *, deadline_ns: int) -> dict:
                 return copy.deepcopy(result)
         for owner in cohort.owners.values():
             scope.enter_context(cohort._owner_deadline(owner, deadline_ns))
+        contexts = admission_owner_contexts(row, recipe)
 
         def barrier():
             budget()
@@ -191,7 +248,7 @@ def admit_membership(cohort, *, deadline_ns: int) -> dict:
                 barrier()
                 owner = cohort.owners[name]
                 options = dict(authority_closure={ref: item for ref, item in recipe['authority_closure'].items()
-                    if ref != receivers[name]['being_ref']}, expected_context_sha256=recipe['owner_contexts'][name])
+                    if ref != receivers[name]['being_ref']}, expected_context_sha256=contexts[name])
                 if receivers[name]['recipe']['profile'] == 'source':
                     options['offline'] = True
                 if entry['command']['method'] in {'tribe.invite', 'tribe.membership.accept'}:
@@ -464,6 +521,7 @@ def publish_admission_group(cohort, *, deadline_ns: int) -> dict:
                 return copy.deepcopy(previous['result'])
         for owner in cohort.owners.values():
             scope.enter_context(cohort._owner_deadline(owner, deadline_ns))
+        contexts = admission_owner_contexts(row, social)
 
         def barrier():
             budget()
@@ -503,7 +561,7 @@ def publish_admission_group(cohort, *, deadline_ns: int) -> dict:
             # selector effects, not merely fail the final snapshot afterward.
             barrier()
             owner = cohort.owners[name]
-            result = owner.group_publication(value, expected_context_sha256=social['owner_contexts'][name],
+            result = owner.group_publication(value, expected_context_sha256=contexts[name],
                 authority_closure={ref: item for ref, item in social['authority_closure'].items()
                     if ref != admission['receivers'][name]['being_ref']})
             budget()
@@ -562,8 +620,8 @@ def publish_admission_group(cohort, *, deadline_ns: int) -> dict:
             submit(name, 'selection', 'selection', owner['selection'])
             snapshot = submit(name, 'snapshot', 'snapshot', dict(
                 **{key+'_step': owner['steps'][key] for key in ('application', 'visibility', 'selection')},
-                owner_context_sha256=social['owner_contexts'][name]))
-            if (snapshot.get('owner_context_sha256') != social['owner_contexts'][name]
+                owner_context_sha256=contexts[name]))
+            if (snapshot.get('owner_context_sha256') != contexts[name]
                     or snapshot.get('group', {}).get('selected', {}).get('tribe_ref') != admission['tribe_ref']):
                 raise OnboardingError('onboarding_group_publication_changed')
             snapshots[name] = snapshot
