@@ -1220,6 +1220,11 @@ reinstalling the generic command. Changed configuration is refused before
 personal guidance is written. The automatic caller still needs to join these
 supported actions with its lifecycle finisher and installed acceptance.
 
+First-load registry coordinates contain body, embodiment and incarnation. Compare
+those fields against the authenticated native origin without discarding its
+principal. Retain the full origin in the original load intent and preservation
+proof; the loaded-process observer still requires that exact full origin.
+
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry
 rechecks the real SDK publication/CAS for application/visibility changes even if

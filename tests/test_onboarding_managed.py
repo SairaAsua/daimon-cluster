@@ -218,6 +218,7 @@ def initial_managed_fixture(tmp_path, initial, *, complete_origins=False):
     process = {**parent, 'pid': 223, 'start_ticks': 10}
     expected = dict(body_ref='codex:fixture:newcomer', embodiment_id=approved['embodiment_id'],
         incarnation_id=owners['newcomer'].server.get('incarnation_id', 'incarnation:fixture'))
+    native_origin = dict(expected, principal_id='principal:fixture')
     selected = dict(tribe_ref='tribe:fixture', socket=str(owners['newcomer'].socket),
         application='/home/agent/synthetic/application', visibility='/home/agent/synthetic/visibility.json')
     group = dict(selected=selected, application_sha256='a' * 64,
@@ -225,13 +226,13 @@ def initial_managed_fixture(tmp_path, initial, *, complete_origins=False):
     startup = dict(code_digest=prepared['code_digest'], matrix_commit=prepared['matrix_revision'],
         sdk_digest=prepared['sdk_digest'], matrix_wheel_sha256=prepared['matrix_wheel_sha256'],
         reader=prepared['reader'], process_id=process['pid'], startup_instance_id='fixture-first-start')
-    owner = dict(plan_digest=digest(plan), genesis_digest='d' * 64, origin=expected,
+    owner = dict(plan_digest=digest(plan), genesis_digest='d' * 64, origin=dict(native_origin),
         being_ref=approved['being_ref'], runtime_sha256='e' * 64, group=group,
         group_sha256=digest(group), predecessor=None, observer_startup=startup, mode='preserve',
         preservation=dict(schema='cluster-receiving-controller-preservation/v1', runtime_sha256='e' * 64,
-            origin=expected, active=True, not_before_ms=0, not_after_ms=time.time_ns() // 1_000_000 + 600000))
+            origin=dict(native_origin), active=True, not_before_ms=0, not_after_ms=time.time_ns() // 1_000_000 + 600000))
     gate = dict(controlled=True, process_id=process['pid'], phase='unselected', readers=[])
-    observed = dict(origin=expected, process=process, admission_parent=parent, group=selected,
+    observed = dict(origin=native_origin, process=process, admission_parent=parent, group=selected,
         runtime_sha256=owner['runtime_sha256'], responder_association='same-connection',
         runtime_status={'loaded_runtime': dict(qualified_startup=startup,
             runtime_bundle_sha256=owner['runtime_sha256'], process_id=process['pid'])},
@@ -300,14 +301,16 @@ def test_initial_managed_load_resumes_same_operation_without_second_start(tmp_pa
     assert cohort._row()['runtime_observation']['initial_managed']['newcomer']['intent'] == intent
     assert all(owner.gate['phase'] == 'revoke' for name, owner in cohort.owners.items() if name != 'newcomer')
     assert observed['group_runtime_status']['receiving']['channels']['tribe']['readers'] == []
-    assert adopted and all(origin == observed['origin'] for origin in adopted)
+    assert adopted and all(origin == {key:observed['origin'][key]
+        for key in ('body_ref', 'embodiment_id', 'incarnation_id')} for origin in adopted)
+    assert intent['owner']['origin'] == observed['origin'], 'retain the complete authenticated native origin'
     manager.invocation = 'unexpected replacement'
     with pytest.raises(OnboardingError, match='started_process_changed'):
         managed.execute_initial(plan, cohort)
     assert manager.starts == 1
 
 
-@pytest.mark.parametrize('drift', ['group', 'gate', 'process', 'profile'])
+@pytest.mark.parametrize('drift', ['group', 'gate', 'process', 'profile', 'origin'])
 def test_initial_managed_load_refuses_changed_context_without_readiness(tmp_path, initial, drift):
     managed, plan, cohort, manager, observed, calls, adopted, fault = initial_managed_fixture(tmp_path, initial)
     if drift == 'profile':
@@ -319,6 +322,8 @@ def test_initial_managed_load_refuses_changed_context_without_readiness(tmp_path
         observed['group_runtime_status']['loaded_application']['publication_sha256'] = 'f' * 64
     elif drift == 'gate':
         observed['group_runtime_status']['receiving']['channels']['tribe']['phase'] = 'select'
+    elif drift == 'origin':
+        observed['origin']['principal_id'] = 'principal:other'
     else:
         observed['runtime_status']['loaded_runtime']['qualified_startup']['process_id'] += 1
     with pytest.raises(OnboardingError, match='loaded_conflict|binding_changed'):

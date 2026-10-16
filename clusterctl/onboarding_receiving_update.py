@@ -3629,7 +3629,8 @@ class CohortController:
                     or binding['admission_sha256'] != digest(admission) or binding['receiver'] != receiver
                     or any(re.fullmatch('[0-9a-f]{64}', binding[key]) is None for key in ('profile_sha256', 'plan_digest'))
                     or owner['plan_digest'] != binding['plan_digest'] or owner['predecessor'] is not None
-                    or owner['being_ref'] != receiver['being_ref'] or owner['origin'] != expected_origin
+                    or owner['being_ref'] != receiver['being_ref']
+                    or any(owner['origin'].get(key) != value for key,value in expected_origin.items())
                     or owner['origin']['embodiment_id'] != receiver['embodiment_id']
                     or owner['mode'] != 'preserve' or owner['group_sha256'] != digest(group)
                     or owner['preservation']['schema'] != 'cluster-receiving-controller-preservation/v1'

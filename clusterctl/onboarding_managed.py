@@ -324,8 +324,8 @@ class ManagedRuntime:
                     bootstrap_timeout_seconds=remaining(), bootstrap_initial_service=True)
                 startup = owner['observer_startup']
                 if (owner['predecessor'] is not None or owner['being_ref'] != approved['being_ref']
-                        or owner['origin'] != {key: expected[key] for key in (
-                            'body_ref', 'embodiment_id', 'incarnation_id')}
+                        or any(owner['origin'].get(key) != expected[key] for key in (
+                            'body_ref', 'embodiment_id', 'incarnation_id'))
                         or owner['origin']['embodiment_id'] != approved['embodiment_id']
                         or owner['group']['selected']['tribe_ref'] != admission['tribe_ref']
                         or owner['group']['selected']['socket'] != approved['socket']
