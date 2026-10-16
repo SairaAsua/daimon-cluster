@@ -136,6 +136,19 @@ def publish_owner_link(app, states, url):
     return entry
 
 
+@pytest.mark.parametrize('enabled,suffix,visible',[(True,'',True),(False,'',False),(True,'?actor=someone',False),(True,'extra',False)])
+def test_agenda_web_entry_requires_enabled_adapter_and_exact_registered_route(system,enabled,suffix,visible):
+    app,_=system
+    states=populated(app)
+    app.agenda=object() if enabled else None
+    url=app.homes['one']['public_url']+'/agenda/'+suffix
+    publish_owner_link(app,states,url)
+    entries=[e for e in catalog(app,'one',app.authority.actor('human'),False)['apps'] if e['url']==url]
+    assert bool(entries)==visible
+    if entries:
+        assert entries[0]['launch']=='web'
+
+
 def test_owner_web_app_requires_both_configured_application_and_current_publication(system):
     from types import SimpleNamespace
     app, _ = system

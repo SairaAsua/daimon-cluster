@@ -201,12 +201,13 @@ class Backend:
 
 
 class Application:
-    def __init__(self, config, authority, sessions, *, backends=None, passkey_rp_id=None, client_example=False, style_provider=None, auth_origin=None, google_client=None, homemaker_source=None, homemaker_state=None, homemaker_home=None, homemaker_returns=(), miniapp_routes=None):
+    def __init__(self, config, authority, sessions, *, backends=None, passkey_rp_id=None, client_example=False, style_provider=None, auth_origin=None, google_client=None, homemaker_source=None, homemaker_state=None, homemaker_home=None, homemaker_returns=(), miniapp_routes=None, agenda_state=None, agenda_backend=None, agenda_google_client=None):
         self.styles = StyleConsumer(style_provider, authority, config["homes"]) if style_provider else None
         from .launcher import validate_launch_routes
         self.miniapp_routes=validate_launch_routes(miniapp_routes)
         self.sso = None
         self.designs = None
+        self.agenda = None
         self.client_example = client_example
         self.config, self.homes, self.authority, self.sessions = (
             config,
@@ -260,6 +261,13 @@ class Application:
             from .homemaker import Homemaker
             self.designs = Homemaker(self, homemaker_source, homemaker_state)
             self.styles = StyleConsumer(self.designs, authority, self.homes)
+        if agenda_state or agenda_backend:
+            if not (agenda_state and agenda_backend):
+                raise ValueError('agenda_state_and_backend_required')
+            from .agenda import Agenda
+            self.agenda = Agenda(self, agenda_state, agenda_backend, google_client=agenda_google_client)
+        elif agenda_google_client:
+            raise ValueError('agenda_google_requires_agenda')
 
     def identity(self, token, home, origin):
         row = self.sessions.resolve(token, home=home, origin=origin)
@@ -312,6 +320,10 @@ class Application:
             or not self.sessions.owner(token, home=home, subject=owner)
         ):
             raise ValueError("home_owner_binding_unavailable")
+        if operation.startswith('agenda-'):
+            if not self.agenda:
+                raise ValueError('agenda_unavailable')
+            return self.agenda.dispatch(home, owner, operation.removeprefix('agenda-'), payload, native=True)
         if operation in ('style-baseline', 'style-default', 'style-selection', 'style-select', 'style-recipe'):
             if not self.designs:
                 raise ValueError('homemaker_unavailable')
@@ -724,6 +736,9 @@ def handler(app, *, owner=False):
                 if app.designs:
                     from .homemaker import routes
                     if routes(self, app, 'GET'): return
+                if urlsplit(self.path).path.startswith('/agenda/'):
+                    from .agenda import routes
+                    if routes(self, app, 'GET'): return
                 content_origins = {
                     urlsplit(app.config[k]).netloc: app.config[k].rstrip("/")
                     for k in ("content_public_url", "content_vpn_url")
@@ -1131,6 +1146,10 @@ def handler(app, *, owner=False):
                     try:
                         result=app.owner(unquote(parts[2]), token[7:], parts[3], payload)
                     except ValueError as error:
+                        if parts[3].startswith('agenda-'):
+                            from .agenda import AgendaError
+                            if isinstance(error, AgendaError):
+                                self.respond(error.status, {'error':str(error)});return
                         if parts[3].startswith('style-') and str(error) in (
                                 'design_revision_conflict','design_selection_conflict','design_operation_conflict'):
                             self.respond(409,{'error':str(error)});return
@@ -1142,6 +1161,9 @@ def handler(app, *, owner=False):
                     if routes(self, app, 'POST', data): return
                 if app.designs:
                     from .homemaker import routes
+                    if routes(self, app, 'POST', data): return
+                if urlsplit(self.path).path.startswith('/agenda/'):
+                    from .agenda import routes
                     if routes(self, app, 'POST', data): return
                 callback = urlsplit(self.path).path == '/access/sso/finish' and bool(app.sso)
                 home, origin, subject, vpn, cookies, token = self.context(login_callback=callback)
@@ -1262,6 +1284,9 @@ def main():
     parser.add_argument('--homemaker-home', help='Registered home serving the owner-operated multi-pair application')
     parser.add_argument('--homemaker-return', action='append', default=[], help='Additional exact registered consumer return URL')
     parser.add_argument('--miniapp-routes', help='Operator-selected public same-origin destination map JSON')
+    parser.add_argument('--agenda-state', help='Private optional Vikunja adapter state directory')
+    parser.add_argument('--agenda-backend', help='Exact loopback origin of a pinned, private Vikunja instance')
+    parser.add_argument('--agenda-google-client', help='Private optional Google Calendar OAuth client; separate Calendar consent')
     args = parser.parse_args()
     from daimon_matrix.messaging_config import protected_read
 
@@ -1279,7 +1304,9 @@ def main():
                       auth_origin=args.auth_origin, google_client=args.google_client,
                       homemaker_source=args.homemaker_source, homemaker_state=args.homemaker_state,
                       homemaker_home=args.homemaker_home, homemaker_returns=args.homemaker_return,
-                      miniapp_routes=json.loads(protected_read(Path(args.miniapp_routes))) if args.miniapp_routes else None)
+                      miniapp_routes=json.loads(protected_read(Path(args.miniapp_routes))) if args.miniapp_routes else None,
+                      agenda_state=args.agenda_state, agenda_backend=args.agenda_backend,
+                      agenda_google_client=args.agenda_google_client)
     servers = [
         ThreadingHTTPServer(("127.0.0.1", config[key]), handler(app, owner=owner))
         for key, owner in (("viewer_port", False), ("owner_port", True))

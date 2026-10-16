@@ -335,6 +335,11 @@ LOADED_STARTUP_TESTS = ('tests/test_onboarding_sdk.py', 'tests/test_onboarding_c
 
 
 HOME_FILES = {'clusterctl/homes/__init__.py', 'clusterctl/homes/policy.py',
+    'clusterctl/homes/agenda.py', 'clusterctl/homes/agenda_calendar.py',
+    'clusterctl/homes/agenda_assets/index.html', 'clusterctl/homes/agenda_assets/agenda.js',
+    'clusterctl/homes/agenda_assets/agenda.css', 'tests/test_home_agenda.py',
+    'tests/test_home_agenda_calendar.py', 'docs/services/agenda.md',
+    'tools/agenda_owner.py', 'tools/qualify_agenda.py',
     'clusterctl/homes/launcher.py', 'clusterctl/homes/launcher/index.html',
     'clusterctl/homes/launcher/launcher.js', 'clusterctl/homes/launcher/launcher.css',
     'clusterctl/homes/launcher/launch.js', 'tests/js/miniapp-launch.cjs',
@@ -363,6 +368,7 @@ HOME_FILES = {'clusterctl/homes/__init__.py', 'clusterctl/homes/policy.py',
     'clusterd/assets/fonts/OFL.txt', 'clusterd/assets/fonts/PROVENANCE.json',
     'tests/test_home_access.py', 'tests/test_home_gateway.py', 'tests/test_home_host.py'}
 HOME_TESTS = ('tests/test_home_launcher.py', 'tests/test_home_access.py', 'tests/test_home_gateway.py', 'tests/test_home_host.py',
+              'tests/test_home_agenda.py', 'tests/test_home_agenda_calendar.py',
               'tests/test_home_passkeys.py', 'tests/test_home_client.py', 'tests/test_home_styles.py', 'tests/test_home_login.py', 'tests/test_home_homemaker.py',
               'tests/test_auth.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
 
@@ -568,7 +574,7 @@ def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list
         return 'homes', list(HOME_PROVISION_TESTS)
     if (set(changed) & HOME_FILES and set(changed) <= HOME_FILES | CI_FILES
             and all((root / path).is_file() for path in HOME_TESTS)):
-        # Home-only read authority retains auth and workflow contracts. Native
+        # Home UI/application adapters retain auth and workflow contracts. Native
         # custody, dependencies, admission and provisioning changes stay full.
         return 'homes', list(HOME_TESTS)
     if ('tests/test_onboarding_group.py' in changed

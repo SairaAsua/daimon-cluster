@@ -94,11 +94,16 @@ def catalog(app, home, subject, vpn, *, local_only=False):
         results = list(pool.map(read, selected))
     apps, seen, unavailable = [], set(), 0 if local_only else len(homes) - len(selected)
     owner_url = owner_app_url(app)
+    # Only an enabled, source-owned adapter may promote its exact private
+    # application route. A matching title or arbitrary HTTPS link cannot.
+    native_web_urls = {owner_url} if owner_url else set()
+    if getattr(app, 'agenda', None):
+        native_web_urls.update(h['public_url'] + '/agenda/' for h in app.homes.values())
     for ref, entries, available in results:
         unavailable += not available
         for entry in entries:
             url = entry.get('url')
-            owner_app = owner_url is not None and url == owner_url
+            owner_app = url in native_web_urls
             if entry.get('kind') != 'link' or not (owner_app or app_url(url)):
                 continue
             # Private links are never collapsed into a public author's entry.
