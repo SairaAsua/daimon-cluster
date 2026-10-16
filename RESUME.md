@@ -75,10 +75,16 @@ rejected the exact standard root-owned Incus service drop-in, although the servi
 was active and its unit matched. The existing Matrix validator is now shared;
 modified, duplicate, foreign and reference-cache native drop-ins still refuse.
 Affected native/service tests, CI-scope tests, typing and scoped lint passed;
-bounded independent review approved the source. Captured helper `83557b98` changes
-only those two modules against the existing synthetic candidate. It is selected
-only as the synthetic host preparation helper; all receiver candidate/SDK pins
-remain unchanged. Actual worker admission acceptance is still pending. The v2-
+bounded independent review approved the source. Cluster `3f50765` / `f0ff788` then correct a reproduced finite-budget starvation:
+target SDK/V8 checks and individual native prerequisites now durably retain their
+completed preparation in the SAME protected operation. Final all-required
+freshness and fixed authorization expiry remain unchanged. Bounded independent
+source review, affected host/coordinator/finisher, journal/worker/CI checks and
+maintained typing pass. Captured helper `d814151b` changes only those four modules
+against the existing synthetic candidate. It is selected only by the isolated
+host/coordinator; all receiver candidate/SDK pins remain unchanged. Actual worker
+admission acceptance is still pending. Read the checkpoint for current cadence
+and native result, not this dated source paragraph. The v2-
 compatible fallback is Root-published, not a completed rollback receipt. The old
 v1 baseline must never be restored after v2 authority acceptance.
 
