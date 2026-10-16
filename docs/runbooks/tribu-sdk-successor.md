@@ -24,6 +24,13 @@ that selection in the protected qualified successor/receiving recipe. This does
 not change the host's default VCS dependency, snapshot-contract pin, base SDK or
 already prepared rollout, and does not qualify an installed body by itself.
 
+For tests that spawn isolated Python (`-I`/`-S`), a parent `PYTHONPATH` source
+overlay does not select the child's SDK. Reuse a matching installed test interpreter
+when that child contract needs qualification. Do not repeat a broad native journey
+with a mixed reader or infer a product cause from its readiness timeout. For a
+captured-installer-only fix, qualify the affected installer and exact capture;
+unchanged unrelated daemon journeys are not a new prerequisite.
+
 ## Execute from the next missing effect
 
 Use one current operation and one reusable integrated receiving scenario. Keep

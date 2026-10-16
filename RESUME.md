@@ -36,7 +36,19 @@ have authenticated running observations; cross-namespace HTTP reached both real
 listeners from the host and entrant. GET501 establishes reachability, not signed
 semantic delivery. Use the retained fixture running-window/checkpoint for process
 handles and cleanup deadlines; never treat this dated paragraph as fresh health.
-Complete admission, signed communication and compatible rollback are unfinished. Source
+Complete admission, signed communication and compatible rollback are unfinished.
+
+Cluster `250f5bc` captures the qualified Matrix PR366 installer correction for
+absent/empty Codex TOML, preserving strict credential reads. The resulting
+synthetic helper generation `f99b7c4` changes only the installer and its pin;
+SDK3a/b53 is reused. The retained guest's ORIGINAL preparation operation completed
+after native config repair, and Source's isolated native home gained its existing
+verified Matrix role. Bindings were preserved; no identity, enrollment, daemon
+or model was created. Catalog/receiving acceptance remains unobserved. The finite
+synthetic Matrix units were stopped before their test authority, then only their
+owned isolated native endpoints were retired; the entrant's pre-existing native
+service was retained. No real service was interrupted. Dated running observations
+above are retained evidence, not fresh readiness. Source
 I/O's merged Telecodex PR100 candidate is staged, not selected; the Matrix-only
 rollout permission does not authorize a Telegram restart. Follow the current
 [Matrix receiving frontier](https://github.com/AlterMundi/daimon-matrix/blob/main/CURRENT-STATE.md)
