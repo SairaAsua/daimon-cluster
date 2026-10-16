@@ -1475,3 +1475,20 @@ this setup. Final `application_view` uses the real installation and validate
 mode; a closed-loader failure is not a production delivery diagnosis.
 Stop only the owned synthetic Matrix units before the finite fixture authority
 retires, so expiry does not cause pointless restart loops.
+
+The opt-in `tests.integration.portal_admission_echo` provides a durable synthetic
+Telegram API when qualification has no authorized public bot. Compose BOTH the
+retained baseline and candidate before starting their synthetic units. The
+fixture captures a startup hook and exact fake-token/method mapper in separately
+sealed code; SDK wheels, context and other helpers remain byte-for-byte unchanged.
+`qualified_startup` verifies origins and captured context before and after the
+hook. The mapper uses the original bounded isolated HTTP executor, permits only
+the fixed loopback API and refuses every other URL without public fallback.
+Expose that one external-service double inside synthetic guest namespaces with
+the fixture's existing Incus localhost-proxy pattern; Matrix still uses its real
+shared network and group. The finite server journals each accepted API call and
+assigns a new message ID even for identical text, so it cannot mask duplicate
+publications. Preserve its journal with the native receipts. These artifacts
+qualify native admission/communication against a synthetic external service;
+they do not qualify public Telegram, TLS or the uninstrumented launcher. Never
+select them in a real body or use a fake token with the ordinary baseline.

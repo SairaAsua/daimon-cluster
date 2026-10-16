@@ -499,6 +499,16 @@ def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list
         return 'docs', []
     if set(changed) <= CI_FILES | RUNBOOK_DOCS:
         return 'ci', ['tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    echo_fixture = {'tests/integration/portal_admission_echo.py',
+                    'tests/test_portal_admission_echo.py'}
+    echo_tests = ['tests/test_portal_admission_echo.py',
+                  'tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    if (set(changed) & echo_fixture
+            and set(changed) <= echo_fixture | CI_FILES | RUNBOOK_DOCS
+            and all((root / path).is_file() for path in echo_tests)):
+        # Only the opt-in external API double/composition changed. Any SDK,
+        # receiving, authority or lifecycle implementation keeps its own scope.
+        return 'ci', echo_tests
     if ({'clusterctl/onboarding_code_successor.py', 'tests/test_onboarding_code_successor.py'} <= set(changed)
             and set(changed) <= {'clusterctl/onboarding_code_successor.py',
                 'tests/test_onboarding_code_successor.py'} | CI_FILES | RUNBOOK_DOCS

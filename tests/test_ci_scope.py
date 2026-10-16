@@ -6,6 +6,19 @@ from tools.ci_scope import ONBOARDING_CONTRACTS, select
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_synthetic_api_fixture_has_closed_test_only_scope(tmp_path):
+    changed = ['tests/integration/portal_admission_echo.py',
+               'tests/test_portal_admission_echo.py', 'tools/ci_scope.py',
+               'tests/test_ci_scope.py', 'docs/runbooks/tribu-sdk-successor.md']
+    expected = ('ci', ['tests/test_portal_admission_echo.py',
+                       'tests/test_ci_scope.py', 'tests/test_ci_workflow.py'])
+    assert select(changed, ROOT) == expected
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    for extra in ('clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_custody.py',
+                  'requirements-weave.txt', 'unknown.py'):
+        assert select([*changed, extra], ROOT) == ('full', ['tests'])
+
+
 def test_owner_tooling_and_maintained_runbook_keep_owner_coverage(tmp_path):
     from tools.ci_scope import OWNER_CLIENT_TESTS
     changed = [
