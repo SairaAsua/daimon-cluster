@@ -1357,3 +1357,12 @@ The existing SDK validates that alias and normalizes it before request journalin
 Do not send an unconfigured bare `tribe` to a multi-link attachment or change a
 retained native request to repair a public alias. Existing tooling acceptance
 still binds the alias to the expected group socket and identity.
+
+Capture the complete public `clusterctl` package for a combined Source/guest/
+coordinator generation through the existing successor builder's `modules`
+argument. Exclude the two separately captured native helper filenames. Do not
+derive a smaller package from Python import statements: owner CLI modules such
+as `onboarding_source` are also selected by module-name strings. A guest-only
+module selection does not qualify a combined host/Source artifact. Reuse the
+unchanged SDK wheelhouse and installed generation; this is code capture, not a
+new dependency installation.
