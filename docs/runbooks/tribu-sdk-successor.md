@@ -1456,5 +1456,10 @@ publication lock and exact original intent; retry preserves a later winner. Reis
 the unchanged visibility disclosure and use the existing signed selection CAS,
 then capture actual new baseline load/context before admission. This test setup
 does not qualify production route updates or revive old pending transmissions.
+The offline closed owner loader retains its existing `catalog_mode='migrate'`:
+it has no installed visibility proof key and cannot authenticate those catalogs
+in validate mode. Do not explicitly adopt/re-authenticate their contents during
+this setup. Final `application_view` uses the real installation and validate
+mode; a closed-loader failure is not a production delivery diagnosis.
 Stop only the owned synthetic Matrix units before the finite fixture authority
 retires, so expiry does not cause pointless restart loops.
