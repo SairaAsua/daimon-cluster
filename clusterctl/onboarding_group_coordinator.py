@@ -740,8 +740,15 @@ class GroupCoordinator:
                         (admission['activation']['expires_at_ms'] - time.time_ns() // 1_000_000) * 1_000_000)
                 candidate = (Path(self.settings['owners'][name]['candidate']['code']),
                     self.settings['owners'][name]['candidate']['digest'])
-                if not finishing and not native_prepared and not self.backend.prepare_group_target(plan, candidate, deadline_ns=deadline):
-                    return None
+                if not finishing and not native_prepared and 'target_ready' not in retained:
+                    if not self.backend.prepare_group_target(plan, candidate, deadline_ns=deadline):
+                        return None
+                    # Preparation is durable progress, never receiving acceptance.
+                    # Do not spend every worker budget repeating the same SDK/V8
+                    # checks before the first native endpoint can be inspected.
+                    self._retain(journal, row, 'target_ready', dict(
+                        plan_digest=digest(plan), code=str(candidate[0]), code_digest=candidate[1]))
+                    remaining()
                 owners = self._owners(admission)
                 from .onboarding_receiving_update import CohortController
                 cohort = CohortController(journal, row['operation_id'], owners)
@@ -762,6 +769,11 @@ class GroupCoordinator:
                         recipe = admission['receivers'][current]['recipe']['tooling']
                         if recipe['profile'] == 'matrix-only':
                             continue
+                        ready_key = 'native_ready-' + current
+                        phases = (journal.get(row['operation_id'])['runtime_observation'] or {}).get('portal_admission', {})
+                        if ready_key in phases:
+                            readiness[current] = phases[ready_key]
+                            continue
                         owner = owners[current]
                         endpoint = Path(recipe['native_endpoint'])
                         if current == name:
@@ -781,6 +793,7 @@ class GroupCoordinator:
                                     self.backend._telegram_command(plan, 'native-install', **budget)
                                 self.backend._telegram_probe(plan, **budget)
                         observed = owner.preflight_native(endpoint)
+                        self._retain(journal, row, ready_key, observed)
                         readiness[current] = observed
                         remaining()
                     # A later invocation observes the endpoint afresh; do not

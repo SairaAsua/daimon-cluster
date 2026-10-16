@@ -821,3 +821,18 @@ def test_existing_native_attachment_update_composes_complete_receiving_coverage(
     assert set(LOADED_STARTUP_TESTS) | set(OWNER_CLIENT_TESTS) <= set(tests)
     for extra in ('clusterctl/onboarding_custody.py', 'requirements-dev.txt', 'unknown.py'):
         assert select([*changed, extra], ROOT)[0] == 'full'
+
+
+def test_portal_coordinator_only_checks_journal_and_worker_contracts():
+    changed = ['clusterctl/onboarding_group_coordinator.py',
+               'tests/test_onboarding_group_coordinator.py',
+               'docs/runbooks/tribu-sdk-successor.md']
+    profile, tests = select(changed, ROOT)
+    assert profile == 'ci'
+    assert {'tests/test_onboarding_group_coordinator.py',
+            'tests/test_onboarding_group_finisher.py',
+            'tests/test_receiving_update_journal.py',
+            'tests/test_onboarding_worker_install.py'} <= set(tests)
+    for extra in ('clusterctl/onboarding_custody.py', 'clusterctl/onboarding_service.py',
+                  'requirements-weave.txt', 'unknown.py'):
+        assert select(changed + [extra], ROOT)[0] == 'full'

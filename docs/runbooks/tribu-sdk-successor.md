@@ -1509,3 +1509,11 @@ drop-in as the Matrix guest observer. An active unit with that standard addition
 is not a foreign service. Modified/duplicate/unknown additions still refuse;
 the Matrix-specific reference-cache addition is not allowed on Codex. Read the
 existing unit and manager output before diagnosing a native preparation refusal.
+
+The portal retains completed target preparation and each owner-native prerequisite
+inside the same receiving operation. A finite worker budget may expire between
+owners; resume the next missing prerequisite instead of repeating SDK/V8 checks
+on every cadence. These retained snapshots prove preparation only. They neither
+extend the frozen authorization horizon nor replace final fresh required-receiver,
+loaded-runtime, tooling and activation qualification. A completed native service
+observation is never permission to restart it after a later generic failure.

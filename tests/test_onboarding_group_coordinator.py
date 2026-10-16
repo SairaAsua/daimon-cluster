@@ -265,7 +265,8 @@ def test_worker_prepares_native_outside_job_lock_and_cannot_complete_matrix(fixt
     assert result['stage'] == 'matrix' and result['reason'] == 'group_admission_pending'
     current = f.journal.get(f.row['operation_id'])
     assert current['state'] == 'planned'
-    assert set(current['runtime_observation']['portal_admission']) == {'native_intent', 'native_dispatch', 'native_ready',
+    assert set(current['runtime_observation']['portal_admission']) == {'target_ready', 'native_intent', 'native_dispatch', 'native_ready',
+        *('native_ready-' + name for name in f.owners),
         'physical_intent', 'physical_ready', 'controller_intent', 'controller_stage', 'controller_prepared'}
     assert f.calls.count('native-install') == 1
     worker._tick('newcomer')
@@ -620,3 +621,40 @@ def test_retry_cannot_change_physical_coordinates_after_lost_enrollment(fixture)
         GroupCoordinator(f.backend).advance('newcomer')
     assert f.calls.count('physical-prepare') == 1
     assert 'receiving-bootstrap-freeze' not in f.calls
+
+
+def test_native_preparation_retains_completed_owners_across_deadline(fixture, monkeypatch):
+    """Slow real owner calls must not starve later owners on every cadence."""
+    from clusterctl import onboarding_group_coordinator as caller
+    f = fixture
+    clock = [caller.time.monotonic_ns()]
+    monkeypatch.setattr(caller, 'time', SimpleNamespace(monotonic_ns=lambda: clock[0], time_ns=caller.time.time_ns))
+    target = f.backend.prepare_group_target
+    targets = []
+    def prepare(*args, **kwargs):
+        targets.append(True)
+        return target(*args, **kwargs)
+    f.backend.prepare_group_target = prepare
+    names = sorted(f.owners)
+    for name in names:
+        original = f.owners[name].preflight_native
+        def slow(endpoint, *, original=original):
+            value = original(endpoint)
+            clock[0] += 31_000_000_000
+            return value
+        f.owners[name].preflight_native = slow
+    # Each invocation retains a completed native result before observing expiry.
+    with pytest.raises(OnboardingError, match='receiving_host_deadline_expired'):
+        GroupCoordinator(f.backend).advance('newcomer')
+    phases = f.journal.get(f.row['operation_id'])['runtime_observation']['portal_admission']
+    assert 'target_ready' in phases and 'native_ready-' + names[0] in phases
+    assert 'native_ready' not in phases
+    assert f.journal.get(f.row['operation_id'])['state'] == 'planned'
+    for _ in names[1:]:
+        with pytest.raises(OnboardingError, match='receiving_host_deadline_expired'):
+            GroupCoordinator(f.backend).advance('newcomer')
+    result = GroupCoordinator(f.backend).advance('newcomer')
+    assert result['native_prepared'] is True
+    assert len(targets) == 1
+    assert all(f.calls.count('preflight-' + name) == 1 for name in names)
+    assert all(owner.effects == 0 for owner in f.owners.values())

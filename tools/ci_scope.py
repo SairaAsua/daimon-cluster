@@ -505,6 +505,21 @@ def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list
         return 'docs', []
     if set(changed) <= CI_FILES | RUNBOOK_DOCS:
         return 'ci', ['tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    coordinator_files = {'clusterctl/onboarding_group_coordinator.py',
+                         'tests/test_onboarding_group_coordinator.py',
+                         'tests/test_onboarding_group_finisher.py'}
+    coordinator_tests = ['tests/test_onboarding_group_coordinator.py',
+                         'tests/test_onboarding_group_finisher.py',
+                         'tests/test_receiving_update_journal.py',
+                         'tests/test_onboarding_progress.py',
+                         'tests/test_onboarding_worker_install.py',
+                         'tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    if ('clusterctl/onboarding_group_coordinator.py' in changed
+            and set(changed) <= coordinator_files | CI_FILES | RUNBOOK_DOCS
+            and all((root / path).is_file() for path in coordinator_tests)):
+        # Orchestration/journal cadence only; changed native SDK, service,
+        # authority or owner adapters retain their broader coverage.
+        return 'ci', coordinator_tests
     native_dropins = {'clusterctl/onboarding_service.py', 'clusterctl/onboarding_telegram.py',
                      'tests/test_onboarding_service.py', 'tests/test_onboarding_telegram.py'}
     native_tests = ['tests/test_onboarding_service.py', 'tests/test_onboarding_telegram.py',
