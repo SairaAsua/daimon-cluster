@@ -100,6 +100,53 @@ def test_quiescence_retains_actual_journal_stage_and_exact_retry(fixture):
     assert len(locked) == 2
 
 
+def test_installed_only_source_preparation_requires_existing_closed_imports_under_read_lock(
+        fixture, tmp_path, monkeypatch):
+    from clusterctl import onboarding_receiving_update as updates, onboarding_sdk, onboarding_code_successor
+    source, _manager, _journal, _identifier, _locked = fixture
+    config = tmp_path/'source.json'
+    being_seed._write(config, source.settings)
+    code = tmp_path/'code'
+    (code/'clusterctl').mkdir(parents=True)
+    (code/'clusterctl/onboarding_source.py').write_bytes(b'public code seam')
+    (code/'clusterctl/onboarding_source.py').chmod(0o600)
+    generation = tmp_path/'sdk'
+    generation.mkdir(mode=0o700)
+    venv = generation/'venv'
+    imports, receipt = generation/'runtime-imports', generation/'runtime-imports.json'
+    checked = dict(matrix_revision='a'*40, matrix_wheel_sha256='b'*64)
+    def prepared(*a, **options):
+        assert options['installed_only'] is True
+        return checked
+    monkeypatch.setattr(updates, 'prepare_sdk', prepared)
+    monkeypatch.setattr(updates, 'source_bootstrap_group', lambda *a: {'selected': {'tribe_ref': 'tribe:fixture'}})
+    monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda *a, **k: dict(
+        matrix_commit=checked['matrix_revision'], matrix_wheel_sha256=checked['matrix_wheel_sha256']))
+    monkeypatch.setattr(onboarding_sdk, 'observe', lambda *a, **k: venv)
+    calls = []
+    def verify(*a, **k):
+        with pytest.raises(being_seed.SeedError, match='operation_in_progress'):
+            with being_seed._locked(generation):
+                pass
+        calls.append(True)
+        return imports
+    monkeypatch.setattr(onboarding_sdk, 'runtime_imports', verify)
+    monkeypatch.setattr(onboarding_sdk, 'runtime_command', lambda *a: ['/qualified/source'])
+    options = dict(home=tmp_path, code=code, code_digest='c'*64, config=config,
+        manifest_path=tmp_path/'manifest.json', manifest_digest='d'*64, transaction=source.root.parent/'transaction',
+        expires_at_ms=12345, code_uid=os.geteuid(), installed_only=True)
+    with pytest.raises((OnboardingError, FileNotFoundError)):
+        updates.prepare_source_bootstrap(source, **options)
+    assert not imports.exists() and not receipt.exists() and not calls
+    imports.mkdir(mode=0o700)
+    with pytest.raises(FileNotFoundError):
+        updates.prepare_source_bootstrap(source, **options)
+    assert not receipt.exists() and not calls
+    being_seed._write(receipt, {'explicit': 'prepared import receipt seam'})
+    assert updates.prepare_source_bootstrap(source, **options)['argv'] == ['/qualified/source']
+    assert calls == [True]
+
+
 def test_quiescence_observation_requires_original_exit_and_never_stops_or_loads(fixture):
     source, manager, journal, identifier, _ = fixture
     controller = SourceBootstrapController(journal, identifier, source, manager)

@@ -749,6 +749,99 @@ def test_lost_preservation_reply_reconciles_exact_durable_record(preserved_fixtu
     assert actual == retained and files(owner.runtime) == before
 
 
+def test_source_admission_child_is_prepared_locally_and_recovers_lost_plan_without_refreeze(
+        preserved_fixture, tmp_path, monkeypatch):
+    from clusterctl.onboarding_group_admission import preview_owner_context
+    from clusterctl.onboarding_source import Source
+    from clusterctl.operation_journal import JournalConflict, OperationJournal
+    from tests.test_source_bootstrap import FakeManager
+    from daimon_matrix.service import LoadedStoreBinding
+    target, owner_request, _group, _exited = preserved_fixture
+    root, bundle = target.package / 'runtime', target.document_bundle()
+    settings = dict(schema='cluster-onboarding-source/v1', runtime_root=str(root),
+        password_file=str(tmp_path/'unused.unlock'), native_visibility=str(tmp_path/'visibility.json'),
+        outputs=str(tmp_path/'source-outputs'), applications=[])
+    config = tmp_path/'source.json'
+    being_seed._write(config, settings)
+    source = Source(settings, code=tmp_path/'approved-code', code_uid=os.geteuid(),
+        code_digest='a'*64, qualified_startup={'explicit': 'SDK-startup seam'})
+    monkeypatch.setattr(source, '_reader', lambda: pytest.fail('preparation opened custody'))
+    unit = tmp_path/'daimon-matrix-admission.service'
+    unit.write_bytes(b'[Service]\nExecStart=/existing/loader\nKillMode=control-group\n')
+    unit.chmod(0o600)
+    manager = FakeManager(unit)
+    stores = {}
+    for role, name, metadata in (
+            ('ledger', bundle['ledger'], {'ledger': 'metadata', 'communication': 'communication_meta'}),
+            ('relationships', bundle['relationships']['store_filename'], {'relationships': 'metadata'})):
+        stores[role] = json.loads(LoadedStoreBinding.capture(root/name, metadata=metadata).observation)
+    predecessor = dict(process=owner_request['predecessor']['process'], server=bundle['local_origin'],
+        runtime_status=dict(being_ref=bundle['manifest']['being_ref'], local_origin=bundle['local_origin'],
+            loaded_runtime={'stores': stores}))
+    frozen = dict(mode='preserve', preservation=owner_request['preservation'], settings_sha256=digest(settings),
+        unit=str(unit), service=manager.inspect(), scope={'explicit': 'native-process seam'}, predecessor=predecessor,
+        bundle_sha256=digest(bundle), visibility_sha256='c'*64)
+    identifier = str(uuid.uuid4())
+    preview = preview_owner_context(root, source.outputs/'tribe', identifier, {})
+    request = dict(schema='cluster-source-admission-preparation/v1', operation_id=identifier,
+        cohort_operation_id='operation:synthetic-parent', cohort_intent_sha256='b'*64, tribe_ref='tribe:fixture',
+        owner=dict(being_ref=bundle['manifest']['being_ref'], embodiment_id=bundle['local_origin']['embodiment_id']),
+        predecessor={key: predecessor[key] for key in ('process', 'server')}, unit=str(unit), home=str(tmp_path),
+        manifest_path=str(tmp_path/'manifest.json'), manifest_uid=os.geteuid(), manifest_digest='d'*64,
+        expires_at_ms=owner_request['expires_at_ms'], authority_closure={},
+        owner_context_sha256=preview['owner_context_sha256'],
+        steps=dict(application='application', visibility='visibility', selection='selection', snapshot='snapshot'))
+    calls = []
+    def freeze(selected, selected_manager, *, deadline_ns):
+        assert selected is source and selected_manager.unit == unit and deadline_ns > time.monotonic_ns()
+        calls.append('freeze')
+        return copy.deepcopy(frozen)
+    def candidate(selected, **options):
+        assert selected is source and options['installed_only'] is True
+        assert 0 < receiving_update.onboarding_sdk.probe_timeout(180) <= 10
+        calls.append('candidate')
+        return dict(transaction=str(options['transaction']), expires_at_ms=options['expires_at_ms'],
+            argv=['/qualified/existing/loader'], admission_link=options['admission_link'], qualification=dict(
+                code=str(source.code), code_digest=source.code_digest, code_uid=source.code_uid, config=str(config),
+                group={'selected': {'tribe_ref': request['tribe_ref']}}))
+    monkeypatch.setattr(receiving_update, 'freeze_source_bootstrap', freeze)
+    monkeypatch.setattr(receiving_update, 'prepare_source_bootstrap', candidate)
+    journal_path = tmp_path/'source-journal'
+    before = files(root)
+    for field, value in (('owner_context_sha256', '0'*64), ('expires_at_ms', 1),
+                         ('predecessor', {**request['predecessor'], 'process': {'pid': 999}})):
+        with pytest.raises(OnboardingError):
+            source.prepare_receiving_admission(journal_path, {**request, field: value},
+                config=config, deadline_ns=deadline())
+        assert OperationJournal.existing(journal_path) is None
+    from clusterctl import onboarding_code_successor
+    actual = onboarding_code_successor.plan_update
+    def lost(*args, **options):
+        actual(*args, **options)
+        raise OSError('synthetic lost durable child plan reply')
+    monkeypatch.setattr(onboarding_code_successor, 'plan_update', lost)
+    with pytest.raises(OSError, match='lost durable child'):
+        source.prepare_receiving_admission(journal_path, request, config=config, deadline_ns=deadline())
+    assert receiving_update.onboarding_sdk.probe_timeout(180) == 180
+    row = OperationJournal.existing(journal_path).latest_for_target('source-admission:'+identifier)
+    assert row['state'] == 'planned' and row['runtime_observation'] is None
+    calls.clear()
+    monkeypatch.setattr(receiving_update, 'freeze_source_bootstrap', lambda *a, **k: pytest.fail('retry refroze Source'))
+    monkeypatch.setattr(time, 'time_ns', lambda: (request['expires_at_ms']+1)*1_000_000)
+    result = source.prepare_receiving_admission(journal_path, request, config=config, deadline_ns=deadline())
+    assert result['operation_id'] == row['operation_id'] and result['receiving_readiness'] == 'unobserved'
+    link = row['intended_transition']['source_bootstrap']['admission_link']
+    assert result['link_sha256'] == digest(link)
+    assert link['cohort_intent_sha256'] == request['cohort_intent_sha256']
+    assert source.prepare_receiving_admission(journal_path, request, config=config, deadline_ns=deadline()) == result
+    with pytest.raises(JournalConflict):
+        source.prepare_receiving_admission(journal_path, {**request, 'manifest_digest': 'f'*64},
+            config=config, deadline_ns=deadline())
+    assert calls == [] and manager.stops == 0 and manager.live
+    assert OperationJournal.existing(journal_path).get(row['operation_id']) == row
+    assert files(root) == before
+
+
 @pytest.mark.parametrize('change', ['custody', 'client', 'bundle', 'expired', 'live'])
 def test_preservation_refuses_changed_inputs_or_unusable_authorization(preserved_fixture, change):
     target, request, _, exited = preserved_fixture

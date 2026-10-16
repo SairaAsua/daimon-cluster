@@ -13,8 +13,11 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import uuid
 import zipfile
+from contextlib import contextmanager
+from contextvars import ContextVar
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
 
@@ -24,6 +27,30 @@ from .onboarding import OnboardingError, digest, private_directory
 SCHEMA = "cluster-onboarding-sdk/v1"
 MATRIX_COMMIT = "0dc0b555939b16a1150a220a366a6911a5ae9c28"
 PREVIOUS_MATRIX_COMMIT = "196ec7219f954cf4e514a1f61ae72eb3451d851e"
+_PROBE_DEADLINE: ContextVar[int | None] = ContextVar('sdk_probe_deadline', default=None)
+
+
+@contextmanager
+def probe_budget(deadline_ns: int | None):
+    """Retain one finite owner deadline across existing nested SDK probes."""
+    current = _PROBE_DEADLINE.get()
+    selected = current if deadline_ns is None else deadline_ns if current is None else min(current, deadline_ns)
+    token = _PROBE_DEADLINE.set(selected)
+    try:
+        probe_timeout(180)
+        yield
+    finally:
+        _PROBE_DEADLINE.reset(token)
+
+
+def probe_timeout(maximum: float) -> float:
+    deadline = _PROBE_DEADLINE.get()
+    if deadline is None:
+        return maximum
+    remaining = (deadline - time.monotonic_ns()) / 1_000_000_000
+    if remaining <= 0:
+        raise OnboardingError('receiving_owner_deadline_expired')
+    return min(maximum, remaining)
 
 
 def wheel(path: Path, *, uid: int) -> dict:
@@ -85,10 +112,11 @@ def verify(code: Path, *, uid: int, matrix_commit: str = MATRIX_COMMIT,
 
 def _run(argv: list[str]) -> str:
     try:
-        result = subprocess.run(argv, capture_output=True, timeout=180, check=False, umask=0o077,
+        result = subprocess.run(argv, capture_output=True, timeout=probe_timeout(180), check=False, umask=0o077,
                                 env={"PATH": os.defpath, "LANG": "C.UTF-8", "PYTHONDONTWRITEBYTECODE": "1",
                                      "PIP_CONFIG_FILE": os.devnull, "PIP_DISABLE_PIP_VERSION_CHECK": "1",
                                      "LD_LIBRARY_PATH": str(Path(sys.base_prefix) / "lib")})
+        probe_timeout(180)
         if result.returncode:
             raise OnboardingError("native_onboarding_sdk_refused")
         return result.stdout.decode()

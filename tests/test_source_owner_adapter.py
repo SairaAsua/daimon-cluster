@@ -50,7 +50,7 @@ def adapter(tmp_path, monkeypatch):
     monkeypatch.setattr(
         receiving, "os", SimpleNamespace(geteuid=lambda: 0, defpath=os.defpath)
     )
-    monkeypatch.setattr(receiving.subprocess, "run", run)
+    monkeypatch.setattr(receiving, "_run_owner", run)
     read = Path.read_bytes
 
     def protected(path):
@@ -186,14 +186,14 @@ def test_late_owner_reply_is_uncertain_and_keeps_exact_public_command(
     clock = [100]
     monkeypatch.setattr(receiving.time, "monotonic_ns", lambda: clock[0])
     client.deadline_ns = 1000
-    run = receiving.subprocess.run
+    run = receiving._run_owner
 
     def late(*arguments, **options):
         result = run(*arguments, **options)
         clock[0] = 1001
         return result
 
-    monkeypatch.setattr(receiving.subprocess, "run", late)
+    monkeypatch.setattr(receiving, "_run_owner", late)
     command = {"phase": "revoke", "readers": []}
     with pytest.raises(OnboardingError, match="deadline_expired"):
         client.prepare_control(command, client.root / "request.json")
@@ -248,6 +248,10 @@ def cli(tmp_path, monkeypatch):
 
         def receiving_lifecycle_action(self, *args, **options):
             calls.append(('lifecycle-action', args, options))
+            return {'retained': True}
+
+        def prepare_receiving_admission(self, *args, **options):
+            calls.append(('admission-plan', args, options))
             return {'retained': True}
 
         def group_relationship(self, *args, **options):
@@ -311,6 +315,51 @@ def test_source_cli_group_request_keeps_finite_owner_context_and_never_serves(
     assert calls[1][2]['authority_closure'] == {}
     assert calls[1][2]['deadline_ns'] == int(arguments[-1])
     assert calls[1][2].get('expected_context_sha256') == expected_context
+
+
+def test_source_cli_prepares_child_only_with_closed_qualified_owner_inputs(cli, monkeypatch, capsys, tmp_path):
+    arguments, calls = cli
+    request = {'explicit': 'public preparation recipe seam'}
+    monkeypatch.setattr(source_cli.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(request).encode())))
+    journal = tmp_path/'local-owner-journal'
+    assert source_cli.main([*arguments, '--prepare-admission-lifecycle', '-',
+        '--operation-journal', str(journal)]) == 0
+    assert json.loads(capsys.readouterr().out) == {'retained': True}
+    assert [row[0] for row in calls] == ['construct', 'admission-plan']
+    assert calls[1][1] == (journal, request)
+    assert calls[1][2] == {'config': Path(arguments[1]), 'deadline_ns': int(arguments[-1])}
+    from clusterctl.onboarding_sdk import probe_timeout
+    assert probe_timeout(180) == 180, 'CLI return must release its nested probe budget'
+
+
+def test_source_adapter_child_preparation_returns_only_original_public_binding(adapter, tmp_path):
+    client, response, calls = adapter
+    client.lifecycle_journal = tmp_path/'owner-local-journal'
+    request = dict(cohort_operation_id='operation:parent', cohort_intent_sha256='b'*64, owner_context_sha256='c'*64)
+    response.clear()
+    response.update(schema='cluster-source-admission-prepared/v1', operation_id='operation:child',
+        source_config_sha256=client.config_sha256, code_digest=client.code_digest, request_sha256=digest(request),
+        **request, link_sha256='d'*64, receiving_readiness='unobserved')
+    assert client.prepare_admission_lifecycle(request) == response
+    argv, options = calls[0]
+    assert argv[-4:] == ['--prepare-admission-lifecycle', '-', '--operation-journal', str(client.lifecycle_journal)]
+    assert json.loads(options['input']) == request and options['extra_groups'] == ()
+    response['unexpected_private_data'] = 'synthetic, must be refused'
+    with pytest.raises(OnboardingError, match='lifecycle_conflict'):
+        client.prepare_admission_lifecycle(request)
+
+
+def test_owner_timeout_terminates_only_its_transient_process_group_and_joins_cli(tmp_path):
+    import subprocess
+    import sys
+    pidfile = tmp_path/'probe.pid'
+    program = 'import subprocess,sys,time; p=subprocess.Popen([sys.executable,"-I","-c","import time;time.sleep(60)"]);open(sys.argv[1],"w").write(str(p.pid));time.sleep(60)'
+    with pytest.raises(subprocess.TimeoutExpired):
+        receiving._run_owner([sys.executable, '-I', '-c', program, str(pidfile)],
+            input=None, text=True, capture_output=True, timeout=1)
+    descendant = int(pidfile.read_text())
+    state = Path('/proc')/str(descendant)/'stat'
+    assert not state.exists() or state.read_text().split(') ', 1)[1].startswith('Z ')
 
 
 @pytest.mark.parametrize('verb,action', [('--prepare-control', 'receiving-control-prepare'),

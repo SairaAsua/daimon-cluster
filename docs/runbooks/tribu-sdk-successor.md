@@ -893,6 +893,33 @@ the circular dependency between pre-stop lifecycle planning and offline context
 creation; it does not itself create the Source child lifecycle or complete the
 portal's signed invitation/acceptance caller.
 
+`SourceGroupClient.prepare_admission_lifecycle(recipe)` now creates or recovers
+the Source's local child through the same qualified owner CLI and journal. The
+closed `cluster-source-admission-preparation/v1` recipe pins the social operation
+UUID, parent operation/intent digest, being/body and original process, approved
+Matrix unit, existing SDK home, release manifest, fixed expiry, complete public
+closure/context digest and four publication/snapshot step names. Configuration,
+executable code and UID come from that qualified Source invocation, never an
+arbitrary command in the recipe. The existing native/manager freeze must match
+the original process and an already prepared `preserve` controller. Store
+identities and context pins are retained in the existing lifecycle link.
+
+Preparation observes the installed SDK and requires its existing closed imports
+and receipt under shared generation ownership. It cannot install or construct a
+missing environment. Nested SDK/reader probes share the owner's finite budget;
+the transient Source CLI has its own process group so timeout cleanup also ends
+its probes and joins the CLI. Ordinary SDK preparation retains its defaults.
+
+The owner journals a planned child and returns only public binding hashes/ID.
+The parent freezes the preparation recipe, then retains that returned child ID
+with `bind_admission_lifecycle` before any stop; embedding both generated child
+ID and parent intent hash into each other's immutable intent would be circular.
+A lost plan reply recovers the original target before fresh expiry/process reads.
+Changed requests, including another manifest for the same social operation,
+refuse instead of planning another child. This is historical preparation, not
+permission to stop, social membership or receiving acceptance. The complete
+social caller and installed cohort journey remain unfinished.
+
 This retained context permits closed offline maintenance if application
 publication has advanced while the serving selector still names its predecessor.
 Source's normal loader and Target's public observation continue rejecting that

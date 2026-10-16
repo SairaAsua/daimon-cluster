@@ -16,6 +16,24 @@ from tests.test_onboarding_guest import artifact
 from tools.build_onboarding_sdk import seal
 
 
+def test_sdk_probes_share_original_nested_budget_and_release_it_on_failure(monkeypatch):
+    from types import SimpleNamespace
+    clock, waits = [1_000_000_000], []
+    monkeypatch.setattr(onboarding_sdk, 'time', SimpleNamespace(monotonic_ns=lambda: clock[0]))
+    def probe(argv, **options):
+        waits.append(options['timeout'])
+        clock[0] += 60_000_000
+        return SimpleNamespace(returncode=0, stdout=b'qualified')
+    monkeypatch.setattr(onboarding_sdk.subprocess, 'run', probe)
+    with pytest.raises(OnboardingError, match='deadline_expired'):
+        with onboarding_sdk.probe_budget(1_100_000_000):
+            with onboarding_sdk.probe_budget(1_200_000_000):
+                assert onboarding_sdk._run(['bounded-sdk-probe']) == 'qualified'
+            onboarding_sdk._run(['second-sdk-probe'])
+    assert waits == pytest.approx([0.1, 0.04])
+    assert onboarding_sdk.probe_timeout(180) == 180
+
+
 def fixture(tmp_path, *, requirements=(), wheel_tag='py3-none-any'):
     code = tmp_path / "code"
     artifact(code)

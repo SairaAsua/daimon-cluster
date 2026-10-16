@@ -90,7 +90,7 @@ def test_preflight_uses_exact_qualified_reader_without_claiming_loaded_readiness
     assert 'installation' not in result and 'prepared' not in result
 
 
-def test_prepare_retries_actual_offline_sdk_without_changing_native_state(tmp_path):
+def test_prepare_retries_actual_offline_sdk_without_changing_native_state(tmp_path, monkeypatch):
     code, checksum, home, path, manifest, marker = fixture(tmp_path)
     for name in ('.codex/auth.json', '.codex/native-session.json', 'matrix/state.sqlite3'):
         p = home / name
@@ -99,6 +99,9 @@ def test_prepare_retries_actual_offline_sdk_without_changing_native_state(tmp_pa
     before = {p: p.read_bytes() for p in home.rglob('*') if p.is_file()}
     first = call(code, checksum, path, manifest, prepare=True, home=home)
     second = call(code, checksum, path, manifest, prepare=True, home=home)
+    with monkeypatch.context() as observation:
+        observation.setattr(onboarding_sdk, 'install', lambda *a, **k: pytest.fail('installed-only installed an SDK'))
+        assert call(code, checksum, path, manifest, prepare=True, home=home, installed_only=True) == first
     assert first == second and first['prepared'] is True
     assert first['installation']['matrix_commit'] == REVISION
     assert first['installation']['sdk_digest'] == first['sdk_digest']

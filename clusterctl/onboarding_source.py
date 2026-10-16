@@ -14,7 +14,7 @@ import signal
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -447,6 +447,11 @@ class Source:
         return dict(schema='cluster-receiving-source-lifecycle/v1',
             source_config_sha256=digest(self.settings), lifecycle=projected)
 
+    def prepare_receiving_admission(self, journal_path: Path, request: dict, *, config: Path,
+                                    deadline_ns: int) -> dict:
+        from .onboarding_receiving_update import prepare_source_admission
+        return prepare_source_admission(self, journal_path, request, config=config, deadline_ns=deadline_ns)
+
     def receiving_lifecycle_action(self, journal_path: Path, operation_id: str, action: str, *, deadline_ns: int) -> dict:
         """Execute only the protected operation through the existing user unit."""
         from .operation_journal import OperationJournal
@@ -506,10 +511,12 @@ def main(argv=None) -> int:
     parser.add_argument('--observation-deadline-ns', type=int)
     parser.add_argument('--expected-config-sha256')
     parser.add_argument('--receiving-lifecycle')
+    parser.add_argument('--prepare-admission-lifecycle', type=Path)
     parser.add_argument('--lifecycle-action', choices=('quiesce', 'preserve', 'derive', 'start', 'quiescence'))
     parser.add_argument('--operation-journal', type=Path)
     parser.add_argument('--group-request', type=Path)
     args = parser.parse_args(argv)
+    probe_scope = ExitStack()
     try:
         from . import onboarding_code_successor, onboarding_sdk
         code = Path(__file__).resolve().parents[1]
@@ -517,22 +524,23 @@ def main(argv=None) -> int:
             raise OnboardingError('qualified_source_code_owner_required')
         controlling = any(path is not None for path in (args.prepare_control, args.apply_control, args.prepare_apply_control))
         lifecycle = args.receiving_lifecycle is not None
+        preparing = args.prepare_admission_lifecycle is not None
         grouping = args.group_request is not None
         if args.native_tooling_json is not None and (not args.qualified_identity
                 or len(args.native_tooling_json.encode()) > 65536):
             raise OnboardingError('receiving_native_tooling_recipe_required')
-        receiving = args.owner_status or args.qualified_identity or controlling or lifecycle or grouping
-        if (sum((args.observe, args.owner_status, args.qualified_identity, controlling, lifecycle, grouping)) > 1
-                or lifecycle != (args.operation_journal is not None)
+        receiving = args.owner_status or args.qualified_identity or controlling or lifecycle or grouping or preparing
+        if (sum((args.observe, args.owner_status, args.qualified_identity, controlling, lifecycle, grouping, preparing)) > 1
+                or (lifecycle or preparing) != (args.operation_journal is not None)
                 or args.lifecycle_action is not None and not lifecycle
-                or lifecycle and (args.ready_fd is not None or args.require_loaded)
+                or (lifecycle or preparing) and (args.ready_fd is not None or args.require_loaded)
                 or args.qualified_identity != (args.identity_expires_at_ms is not None)
                 or args.identity_expires_at_ms is not None and not 0 < args.identity_expires_at_ms < 2**53
                 or (args.owner_status or args.qualified_identity or grouping) and (args.ready_fd is not None or args.require_loaded)
                 or args.expected_config_sha256 is not None and not receiving
                 or args.observation_deadline_ns is not None and not receiving):
             raise OnboardingError('invalid_receiving_control_request')
-        if (args.owner_status or args.qualified_identity or lifecycle or grouping) and args.observation_deadline_ns is None:
+        if (args.owner_status or args.qualified_identity or lifecycle or grouping or preparing) and args.observation_deadline_ns is None:
             args.observation_deadline_ns = time.monotonic_ns() + 30_000_000_000
         def accept_deadline():
             if args.observation_deadline_ns is not None and time.monotonic_ns() >= args.observation_deadline_ns:
@@ -551,6 +559,7 @@ def main(argv=None) -> int:
             if not isinstance(stdin_command, dict):
                 raise OnboardingError('invalid_receiving_control_request')
         accept_deadline()
+        probe_scope.enter_context(onboarding_sdk.probe_budget(args.observation_deadline_ns))
         parameters = onboarding_code_successor.sdk_parameters(code, uid=args.code_owner)
         if receiving and not parameters:
             raise OnboardingError('qualified_onboarding_source_observer_required')
@@ -567,6 +576,18 @@ def main(argv=None) -> int:
         accept_deadline()
         source = Source(settings, code=code, code_uid=args.code_owner, code_digest=args.code_digest,
                         qualified_startup=startup)
+        if preparing:
+            if args.prepare_admission_lifecycle == Path('-'):
+                raw = sys.stdin.buffer.read(being_seed.MAX_SELECTION + 1)
+                if len(raw) > being_seed.MAX_SELECTION:
+                    raise OnboardingError('receiving_source_admission_preparation_required')
+                request = json.loads(raw)
+            else:
+                request = being_seed._read(args.prepare_admission_lifecycle, limit=being_seed.MAX_SELECTION)
+            result = source.prepare_receiving_admission(args.operation_journal, request,
+                config=args.config, deadline_ns=args.observation_deadline_ns)
+            print(json.dumps(result))
+            return 0
         if grouping:
             from .onboarding_group_admission import request_packet
             if args.group_request == Path('-'):
@@ -639,6 +660,8 @@ def main(argv=None) -> int:
         # No paths, custody, token values or raw native errors in service logs.
         print(json.dumps({'error': 'native_onboarding_source_refused'}))
         return 1
+    finally:
+        probe_scope.close()
 
 
 if __name__ == '__main__':

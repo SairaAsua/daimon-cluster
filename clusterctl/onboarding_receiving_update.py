@@ -11,6 +11,7 @@ import io
 import json
 import os
 import re
+import signal
 import stat
 import subprocess
 import sys
@@ -449,6 +450,24 @@ class GuestGroupClient:
             endpoint=endpoint, timeout_seconds=self.timeout_seconds, deadline_ns=self.deadline_ns)
 
 
+def _run_owner(argv: list[str], **options):
+    """Bound and reap one technical owner CLI and its probe descendants."""
+    payload, timeout = options.pop('input', None), options.pop('timeout')
+    options.pop('capture_output', None)
+    with subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          start_new_session=True, **options) as process:
+        try:
+            stdout, stderr = process.communicate(payload, timeout=timeout)
+        except BaseException:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.communicate()
+            raise
+        return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
 class SourceGroupClient:
     """Host coordination through the approved receiving owner's closed CLI.
 
@@ -507,7 +526,7 @@ class SourceGroupClient:
         try:
             # user/group/extra_groups are applied by subprocess BEFORE exec.
             # Do not stat, prepare or import this private interpreter as root.
-            result = subprocess.run(argv, input=payload, text=True, capture_output=True,
+            result = _run_owner(argv, input=payload, text=True, capture_output=True,
                 timeout=remaining,
                 user=self.owner_uid, group=self.owner_gid, extra_groups=(),
                 env={'PATH': os.defpath, 'LANG': 'C.UTF-8', 'PYTHONDONTWRITEBYTECODE': '1'})
@@ -627,6 +646,27 @@ class SourceGroupClient:
                 or row.get('operation') != 'receiving-update'):
             raise OnboardingError('receiving_source_lifecycle_conflict')
         return row
+
+    def prepare_admission_lifecycle(self, request: dict) -> dict:
+        """Create/recover this owner's local child; return public pins only."""
+        if self.lifecycle_journal is None:
+            raise OnboardingError('receiving_source_lifecycle_binding_required')
+        result = self._call(['--prepare-admission-lifecycle', '-',
+            '--operation-journal', str(self.lifecycle_journal)], command=request)
+        if (set(result) != {'schema', 'operation_id', 'source_config_sha256', 'code_digest', 'request_sha256',
+                'cohort_operation_id', 'cohort_intent_sha256', 'link_sha256', 'owner_context_sha256', 'receiving_readiness'}
+                or result.get('schema') != 'cluster-source-admission-prepared/v1'
+                or result.get('source_config_sha256') != self.config_sha256
+                or result.get('code_digest') != self.code_digest
+                or result.get('request_sha256') != digest(request)
+                or any(result.get(key) != request.get(key) for key in (
+                    'cohort_operation_id', 'cohort_intent_sha256', 'owner_context_sha256'))
+                or not isinstance(result.get('operation_id'), str) or not result['operation_id']
+                or not isinstance(result.get('link_sha256'), str)
+                or re.fullmatch('[0-9a-f]{64}', result['link_sha256']) is None
+                or result.get('receiving_readiness') != 'unobserved'):
+            raise OnboardingError('receiving_source_lifecycle_conflict')
+        return result
 
     def lifecycle_action(self, operation_id: str, action: str) -> dict:
         """Use the same qualified owner for the frozen Matrix-only lifecycle."""
@@ -1032,11 +1072,12 @@ def admission_lifecycle_projection(row: dict, *, profile: str, name: str | None 
         raise OnboardingError('receiving_admission_lifecycle_unobserved') from None
 
 
-def freeze_source_bootstrap(source, manager) -> dict:
+def freeze_source_bootstrap(source, manager, *, deadline_ns: int | None = None) -> dict:
     """Freeze the Source's existing identity and actual Matrix manager scope."""
-    with OwnerGroupClient(source.root, source.root / 'matrix.sock') as owner:
+    options = {} if deadline_ns is None else {'deadline_ns': deadline_ns}
+    with OwnerGroupClient(source.root, source.root / 'matrix.sock', **options) as owner:
         predecessor = owner.base_status()
-        service = manager.inspect()
+        service = manager.inspect(**options)
         scope = manager.bind_process(predecessor['process'], service)
         bundle = being_seed._read(source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
         if (bundle['local_origin'] != predecessor['runtime_status']['local_origin']
@@ -1057,7 +1098,8 @@ def freeze_source_bootstrap(source, manager) -> dict:
 def prepare_source_bootstrap(source, *, home: Path, code: Path, code_digest: str,
                              config: Path, manifest_path: Path, manifest_digest: str,
                              transaction: Path, expires_at_ms: int, code_uid: int = 0,
-                             manifest_uid: int = 0, admission_link: dict | None = None) -> dict:
+                             manifest_uid: int = 0, admission_link: dict | None = None,
+                             installed_only: bool = False) -> dict:
     """Prepare the exact supported Source command before managed interruption.
 
     Only owner-protected release/configuration inputs select executable code.
@@ -1074,20 +1116,134 @@ def prepare_source_bootstrap(source, *, home: Path, code: Path, code_digest: str
     group = source_bootstrap_group(source, bundle)
     checked = prepare_sdk(home, code, code_digest, manifest_path, manifest_digest,
         being_ref=bundle['manifest']['being_ref'], embodiment_id=bundle['local_origin']['embodiment_id'],
-        code_uid=code_uid, manifest_uid=manifest_uid)
+        code_uid=code_uid, manifest_uid=manifest_uid,
+        **({'installed_only': True} if installed_only else {}))
     parameters = sdk_parameters(code, uid=code_uid)
     if parameters != dict(matrix_commit=checked['matrix_revision'], matrix_wheel_sha256=checked['matrix_wheel_sha256']):
         raise OnboardingError('qualified_onboarding_source_runtime_required')
     venv = onboarding_sdk.observe(home, code, code_uid=code_uid, **parameters)
-    imports = onboarding_sdk.runtime_imports(venv, code, code_uid=code_uid, **parameters)
-    argv = onboarding_sdk.runtime_command(venv, imports, code, 'clusterctl.onboarding_source',
-        ['--config', str(config), '--code-digest', code_digest, '--code-owner', str(code_uid)])
+    with ExitStack() as read_scope:
+        if installed_only:
+            read_scope.enter_context(being_seed._locked(venv.parent, shared=True))
+            private_directory(venv.parent / 'runtime-imports')
+            being_seed._read(venv.parent / 'runtime-imports.json')
+        imports = onboarding_sdk.runtime_imports(venv, code, code_uid=code_uid, **parameters)
+        argv = onboarding_sdk.runtime_command(venv, imports, code, 'clusterctl.onboarding_source',
+            ['--config', str(config), '--code-digest', code_digest, '--code-owner', str(code_uid)])
     association = ({} if admission_link is None else dict(admission_link=admission_lifecycle_link(
         admission_link, being_ref=bundle['manifest']['being_ref'],
         embodiment_id=bundle['local_origin']['embodiment_id'])))
     return dict(transaction=str(transaction), expires_at_ms=expires_at_ms, argv=argv, **association,
         qualification=dict(home=str(home), code=str(code), code_digest=code_digest, code_uid=code_uid, group=group,
             config=str(config), manifest_path=str(manifest_path), manifest_uid=manifest_uid, prepared=checked))
+
+
+def prepare_source_admission(source, journal_path: Path, request: dict, *, config: Path,
+                             deadline_ns: int) -> dict:
+    """Plan the existing Source's local admission lifecycle without stopping it.
+
+    The qualified owner supplies code/configuration. The protected coordinator
+    supplies the closed preparation recipe; only the resulting public binding
+    leaves this owner's journal. Exact retries never freeze a later process.
+    """
+    from .onboarding_code_successor import plan_update
+    from .onboarding_group_admission import preview_owner_context
+    from .onboarding_service import MatrixUserService
+    from .operation_journal import JournalConflict, OperationJournal
+    fields = {'schema', 'operation_id', 'cohort_operation_id', 'cohort_intent_sha256',
+        'tribe_ref', 'owner', 'predecessor', 'unit', 'home', 'manifest_path', 'manifest_uid',
+        'manifest_digest', 'expires_at_ms', 'authority_closure', 'owner_context_sha256', 'steps'}
+    try:
+        if (not isinstance(request, dict) or set(request) != fields
+                or request['schema'] != 'cluster-source-admission-preparation/v1'
+                or str(uuid.UUID(request['operation_id'])) != request['operation_id']
+                or any(not isinstance(request[key], str) or not 1 <= len(request[key]) <= 240
+                    for key in ('cohort_operation_id', 'tribe_ref'))
+                or any(not isinstance(request[key], str) or re.fullmatch('[0-9a-f]{64}', request[key]) is None
+                    for key in ('cohort_intent_sha256', 'manifest_digest', 'owner_context_sha256'))
+                or any(not isinstance(request[key], str) or not Path(request[key]).is_absolute()
+                    or '..' in Path(request[key]).parts for key in ('unit', 'home', 'manifest_path'))
+                or type(request['manifest_uid']) is not int or request['manifest_uid'] < 0
+                or type(request['expires_at_ms']) is not int or not 0 < request['expires_at_ms'] < 2**53
+                or not isinstance(request['owner'], dict) or set(request['owner']) != {'being_ref', 'embodiment_id'}
+                or any(not isinstance(value, str) or not value for value in request['owner'].values())
+                or not isinstance(request['predecessor'], dict) or set(request['predecessor']) != {'process', 'server'}
+                or not all(isinstance(value, dict) for value in request['predecessor'].values())
+                or not isinstance(request['authority_closure'], dict)
+                or not isinstance(request['steps'], dict)
+                or set(request['steps']) != {'application', 'visibility', 'selection', 'snapshot'}
+                or any(not isinstance(step, str) or re.fullmatch('[a-z][a-z0-9-]{0,79}', step) is None
+                    for step in request['steps'].values()) or len(set(request['steps'].values())) != 4
+                or not isinstance(source.qualified_startup, dict)
+                or not isinstance(source.code_digest, str) or re.fullmatch('[0-9a-f]{64}', source.code_digest) is None):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise OnboardingError('receiving_source_admission_preparation_required') from None
+    def budget(*, fresh: bool = False):
+        if time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('receiving_owner_deadline_expired')
+        if fresh and time.time_ns() // 1_000_000 >= request['expires_at_ms']:
+            raise OnboardingError('receiving_preservation_authorization_expired')
+    budget()
+    target = 'source-admission:' + request['operation_id']
+    journal = OperationJournal.existing(journal_path)
+    row = None if journal is None else journal.latest_for_target(target)
+    if row is None:
+        budget(fresh=True)
+        preview = preview_owner_context(source.root, source.outputs / 'tribe', request['operation_id'],
+            request['authority_closure'], deadline_ns=deadline_ns)
+        if preview['owner_context_sha256'] != request['owner_context_sha256']:
+            raise OnboardingError('onboarding_group_owner_context_conflict')
+        manager = MatrixUserService(Path(request['unit']))
+        frozen = freeze_source_bootstrap(source, manager, deadline_ns=deadline_ns)
+        if (frozen['mode'] != 'preserve' or frozen['bundle_sha256'] != preview['runtime_bundle_sha256']
+                or request['predecessor'] != {key: frozen['predecessor'][key] for key in ('process', 'server')}
+                or _owner_identity(frozen['predecessor']) != (
+                    request['owner']['being_ref'], request['owner']['embodiment_id'])):
+            raise OnboardingError('receiving_source_admission_predecessor_changed')
+        preservation_authorization(frozen['preservation'], request['expires_at_ms'])
+        stores = (frozen['predecessor']['runtime_status'].get('loaded_runtime') or {}).get('stores')
+        bundle = being_seed._read(source.root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+        preserved_admission_stores(source.root, bundle, frozen['preservation'], stores)
+        steps = request['steps']
+        snapshot = dict(operation_id=request['operation_id'], step=steps['snapshot'], action='snapshot', params=dict(
+            application_step=steps['application'], visibility_step=steps['visibility'], selection_step=steps['selection'],
+            owner_context_sha256=request['owner_context_sha256'], expected_stores=stores,
+            expected_preservation=frozen['preservation']))
+        link = admission_lifecycle_link(dict(schema='cluster-admission-lifecycle-link/v1',
+            cohort_operation_id=request['cohort_operation_id'], cohort_intent_sha256=request['cohort_intent_sha256'],
+            tribe_ref=request['tribe_ref'], owner=request['owner'], snapshot_request=snapshot), **request['owner'])
+        with onboarding_sdk.probe_budget(deadline_ns):
+            candidate = prepare_source_bootstrap(source, home=Path(request['home']), code=source.code,
+                code_digest=source.code_digest, config=config, manifest_path=Path(request['manifest_path']),
+                manifest_digest=request['manifest_digest'],
+                transaction=source.root.parent / ('.admission-controller-' + request['operation_id']),
+                expires_at_ms=request['expires_at_ms'], code_uid=source.code_uid, manifest_uid=request['manifest_uid'],
+                admission_link=link, installed_only=True)
+        if candidate['qualification']['group']['selected']['tribe_ref'] != request['tribe_ref']:
+            raise OnboardingError('receiving_admission_tribe_changed')
+        budget(fresh=True)
+        journal = OperationJournal(journal_path)
+        row = plan_update(journal, manifest_digest=request['manifest_digest'], target=target,
+            expected_precondition=dict(source_bootstrap=frozen, source_admission_preparation=request),
+            intended_transition=dict(source_bootstrap=candidate),
+            audit_identity={'actor': 'qualified-source-admission-owner'})
+    if (row['expected_precondition'].get('source_admission_preparation') != request
+            or row['state'] in {'degraded', 'compensated'}
+            or row['intended_transition']['source_bootstrap']['qualification']['code'] != str(source.code)
+            or row['intended_transition']['source_bootstrap']['qualification']['code_digest'] != source.code_digest):
+        raise JournalConflict('source admission preparation changed')
+    # Reuse the supported owner projection for journal/config/intent integrity;
+    # this is historical preparation, never authorization to stop or load.
+    projected = source.receiving_lifecycle(journal_path, row['operation_id'])
+    link = row['intended_transition']['source_bootstrap']['admission_link']
+    if projected['lifecycle'].get('admission', {}).get('link_sha256') != digest(link):
+        raise OnboardingError('receiving_source_lifecycle_conflict')
+    budget()
+    return dict(schema='cluster-source-admission-prepared/v1', operation_id=row['operation_id'],
+        source_config_sha256=digest(source.settings), code_digest=source.code_digest, request_sha256=digest(request),
+        cohort_operation_id=request['cohort_operation_id'], cohort_intent_sha256=request['cohort_intent_sha256'],
+        link_sha256=digest(link), owner_context_sha256=request['owner_context_sha256'], receiving_readiness='unobserved')
 
 
 def source_bootstrap_group(source, bundle: dict) -> dict:
@@ -3899,9 +4055,10 @@ print(json.dumps(dict(reader=reader, assessment=assessment, artifacts=artifacts)
             process = subprocess.run([sys.executable, '-I', '-S', '-B', '-c', launcher, str(root)],
                 input=json.dumps(dict(manifest=manifest, digest=manifest_digest,
                     being_ref=being_ref, embodiment_id=embodiment_id)).encode(),
-                capture_output=True, timeout=30, check=False, umask=0o077,
+                capture_output=True, timeout=onboarding_sdk.probe_timeout(30), check=False, umask=0o077,
                 env={'PATH': os.defpath, 'LANG': 'C.UTF-8',
                      'LD_LIBRARY_PATH': str(Path(sys.base_prefix) / 'lib')})
+            onboarding_sdk.probe_timeout(30)
             if process.returncode or len(process.stdout) > 2 * 1024**2:
                 raise OnboardingError('qualified_receiving_reader_required')
             result = json.loads(process.stdout)
@@ -3954,12 +4111,14 @@ def preflight(code: Path, code_digest: str, manifest_path: Path, manifest_digest
 
 def prepare_sdk(home: Path, code: Path, code_digest: str, manifest_path: Path,
                 manifest_digest: str, *, being_ref: str, embodiment_id: str,
-                code_uid: int = 0, manifest_uid: int = 0) -> dict:
+                code_uid: int = 0, manifest_uid: int = 0, installed_only: bool = False) -> dict:
     """Install/observe the approved offline SDK without selecting a live runtime."""
     checked = preflight(code, code_digest, manifest_path, manifest_digest,
         being_ref=being_ref, embodiment_id=embodiment_id, code_uid=code_uid, manifest_uid=manifest_uid)
-    venv = onboarding_sdk.install(home, code, code_digest, code_uid=code_uid,
-        matrix_commit=checked['matrix_revision'], matrix_wheel_sha256=checked['matrix_wheel_sha256'])
+    options = dict(code_uid=code_uid, matrix_commit=checked['matrix_revision'],
+        matrix_wheel_sha256=checked['matrix_wheel_sha256'])
+    venv = (onboarding_sdk.observe(home, code, **options) if installed_only else
+        onboarding_sdk.install(home, code, code_digest, **options))
     interpreter = onboarding_sdk.interpreter(venv)
     if interpreter != checked['reader']['contract']['interpreter']:
         raise OnboardingError('incompatible_receiving_interpreter')
