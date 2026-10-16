@@ -4,7 +4,40 @@ Architecture/profile navigation is
 [Matrix current architecture](https://github.com/AlterMundi/daimon-matrix/blob/main/docs/current-architecture.md).
 Current selections below supersede the explicitly historical qualification.
 
-## Current milestone work
+## Receiving frontier — 2026-10-16
+
+The three VPS bodies actually select Matrix SDK
+`80542cee1d56e3d46bbda21f4174e3df75cf5585` and receiving code
+`d7d64a19f6eb939d3428c13d2a1bdddb1bd2ed4b62719306884a611a766312b3`.
+Cluster PR261 merged as `c722616eaf4d571ae409888c9eff72a97414bec8` with scoped
+CI38895593186 passing. Preserve-mode Source/Eko/Oliva lifecycle receipts and
+cohort `6365754a-e62e-4e94-a6c1-6fc82f9d4531` confirm all-required tooling,
+receiving adoption and final sender selection. The qualified2144 onboarding
+worker was restored with original jobs retained. Existing native human sessions
+and Telegram listeners were not restarted. No global Stop was performed.
+
+One real group send has all three VPS signed delivery receipts; the Eko-to-Oliva
+body direct and its exact retry also passed. Concurrent group replies left two
+legs unconfirmed and their readable copies absent: Matrix#363 remains open.
+Other Root bodies are explicitly unroutable, not qualified by these VPS results.
+Full milestone acceptance is unfinished. The SDK0dc/codefb compatible predecessor
+is preserved; accepted authority, history and uncertain inputs must not be reset.
+
+The human resumed the native milestone goal; it is active. Future Cluster227
+source and its retained synthetic admission fixture remain separate from the
+selected2144 worker. The ordinary checkout is not the deployed worker. Source
+I/O's merged Telecodex PR100 candidate is staged, not selected; the Matrix-only
+rollout permission does not authorize a Telegram restart. Follow the current
+[Matrix receiving frontier](https://github.com/AlterMundi/daimon-matrix/blob/main/CURRENT-STATE.md)
+and the retained local operation checkpoint for exact effects and remaining work.
+Before another real operation that could interrupt communication, prepare its
+receiving/recovery boundary and obtain the scoped human authorization required
+by the goal. Every global Stop requires its own fresh explicit human request.
+
+The following dated work records preserve history and qualification; they do
+not override this receiving frontier or select an older production pin.
+
+## Historical milestone preparation — before the2026-10-16 rollout
 
 Matrix [milestone6 / #336](https://github.com/AlterMundi/daimon-matrix/issues/336)
 is active. Cluster [PR242](https://github.com/nicoechaniz/daimon-cluster/pull/242)
@@ -28,7 +61,7 @@ Full CI uses one Python3.13.5 job with a30-minute limit. Run38728293267 exhauste
 the former20-minute cap at75% of the fail-fast suite without reporting a test
 failure. This job budget does not change any receiving/native freshness deadline.
 
-## Current communication target — 2026-10-13
+## Historical communication target — 2026-10-13
 
 CompAII, Eko and Oliva now use one signed membership group, demonstrated with
 actual three-body semantic receipts and connected replies. Matrix PR #330 is
