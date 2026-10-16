@@ -637,19 +637,27 @@ class GroupCoordinator:
             owner = owners[intent['sender']['owner']]
             tooling = admission['receivers'][intent['sender']['owner']]['recipe']['tooling']
             binding = Path(tooling['attachment'])/tooling.get('binding_filename','binding.json')
+            def call(method: str, parameters: dict, **options) -> dict:
+                # The frozen intent identifies the native group. A configured
+                # multi-link attachment exposes that same group under its
+                # approved public alias; the SDK normalizes it before journaling.
+                public = {**parameters, 'channel_id':tooling['tribe_channel']}
+                if method == 'messaging_reply':
+                    public['received_channel_id'] = tooling['tribe_channel']
+                return owner.messaging(method, public, binding=binding, **options)
             response = None
             dispatched = False
             if attempted:
                 try:
-                    response = owner.messaging('messaging_delivery', dict(channel_id='tribe', send_id=intent['parameters']['send_id']), binding=binding)
+                    response = call('messaging_delivery', dict(channel_id='tribe', send_id=intent['parameters']['send_id']))
                 except (OnboardingError, OSError):
                     pass
             if response is None:
                 if time.time_ns() // 1_000_000 >= scope['expires_at_ms']:
                     return False
                 before_authoring()
-                response = owner.messaging('messaging_reply' if step == 'reply' else 'messaging_send',
-                    intent['parameters'], binding=binding, authoring_expires_at_ms=scope['expires_at_ms'])
+                response = call('messaging_reply' if step == 'reply' else 'messaging_send',
+                    intent['parameters'], authoring_expires_at_ms=scope['expires_at_ms'])
                 dispatched = True
             required = {(item['being_ref'],item['embodiment_id']) for item in admission['receivers'].values()
                 if (item['being_ref'],item['embodiment_id']) != (intent['sender']['being_ref'],intent['sender']['embodiment_id'])}
@@ -671,8 +679,8 @@ class GroupCoordinator:
                 # Inspection cannot resume a busy/interrupted native fanout.
                 # Replay the SAME durable request, never another message ID.
                 before_authoring()
-                response = owner.messaging('messaging_reply' if step == 'reply' else 'messaging_send',
-                    intent['parameters'], binding=binding, authoring_expires_at_ms=scope['expires_at_ms'])
+                response = call('messaging_reply' if step == 'reply' else 'messaging_send',
+                    intent['parameters'], authoring_expires_at_ms=scope['expires_at_ms'])
                 proof = qualify(response)
             if proof is None:
                 return False

@@ -1345,3 +1345,15 @@ pointing at the artifact disk otherwise lengthens the Unix socket beyond its
 limit. The large SDK stays on that disk; only small native/authority state needs
 the short local home. Retain synthetic child diagnostics on failure rather than
 changing production APIs, rebuilding dependencies or increasing readiness limits.
+Use the local temporary filesystem for small deadline-sensitive job/journal
+fixtures too. Moving all test temporaries to an artifact volume can consume the
+operation's real deadline in filesystem commits and obscure the behavior under
+test. Reuse the prepared large artifacts there without relocating every fixture.
+
+Admission communication intents retain the canonical native `tribe` channel and
+exact IDs. At the owner-tool boundary, use the protected tooling recipe's public
+`tribe_channel` alias for send, delivery inspection and both reply channel fields.
+The existing SDK validates that alias and normalizes it before request journaling.
+Do not send an unconfigured bare `tribe` to a multi-link attachment or change a
+retained native request to repair a public alias. Existing tooling acceptance
+still binds the alias to the expected group socket and identity.

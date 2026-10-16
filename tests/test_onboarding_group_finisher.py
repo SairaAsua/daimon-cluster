@@ -42,6 +42,9 @@ def full(fixture, monkeypatch, request):  # noqa: F811 - imported shared pytest 
             socket_path=str(owner.socket),lifecycle_journal=str(owner.root/'journal'))
     if 'window_ms' in settings:
         admission['activation']['observation_window_ms'] = settings['window_ms']
+    if 'channel' in settings:
+        for item in admission['receivers'].values():
+            item['recipe']['tooling']['tribe_channel'] = settings['channel']
     social = dict(operation_id=str(uuid.uuid4()), founder_owner='eko', entrant_owner='newcomer',
         authority_closure={owner.being:{} for owner in f.owners.values()}, owner_contexts={name:'4'*64 for name in f.owners})
     transition['portal_admission'].update(schema=module.SOCIAL_CALLER_SCHEMA, social=social,owners_sha256=digest(selected['owners']))
@@ -362,6 +365,40 @@ def test_pending_native_fanout_resumes_same_request_within_original_scope(full):
     assert original_id in x.messages and len(x.messages) == 3
     assert x.calls.count('resume-messaging_send') == 1
     assert x.calls.count('messaging_send') == 2
+
+
+@pytest.mark.parametrize('full', [dict(channel='membership/tribe')], indirect=True)
+def test_full_caller_routes_technical_checks_through_the_approved_public_alias(full):
+    """Use the real SDK alias validator/normalizer at the owner boundary."""
+    from daimon_matrix.agent_chat import MULTI_SCHEMA, checked_arguments, _link_arguments
+    x = full
+    binding = dict(schema=MULTI_SCHEMA, incoming_channels=['membership/tribe'],
+        outgoing_channels=['membership/tribe'])
+    routed = []
+    for owner in x.f.owners.values():
+        original = owner.messaging
+        def messaging(method, parameters, *, original=original, **options):
+            checked = checked_arguments(binding, method, parameters)
+            alias, normalized = _link_arguments(method, checked)
+            assert alias == 'membership'
+            routed.append((method, copy.deepcopy(parameters)))
+            return original(method, normalized, **options)
+        owner.messaging = messaging
+    x.fault['echo'] = False
+    x.worker._tick('newcomer')
+    x.fault['echo'] = True
+    x.worker._tick('newcomer')
+    current = x.journal.get(x.row['operation_id'])
+    assert current['state'] == 'completed'
+    assert len(x.messages) == 3
+    assert {'messaging_send', 'messaging_delivery', 'messaging_reply'} <= {method for method, _ in routed}
+    assert all(params['channel_id'] == 'membership/tribe' for _, params in routed)
+    assert next(params for method, params in routed if method == 'messaging_reply')['received_channel_id'] == 'membership/tribe'
+    # Alias selection is presentation/routing. The retained native request IDs
+    # and reply context stay on the same canonical group.
+    phases = current['runtime_observation']['portal_admission']
+    assert all(phases['communication-intent-'+step]['parameters']['channel_id'] == 'tribe'
+        for step in ('group', 'direct', 'reply'))
 
 
 def test_restarted_receiver_cannot_borrow_an_old_selection_for_new_speech(full):
