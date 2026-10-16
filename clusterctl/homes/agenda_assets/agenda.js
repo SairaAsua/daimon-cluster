@@ -57,7 +57,7 @@
       $('initialize').hidden=fresh.initialized;$('workspace').hidden=!fresh.initialized;
       $('auth').hidden=true;message('');
       if(fresh.initialized){render();if(!fresh.calendar.setup_complete&&!onboardingShown){onboardingShown=true;calendarDialog();}}
-    } catch(error) {message(error.message+(state?' La vista anterior puede estar desactualizada.':''),true);}
+    } catch(error) {if(error.status===401||error.status===403){state=null;selected=null;$('workspace').hidden=true;$('initialize').hidden=true;$('task-list').replaceChildren();$('project-list').replaceChildren();$('detail-description').textContent='';$('observations').replaceChildren();document.querySelectorAll('dialog[open]').forEach(d=>d.close());message('La sesión ya no tiene acceso a esta agenda. Vuelve a entrar para continuar.',true);const link=element('a',' Volver a entrar');link.href='/agenda/';$('status').append(link);}else message(error.message+(state?' La vista anterior puede estar desactualizada.':''),true);}
   }
   function projectName(id){return state.projects.find(p=>p.id===id)?.title||'Proyecto';}
   function taskDay(t){return !zero(t.due_date)?t.due_date.slice(0,10):null;}
