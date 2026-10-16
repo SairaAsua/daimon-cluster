@@ -14,6 +14,7 @@ import json
 import os
 import socket
 import subprocess
+import uuid
 from pathlib import Path
 
 from clusterctl import being_seed
@@ -28,6 +29,50 @@ DEVICE = 'qualification-network'
 INTERFACE = 'qnet0'
 COMMENT = 'q227-synthetic-data'
 NIC = dict(type='nic', network=BRIDGE, name=INTERFACE)
+LEGACY_ROOT = Path('/var/tmp/q232-host-mixed')
+
+
+def legacy_guest_owned(owner: dict) -> bool:
+    """Pin the original qualified guest, which predates host-created markers.
+
+    The old root-owned authenticated load binds the actual runtime directory,
+    bundle and container boot. Do not manufacture enrollment metadata or accept
+    an arbitrary unmarked instance with the same name.
+    """
+    plan = owner['plan']
+    root = '/home/agent/.local/state/daimon-onboarding/q232-mixed/matrix/package/runtime'
+    if plan['name'] != 'q232-mixed' or owner['root'] != root:
+        return False
+    try:
+        record = being_seed._read(LEGACY_ROOT/'guest-compatible-rollback-loaded.json')
+        baseline = being_seed._read(LEGACY_ROOT/'compatible-rollback-baseline.json')['observed']
+        loaded = record['loaded']
+        runtime = loaded['loaded_runtime']
+        if (record['actual_admitted_parent'] is not True
+                or record['actual_host_backend'] is not True
+                or record['production_effects'] != 0
+                or loaded['schema'] != 'cluster-guest-bootstrap-loaded/v1'
+                or baseline['plan_digest'] != digest(plan)
+                or baseline['origin'] != runtime['local_origin']
+                or baseline['process']['boot_id'] != loaded['process']['boot_id']):
+            return False
+        expected = dict(state_root_identity=runtime['state_root_identity'], uid=1000,
+            boot_id=loaded['process']['boot_id'], runtime_bundle_sha256=runtime['runtime_bundle_sha256'])
+        script = '''import hashlib,json,sys
+from pathlib import Path
+root=Path(sys.argv[1])
+if root.resolve()!=root:raise ValueError('preserve the original runtime path')
+value=root.stat();bundle=root/'runtime.json'
+if bundle.resolve()!=bundle or bundle.stat().st_uid!=1000:raise ValueError('preserve the owned bundle')
+print(json.dumps(dict(state_root_identity=dict(device=value.st_dev,inode=value.st_ino),uid=value.st_uid,
+    boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+    runtime_bundle_sha256=hashlib.sha256(bundle.read_bytes()).hexdigest())))
+'''
+        actual = json.loads(incus('exec', 'dm-q232-mixed', '--user', '1000', '--group', '1000',
+            '--', '/usr/bin/python3', '-I', '-S', '-B', '-c', script, root))
+        return actual == expected
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+        return False
 
 
 def command(argv: list[str], *, text: str | None = None) -> str:
@@ -50,7 +95,33 @@ def owned_firewall(rows: list[dict]) -> list[dict]:
     return result
 
 
-def scope(root: Path) -> tuple[HostBackend, dict]:
+def instance_pin(plan: dict, instance: dict) -> dict:
+    value = instance['config']['volatile.uuid']
+    if instance['name'] != 'dm-'+plan['name'] or str(uuid.UUID(value)) != value:
+        raise ValueError('preserve the original synthetic instance identity')
+    return dict(instance=instance['name'], instance_uuid=value, plan_digest=digest(plan))
+
+
+def validate_selection(selected: dict, group: dict) -> None:
+    if (set(selected) != {'schema', 'bridge', 'subnet', 'owners'}
+            or selected['schema'] != 'cluster-synthetic-admission-network/v1'
+            or selected['bridge'] != BRIDGE or selected['subnet'] != SUBNET
+            or set(selected['owners']) != set(group['owners'])):
+        raise ValueError('preserve the complete recorded network scope')
+    for name, owner in group['owners'].items():
+        row = selected['owners'][name]
+        fields = {'address', 'port'}
+        if owner['profile'] == 'guest':
+            fields |= {'instance', 'instance_uuid', 'plan_digest'}
+            if (row.get('instance') != 'dm-'+name or row.get('plan_digest') != digest(owner['plan'])
+                    or not isinstance(row.get('instance_uuid'), str)
+                    or str(uuid.UUID(row['instance_uuid'])) != row['instance_uuid']):
+                raise ValueError('preserve the original synthetic instance pins')
+        if set(row) != fields:
+            raise ValueError('preserve the complete recorded network scope')
+
+
+def scope(root: Path) -> tuple[HostBackend, dict, dict]:
     if os.geteuid() != 0:
         raise ValueError('the synthetic host controller is required')
     value = being_seed._read(root/'scope.json')
@@ -61,12 +132,31 @@ def scope(root: Path) -> tuple[HostBackend, dict]:
     guests = {name: row for name, row in group['owners'].items() if row['profile'] == 'guest'}
     if set(guests) != {NAME, 'q232-mixed'}:
         raise ValueError('preserve the original synthetic owner set')
+    selected = being_seed._read(root/'network-scope.json') if (root/'network-scope.json').exists() else None
+    if selected is not None:
+        validate_selection(selected, group)
     instances = {row['name']: row for row in json.loads(incus('list', '--format=json'))}
+    pins = {}
     for name, row in guests.items():
-        if (not backend.authorize(row['plan'], digest(row['plan']))
-                or instances['dm-'+name]['config'].get('user.dm.onboarding-plan') != digest(row['plan'])):
+        if not backend.authorize(row['plan'], digest(row['plan'])):
             raise ValueError('the exact original synthetic instance is required')
-    return backend, group
+        instance = instances['dm-'+name]
+        pin = instance_pin(row['plan'], instance)
+        marker = instance['config'].get('user.dm.onboarding-plan')
+        allowed = marker == pin['plan_digest']
+        if selected is not None:
+            retained = {key: selected['owners'][name][key] for key in pin}
+            allowed = pin == retained and (allowed or marker is None and name == 'q232-mixed')
+        elif not allowed and marker is None and legacy_guest_owned(row):
+            # Bind the runtime proof to the same physical resource, then retain
+            # that resource pin before effects. Cleanup must survive SDK changes.
+            after = json.loads(incus('list', 'dm-'+name, '--format=json'))
+            allowed = (len(after) == 1 and instance_pin(row['plan'], after[0]) == pin
+                and after[0]['config'].get('user.dm.onboarding-plan') is None)
+        if not allowed:
+            raise ValueError('the exact original synthetic instance is required')
+        pins[name] = pin
+    return backend, group, pins
 
 
 def settings(selected: dict) -> dict:
@@ -107,6 +197,12 @@ def validate_resources(selected: dict, group: dict) -> tuple[bool, dict[str, boo
             continue
         instance = 'dm-'+name
         config = json.loads(incus('list', instance, '--format=json'))[0]
+        if any(selected['owners'][name].get(key) != value
+                for key, value in instance_pin(owner['plan'], config).items()):
+            raise ValueError('preserve the original synthetic instance identity')
+        marker = config['config'].get('user.dm.onboarding-plan')
+        if marker != digest(owner['plan']) and not (marker is None and name == 'q232-mixed'):
+            raise ValueError('preserve the original synthetic instance marker')
         devices = config['devices']
         expanded = config.get('expanded_devices', devices)
         if DEVICE in expanded and (devices.get(DEVICE) != NIC or expanded[DEVICE] != NIC):
@@ -188,17 +284,20 @@ def serialized(function):
 
 @serialized
 def prepare(root: Path) -> dict:
-    backend, group = scope(root)
+    backend, group, pins = scope(root)
     path = root/'network-scope.json'
     if not path.exists():
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
-        retain(path, dict(schema='cluster-synthetic-admission-network/v1', bridge=BRIDGE,
+        selected = dict(schema='cluster-synthetic-admission-network/v1', bridge=BRIDGE,
             subnet=SUBNET, owners={
                 'q232-mixed-source': dict(address='10.99.227.1', port=46129),
                 'q232-mixed': dict(address='10.99.227.2', port=52659),
-                NAME: dict(address='10.99.227.3', port=port)}))
+                NAME: dict(address='10.99.227.3', port=port)})
+        for name, pin in pins.items():
+            selected['owners'][name].update(pin)
+        retain(path, selected)
     selected = being_seed._read(path)
     exists, devices = validate_resources(selected, group)
     expected = desired_firewall(selected)
@@ -237,7 +336,7 @@ def prepare(root: Path) -> dict:
 
 @serialized
 def remove(root: Path) -> dict:
-    backend, group = scope(root)
+    backend, group, _pins = scope(root)
     selected = being_seed._read(root/'network-scope.json')
     exists, devices = validate_resources(selected, group)
     retained = being_seed._read(root/'network-firewall-expected.json')

@@ -1434,7 +1434,13 @@ The opt-in `tests.integration.portal_admission_network` owns one private L2 brid
 and one NIC per retained synthetic guest for actual cross-namespace HTTP. It
 checks the exact synthetic owners, bridge, inherited/local device and interface
 ownership before any effect. Its fixture-root lock serializes preparation and
-cleanup. Desired firewall expressions are retained and synced before the atomic
+cleanup. The old synthetic guest predates the onboarding-plan instance marker;
+its original authenticated load binds its runtime directory, bundle and boot.
+Initial proof is bracketed by the same native Incus UUID, then exact instance,
+UUID and authorized plan pins are retained before effects. Subsequent preparation
+and cleanup use those physical pins so legitimate SDK changes do not strand the
+network. Missing pins or conflicting markers are refused, never silently repaired
+or backfilled. Desired firewall expressions are retained and synced before the atomic
 nft transaction; retries accept exact installed rules without requiring a
 post-effect receipt. Cleanup validates complete remaining expressions and deletes
 owned rules/table in one transaction. It never flushes or edits existing rules.
