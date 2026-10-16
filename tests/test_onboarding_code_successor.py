@@ -69,6 +69,77 @@ def test_owner_successor_captures_current_tooling_inside_runtime_boundary(tmp_pa
     assert provenance['captured_module'] == 'clusterctl/' + TOOLING_INSTALLER_MODULE
 
 
+def test_seed_runtime_successor_executes_its_matching_tool_bundle_and_preserves_base(tmp_path):
+    """Exercise the installed module's verifier, not just the release inventory."""
+    import hashlib
+    from pathlib import Path
+    base, original, _, _ = fixture(tmp_path)
+    original_tools = {row['path']: (base/row['path']).read_bytes()
+        for row in onboarding_release.verify(base, original, uid=os.geteuid())['files']
+        if row['path'].startswith('support/')}
+    output = tmp_path/'successor'
+    result = build(base, original, Path(being_seed.__file__).parent, ('being_seed.py',), output)
+    check = subprocess.run([sys.executable, '-B', '-I', '-c',
+        'import sys;sys.path.insert(0,sys.argv[1]);'
+        'from clusterctl.being_seed import verified_tools;verified_tools()', str(output)],
+        capture_output=True, text=True, timeout=10)
+    assert check.returncode == 0, check.stderr
+    assert all((base/name).read_bytes() == raw for name, raw in original_tools.items())
+    assert (output/'inheritance.md').read_bytes() == (base/'inheritance.md').read_bytes()
+    assert (output/'hmk/scripts/memoryctl.py').read_bytes() == (base/'hmk/scripts/memoryctl.py').read_bytes()
+    for name, expected in being_seed.TOOL_HASHES.items():
+        assert hashlib.sha256((output/'support/being-seed-tools/tools'/name).read_bytes()).hexdigest() == expected
+    assert verify(output, result['runtime_digest'], base, original, uid=os.geteuid())
+
+
+@pytest.mark.parametrize('change', ['tool', 'provenance', 'unknown-asset', 'duplicate-pin', 'unpacked-pin'])
+def test_seed_runtime_successor_rejects_incoherent_or_unapproved_bundle(tmp_path, change):
+    from pathlib import Path
+    base, original, _, profile = fixture(tmp_path)
+    output = tmp_path/'successor'
+    build(base, original, Path(being_seed.__file__).parent, ('being_seed.py',), output)
+    if change == 'tool':
+        (output/'support/being-seed-tools/tools/export_being.py').write_text('Wrong executable.')
+    elif change == 'provenance':
+        path = output/'support/being-seed-tools/PROVENANCE.json'
+        value = json.loads(path.read_bytes())
+        path.write_text(json.dumps({**value, 'commit':'a'*40}))
+    elif change == 'unknown-asset':
+        path = output/'support/being-seed-tools/tools/unapproved.py'
+        path.write_text('Unapproved executable.')
+        path.chmod(0o644)
+    elif change == 'duplicate-pin':
+        path = output/'clusterctl/being_seed.py'
+        path.write_text(path.read_text().replace('TOOL_HASHES = {',
+            'TOOL_HASHES = {"export_being.py": "'+'a'*64+'",', 1))
+    else:
+        path = output/'clusterctl/being_seed.py'
+        path.write_text(path.read_text().replace('TOOL_HASHES = {', 'TOOL_HASHES = {**{},', 1))
+    (output/'release.json').unlink()
+    changed = onboarding_release.seal(output, profile)
+    with pytest.raises(OnboardingError, match=('original_onboarding_context_preserved'
+            if change == 'unknown-asset' else 'qualified_onboarding_seed_tool_bundle_required')):
+        verify(output, changed, base, original, uid=os.geteuid())
+
+
+def test_seed_runtime_verification_uses_selected_legacy_pins_not_builder_defaults(tmp_path, monkeypatch):
+    import hashlib
+    base, original, source, _ = fixture(tmp_path)
+    pins = {name:hashlib.sha256(b'Original tool.').hexdigest() for name in (
+        'export_being.py', 'receive_being.py', 'install_codex_identity.py')}
+    (source/'being_seed.py').write_text('TOOL_COMMIT = '+repr('a'*40)+'\nTOOL_HASHES = '+repr(pins)+'\n')
+    support = source.parent/'support/being-seed-tools'
+    (support/'tools').mkdir(parents=True)
+    for name in pins:
+        (support/'tools'/name).write_bytes(b'Original tool.')
+    (support/'PROVENANCE.json').write_text(json.dumps(dict(
+        repository='https://github.com/AlterMundi/daimon-matrix', commit='a'*40, files=pins)))
+    output = tmp_path/'legacy-successor'
+    result = build(base, original, source, ('being_seed.py',), output)
+    monkeypatch.setattr(being_seed, 'TOOL_HASHES', {'different-future-tool.py':'f'*64})
+    assert verify(output, result['runtime_digest'], base, original, uid=os.geteuid())
+
+
 def test_transfer_successor_adds_pinned_helper_without_replacing_context(tmp_path):
     import hashlib
     base, _, source, profile = fixture(tmp_path)

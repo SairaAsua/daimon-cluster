@@ -24,7 +24,7 @@ MODULES = ("__init__.py", "being_seed.py", "onboarding_transfer.py", "onboarding
            "onboarding_runtime.py", "onboarding_views.py", "onboarding_service.py", "onboarding_ssh.py", "onboarding_provider.py", "onboarding_telegram.py", "admission.py", "admission_supervisor.py", "fences.py", "production_fences.py")
 
 
-def copy_code(source: Path, target: Path) -> None:
+def read_code(source: Path) -> bytes:
     # An ordinary checkout is mutable. Its captured bytes become authority
     # only after the resulting artifact digest is qualified and selected.
     being_seed._path(source)
@@ -39,6 +39,11 @@ def copy_code(source: Path, target: Path) -> None:
         if len(raw) > 32 * 1024**2 or (before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
                 after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
             raise OnboardingError("build_code_changed")
+    return raw
+
+
+def copy_code(source: Path, target: Path) -> None:
+    raw = read_code(source)
     target.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                          0o755 if source.stat().st_mode & 0o100 else 0o644)

@@ -1,15 +1,19 @@
 """Qualify runtime-only code updates without rebinding a receiving seed or plan.
 
 The original context, skills, HMK tools and provider binary remain pinned.
-Ordinary successors change maintained Cluster modules only. An explicit V2
+Ordinary successors change maintained Cluster modules and their pinned seed-tool
+code bundle together. An explicit V2
 successor additionally pins the previous and qualified replacement SDK digests;
 dependency generations never overwrite an existing receiving environment.
 """
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
 import os
 import re
+from collections.abc import Callable
 from pathlib import Path
 
 from . import onboarding_release
@@ -21,6 +25,51 @@ TELEGRAM_SCHEMA = 'cluster-onboarding-runtime-successor/v3'
 QUALIFIED_SDK_SCHEMA = 'cluster-onboarding-runtime-successor/v4'
 MARKER = 'runtime-successor.json'
 TRANSFER_TOOL = 'support/being-seed-tools/tools/protected_being.py'
+SEED_TOOLS = 'support/being-seed-tools'
+
+
+def _seed_tool_bundle(root: Path, module: Path, *, uid: int,
+                      read: Callable[[Path], bytes] | None = None) -> dict[str, str]:
+    """Read the selected code's literal pins without importing that code."""
+    try:
+        read = read or (lambda path:onboarding_release.regular(path, uid=uid))
+        tree = ast.parse(read(module))
+        values = {}
+        for name in ('TOOL_COMMIT', 'TOOL_HASHES'):
+            assignments = [node for node in tree.body if isinstance(node, ast.Assign)
+                and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == name]
+            stores = [node for node in ast.walk(tree) if isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Store) and node.id == name]
+            if len(assignments) != 1 or len(stores) != 1:
+                raise ValueError
+            literal = assignments[0].value
+            if name == 'TOOL_HASHES':
+                if not isinstance(literal, ast.Dict):
+                    raise ValueError
+                keys = [ast.literal_eval(key) for key in literal.keys if key is not None]
+                if len(keys) != len(literal.keys) or len(keys) != len(set(keys)):
+                    raise ValueError
+            values[name] = ast.literal_eval(literal)
+        pins, commit = values['TOOL_HASHES'], values['TOOL_COMMIT']
+        legacy = {'export_being.py', 'receive_being.py', 'install_codex_identity.py'}
+        if (not isinstance(pins, dict) or set(pins) not in (legacy, legacy | {'protected_being.py'})
+                or any(not isinstance(value, str) or re.fullmatch('[0-9a-f]{64}', value) is None
+                    for value in pins.values())
+                or not isinstance(commit, str) or re.fullmatch('[0-9a-f]{40}', commit) is None):
+            raise ValueError
+        bundle = {SEED_TOOLS+'/tools/'+name: checksum for name, checksum in pins.items()}
+        if any(hashlib.sha256(read(root/name)).hexdigest() != checksum
+                for name, checksum in bundle.items()):
+            raise ValueError
+        provenance = SEED_TOOLS+'/PROVENANCE.json'
+        raw = read(root/provenance)
+        if json.loads(raw) != dict(repository='https://github.com/AlterMundi/daimon-matrix',
+                commit=commit, files=pins):
+            raise ValueError
+        return {**bundle, provenance:hashlib.sha256(raw).hexdigest()}
+    except (OSError, SyntaxError, ValueError, TypeError):
+        raise OnboardingError('qualified_onboarding_seed_tool_bundle_required') from None
 
 
 def sdk_parameters(code: Path, *, uid: int = 0) -> dict:
@@ -144,6 +193,9 @@ def verify(code: Path, fingerprint: str, base: Path, base_fingerprint: str, *, u
         raise OnboardingError('compatible_onboarding_runtime_successor_required')
     before = {row['path']: row['sha256'] for row in original['files']}
     after = {row['path']: row['sha256'] for row in successor['files']}
+    seed_tools = (_seed_tool_bundle(code, code/'clusterctl/being_seed.py', uid=uid)
+        if 'clusterctl/being_seed.py' in after
+        and after['clusterctl/being_seed.py'] != before.get('clusterctl/being_seed.py') else {})
     def module(name: str) -> bool:
         return re.fullmatch(r'clusterctl/(?:__init__|[a-z][a-z0-9_]*)\.py', name) is not None
     def sdk(name: str) -> bool:
@@ -159,9 +211,10 @@ def verify(code: Path, fingerprint: str, base: Path, base_fingerprint: str, *, u
                 and 'clusterctl/onboarding_transfer.py' in after)
     if (not {name for name in before if not sdk(name)} <= set(after)
             or any(after.get(name) != checksum for name, checksum in before.items()
-                   if not module(name) and not sdk(name) and not telegram(name))
+                   if not module(name) and not sdk(name) and not telegram(name) and name not in seed_tools)
             or any(name not in before and name != MARKER and not module(name)
-                   and not sdk(name) and not telegram(name) and not added_transfer_tool(name) for name in after)):
+                   and not sdk(name) and not telegram(name) and name not in seed_tools
+                   and not added_transfer_tool(name) for name in after)):
         raise OnboardingError('original_onboarding_context_preserved')
     return successor
 
@@ -190,7 +243,7 @@ def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, .
           matrix_commit: str | None = None, matrix_wheel_sha256: str | None = None) -> dict:
     """Capture a code-only successor; never read receiving home or custody."""
     from . import being_seed
-    from tools.build_onboarding_code import copy_code, capture_peer_tool, capture_chat_tool
+    from tools.build_onboarding_code import copy_code, capture_peer_tool, capture_chat_tool, read_code
     original = onboarding_release.verify(base, base_fingerprint, uid=os.geteuid())
     qualified_sdk = matrix_commit is not None or matrix_wheel_sha256 is not None
     if qualified_sdk and (sdk is None or matrix_commit is None
@@ -231,8 +284,12 @@ def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, .
     if (not modules or len(set(modules)) != len(modules)
             or any(re.fullmatch(r'(?:__init__|[a-z][a-z0-9_]*)\.py', name) is None for name in modules)):
         raise OnboardingError('qualified_onboarding_runtime_required')
+    original_files = {row['path']:row['sha256'] for row in original['files']}
+    seed_tools = (_seed_tool_bundle(source.parent, source/'being_seed.py', uid=os.geteuid(), read=read_code)
+        if 'being_seed.py' in modules and hashlib.sha256(read_code(source/'being_seed.py')).hexdigest()
+        != original_files.get('clusterctl/being_seed.py') else {})
     output.mkdir(mode=0o755)
-    replaced = {'clusterctl/' + name for name in modules}
+    replaced = {'clusterctl/' + name for name in modules} | set(seed_tools)
     if telegram is not None:
         replaced.update({'telegram/telecodex', 'telegram/artifact.json'})
     if 'onboarding_peer.py' in modules:
@@ -245,12 +302,14 @@ def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, .
             copy_code(base / row['path'], output / row['path'])
     for name in modules:
         copy_code(source / name, output / 'clusterctl' / name)
+    for name in seed_tools:
+        copy_code(source.parent/name, output/name)
     if 'onboarding_peer.py' in modules:
         capture_peer_tool(output)
     if 'onboarding_owner_client.py' in modules:
         capture_chat_tool(output)
     if ('onboarding_transfer.py' in modules
-            and TRANSFER_TOOL not in {row['path'] for row in original['files']}):
+            and TRANSFER_TOOL not in original_files and TRANSFER_TOOL not in seed_tools):
         tools = being_seed.verified_tools()
         copy_code(tools / 'tools/protected_being.py', output / TRANSFER_TOOL)
     if sdk is not None:

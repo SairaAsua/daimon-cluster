@@ -1328,9 +1328,21 @@ copy its public release bytes into the builder-owned workspace; verify the same
 digest there. Do not change the original's ownership or weaken the owner check.
 Introducing `onboarding_transfer.py` into an older base also captures its pinned
 `protected_being.py` code helper if absent. The successor permits that one new
-support file, preserves every existing support/context byte and rejects other
-asset additions. A missing helper is a package-closure defect, not a reason to
+support file when the seed module remains unchanged, preserves existing assets
+and rejects other additions. A missing helper is a package-closure defect, not a reason to
 rebuild an unchanged SDK or alter an independent production candidate.
+
+Replacing `being_seed.py` captures its complete pinned executable tool bundle and
+matching `PROVENANCE.json`. The installed module's literal `TOOL_COMMIT` and
+`TOOL_HASHES` select the known three- or four-tool set; verification parses those
+constants without importing the module and checks exact captured bytes. Current
+builder defaults cannot invalidate a coherent historical selection. All other
+assets, original context, HMK tools, skills, provider binary and the base itself
+remain unchanged. A module paired with an older exporter/receiver is an actual
+package defect: context installation calls its pinned verifier, and preparation
+can fail before identity installation even when that installer has not changed.
+Qualify the selected module's actual verifier as well as package entrypoint imports;
+do not weaken its pin check or repair this mismatch by replacing receiving identity.
 
 The opt-in installed child case is
 `tests/test_onboarding_runtime.py::test_qualified_offline_child_uses_selected_code_and_preserves_identity`.
@@ -1366,3 +1378,19 @@ as `onboarding_source` are also selected by module-name strings. A guest-only
 module selection does not qualify a combined host/Source artifact. Reuse the
 unchanged SDK wheelhouse and installed generation; this is code capture, not a
 new dependency installation.
+
+The opt-in `tests.integration.portal_admission_fixture` prepares the retained
+installed Worker fixture from an explicitly selected qualification host, combined
+artifact, authenticated Source observation and managed admission configuration.
+It creates a supported synthetic new seed, captures its actual input digest and
+submits only that plan in a separate approved inventory and queue. The ordinary
+Worker then owns environment, context, memory and Matrix preparation. Do not use
+`FixtureBackend` completion markers or placeholder seed digests here: real Matrix
+preparation requires the frozen input and receiving context. Validate managed
+admission before allocation; a group configuration without it is incomplete test
+setup, not a deployed product defect. Preparation is not group admission or
+communication acceptance. Preserve failed private state; never rewrite a submitted
+plan to repair its input digest. Cleanup targets only the recorded synthetic
+instance/profile/volume after matching its `user.dm.onboarding-plan`; keep custody,
+history and journals while qualification is unfinished. No administrative access,
+real account, bot, model turn or production instance is part of this fixture.
