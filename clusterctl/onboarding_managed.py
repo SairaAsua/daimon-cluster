@@ -80,9 +80,9 @@ class ManagedRuntime:
             raise OnboardingError('foreign_onboarding_admission_proxy_preserved')
         return current is not None
 
-    def _registered(self, expected: dict) -> bool:
+    def _registered(self, expected: dict, *, deadline_ns: int | None = None) -> bool:
         identifier = expected['embodiment_id']
-        rows = self.registry.load()['embodiments']
+        rows = self.registry.load(**({} if deadline_ns is None else {'deadline_ns': deadline_ns}))['embodiments']
         existing = rows.get(identifier)
         if existing is not None:
             if (existing.get('body_ref') != expected['body_ref']
@@ -139,7 +139,9 @@ class ManagedRuntime:
             return Observation('absent', safe_to_execute=True)
         return Observation('complete', dict(verified=True, identity_verified=True))
 
-    def prepare_admission(self, plan: dict) -> dict:
+    def prepare_admission(self, plan: dict, *, candidate: tuple[Path, str] | None = None,
+                          deadline_ns: int | None = None,
+                          authorization_expires_at_ms: int | None = None) -> dict:
         """Enroll the existing native holder without selecting or starting a service.
 
         Initial shared-group admission needs this profile before its owner
@@ -147,21 +149,48 @@ class ManagedRuntime:
         separately; neither a profile nor a registry row proves a loaded body.
         The normal execute path reuses these same durable proposals and retries.
         """
+        if ((deadline_ns is None) != (authorization_expires_at_ms is None)
+                or candidate is not None and deadline_ns is None
+                or deadline_ns is not None and (type(deadline_ns) is not int or deadline_ns <= 0)
+                or authorization_expires_at_ms is not None and (
+                    type(authorization_expires_at_ms) is not int or not 0 < authorization_expires_at_ms < 2**53)):
+            raise OnboardingError('receiving_host_deadline_required')
+        def remaining() -> float | None:
+            if deadline_ns is None:
+                return None
+            assert authorization_expires_at_ms is not None
+            value = min((deadline_ns - time.monotonic_ns()) / 1_000_000_000,
+                (authorization_expires_at_ms - time.time_ns() // 1_000_000) / 1000)
+            if value <= 0:
+                raise OnboardingError('receiving_preservation_authorization_expired')
+            return value
+        def target(action: str, profile: dict | None = None) -> dict:
+            options: dict = {} if profile is None else {'profile': profile}
+            if candidate is not None:
+                options['candidate'] = candidate
+            budget = remaining()
+            if budget is not None:
+                options.update(observation_timeout_seconds=budget,
+                    authorization_expires_at_ms=authorization_expires_at_ms)
+            return self.backend._target_call(plan, action, **options)
+        remaining()
+        bounds: dict = {} if deadline_ns is None else {'deadline_ns': deadline_ns}
         expected = self._expected(plan)
-        self._registered(expected)  # Preserve foreign canonical state before enrollment.
-        if not self._check_proxy(plan):
+        self._registered(expected, **bounds)  # Preserve foreign canonical state before enrollment.
+        remaining()
+        if not self._check_proxy(plan, **bounds):
+            remaining()
             proxy = self._proxy()
             self.backend._dispatch(plan, ['config', 'device', 'add', self.backend.instance(plan),
-                'onboarding-admission', 'proxy', *[key + '=' + value for key, value in proxy.items() if key != 'type']])
+                'onboarding-admission', 'proxy', *[key + '=' + value for key, value in proxy.items() if key != 'type']], **bounds)
         configuration = self._profile(plan)
         root = self.state / digest(plan)
         if configuration is None:
-            candidate = root / 'candidate.json'
-            configuration = being_seed._read(candidate) if candidate.exists() else None
-            registered = (configuration is not None and self.backend._target_call(plan, 'admission-check',
-                profile=configuration).get('registered') is True)
+            proposal = root / 'candidate.json'
+            configuration = being_seed._read(proposal) if proposal.exists() else None
+            registered = (configuration is not None and target('admission-check', configuration).get('registered') is True)
             if not registered:
-                request = self.backend._target_call(plan, 'admission-prepare')
+                request = target('admission-prepare')
                 registrar = Ed25519Signer(self.settings['registrar_key'], self.settings['registrar_key_id'])
                 configuration = onboarding_admission.profile(plan, request, expected, registrar,
                     endpoint=AdmissionEndpoint.network('127.0.0.1', self.settings['guest_port']),
@@ -169,13 +198,15 @@ class ManagedRuntime:
                     authority_public_key=self.settings['authority_public_key'])
                 # Preserve every signed proposal; the pointer is only local progress.
                 being_seed._write(root / ('profile-' + digest(configuration) + '.json'), configuration)
-                being_seed._write(candidate, configuration)
-                if self.backend._target_call(plan, 'admission-enroll', profile=configuration) != {'registered': True}:
+                being_seed._write(proposal, configuration)
+                if target('admission-enroll', configuration) != {'registered': True}:
                     raise OnboardingError('onboarding_admission_not_current')
             assert configuration is not None
             being_seed._write(root / 'confirmed.json', configuration)
         assert configuration is not None
+        remaining()
         onboarding_mounts.prepare_matrix_public(self.backend.config.views, plan, {'admission.json': configuration})
+        remaining()
         return configuration
 
     def execute(self, plan: dict) -> None:

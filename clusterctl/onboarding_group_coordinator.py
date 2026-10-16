@@ -10,6 +10,7 @@ import copy
 import math
 import re
 import time
+import uuid
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -166,8 +167,10 @@ class GroupCoordinator:
         current = journal.get(row['operation_id'])
         observations = copy.deepcopy(current['runtime_observation'] or {})
         admission = observations.setdefault('portal_admission', {})
-        if key in admission and admission[key] != value:
-            raise JournalConflict('portal admission evidence changed')
+        if key in admission:
+            if admission[key] != value:
+                raise JournalConflict('portal admission evidence changed')
+            return current
         admission[key] = value
         return journal.advance(row['operation_id'], current['state'], runtime_observation=observations,
             expected_runtime_observation=current['runtime_observation'])
@@ -202,17 +205,25 @@ class GroupCoordinator:
                 _journal, row, admission = current_binding
                 if record['stage'] != 'matrix' or row['state'] == 'completed':
                     return None
-                if time.time_ns() // 1_000_000 >= admission['activation']['expires_at_ms']:
-                    raise OnboardingError('receiving_preservation_authorization_expired')
-                deadline = min(deadline, time.monotonic_ns() +
-                    (admission['activation']['expires_at_ms'] - time.time_ns() // 1_000_000) * 1_000_000)
-                if isinstance((row['runtime_observation'] or {}).get('portal_admission', {}).get('native_ready'), dict):
-                    remaining()
-                    return dict(operation_id=row['operation_id'], native_prepared=True,
-                        receiving_readiness='unobserved')
+                retained = (row['runtime_observation'] or {}).get('portal_admission', {})
+                native_prepared = isinstance(retained.get('native_ready'), dict)
+                expired = time.time_ns() // 1_000_000 >= admission['activation']['expires_at_ms']
+                if expired:
+                    request = retained.get('controller_intent')
+                    if (not native_prepared or 'physical_ready' not in retained
+                            or not isinstance(request, dict)
+                            or not (request.get('mode') == 'preserve'
+                                    or 'controller_stage' in retained)):
+                        raise OnboardingError('receiving_preservation_authorization_expired')
+                    # Owner stage/publish already supports exact historical
+                    # completion after expiry. Its original fixed request is
+                    # unchanged; native validation refuses any fresh effect.
+                else:
+                    deadline = min(deadline, time.monotonic_ns() +
+                        (admission['activation']['expires_at_ms'] - time.time_ns() // 1_000_000) * 1_000_000)
                 candidate = (Path(self.settings['owners'][name]['candidate']['code']),
                     self.settings['owners'][name]['candidate']['digest'])
-                if not self.backend.prepare_group_target(plan, candidate, deadline_ns=deadline):
+                if not native_prepared and not self.backend.prepare_group_target(plan, candidate, deadline_ns=deadline):
                     return None
                 owners = self._owners(admission)
                 from .onboarding_receiving_update import CohortController
@@ -226,37 +237,138 @@ class GroupCoordinator:
             with ExitStack() as scopes:
                 for owner in owners.values():
                     scopes.enter_context(cohort._owner_deadline(owner, deadline))
-                readiness = {}
-                for current in sorted(owners):
-                    recipe = admission['receivers'][current]['recipe']['tooling']
-                    if recipe['profile'] == 'matrix-only':
-                        continue
-                    owner = owners[current]
-                    endpoint = Path(recipe['native_endpoint'])
-                    if current == name:
-                        # Reobserve the exact manager state before a lost-start
-                        # retry. A generic SDK/socket failure cannot restart it.
-                        with self._job_scope(plan):
-                            self._binding(plan)
-                            self.backend._attach_telegram(plan, deadline_ns=deadline)
-                            budget = dict(deadline_ns=deadline,
-                                authorization_expires_at_ms=admission['activation']['expires_at_ms'])
-                            native = self.backend._telegram_command(plan, 'native-observe', **budget)
-                            if native.get('native_state') not in {'absent', 'inactive', 'active'}:
-                                return dict(operation_id=row['operation_id'], native_prepared=False,
-                                    receiving_readiness='unobserved')
-                            if native['native_state'] != 'active':
-                                self._retain(journal, row, 'native_dispatch', dict(plan_digest=digest(plan)))
-                                self.backend._telegram_command(plan, 'native-install', **budget)
-                            self.backend._telegram_probe(plan, **budget)
-                    observed = owner.preflight_native(endpoint)
-                    readiness[current] = observed
+                if not native_prepared:
+                    readiness = {}
+                    for current in sorted(owners):
+                        recipe = admission['receivers'][current]['recipe']['tooling']
+                        if recipe['profile'] == 'matrix-only':
+                            continue
+                        owner = owners[current]
+                        endpoint = Path(recipe['native_endpoint'])
+                        if current == name:
+                            # Reobserve the exact manager state before a lost-start
+                            # retry. A generic SDK/socket failure cannot restart it.
+                            with self._job_scope(plan):
+                                self._binding(plan)
+                                self.backend._attach_telegram(plan, deadline_ns=deadline)
+                                budget = dict(deadline_ns=deadline,
+                                    authorization_expires_at_ms=admission['activation']['expires_at_ms'])
+                                native = self.backend._telegram_command(plan, 'native-observe', **budget)
+                                if native.get('native_state') not in {'absent', 'inactive', 'active'}:
+                                    return dict(operation_id=row['operation_id'], native_prepared=False,
+                                        receiving_readiness='unobserved')
+                                if native['native_state'] != 'active':
+                                    self._retain(journal, row, 'native_dispatch', dict(plan_digest=digest(plan)))
+                                    self.backend._telegram_command(plan, 'native-install', **budget)
+                                self.backend._telegram_probe(plan, **budget)
+                        observed = owner.preflight_native(endpoint)
+                        readiness[current] = observed
+                        remaining()
+                    # A later invocation observes the endpoint afresh; do not
+                    # overwrite retained process evidence with a newer process.
+                    current = journal.get(row['operation_id'])
+                    if 'native_ready' not in (current['runtime_observation'] or {}).get('portal_admission', {}):
+                        self._retain(journal, current, 'native_ready', readiness)
                     remaining()
-                # A later invocation observes the endpoint afresh; do not
-                # overwrite retained process evidence with a newer process.
-                current = journal.get(row['operation_id'])
-                if 'native_ready' not in (current['runtime_observation'] or {}).get('portal_admission', {}):
-                    self._retain(journal, current, 'native_ready', readiness)
+                self._prepare_body(plan, journal, row, admission, candidate, deadline_ns=deadline,
+                    historical_only=expired)
                 remaining()
                 return dict(operation_id=row['operation_id'], native_prepared=True,
-                    receiving_readiness='unobserved')
+                    physical_prepared=True, controller_prepared=True, receiving_readiness='unobserved')
+
+    def _prepare_body(self, plan, journal, row, admission, candidate, *, deadline_ns: int,
+                      historical_only: bool = False) -> None:
+        """Prepare the new holder/controller before freezing social context.
+
+        These owner-only calls take guest locks, not host job locks. Existing
+        members are untouched. Later managed first-load owns a separate scope.
+        """
+        from .onboarding_managed import ManagedRuntime
+        def remaining():
+            value = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+            if value <= 0:
+                raise OnboardingError('receiving_host_deadline_expired')
+            return value
+        def retained():
+            return (journal.get(row['operation_id'])['runtime_observation'] or {}).get('portal_admission', {})
+        with self._job_scope(plan):
+            self._binding(plan)
+            remaining()
+            managed = ManagedRuntime(self.backend)
+            expected = managed._expected(plan)
+            approved = admission['receivers'][plan['name']]
+            if any(expected[key] != approved[key] for key in ('being_ref', 'embodiment_id')):
+                raise OnboardingError('onboarding_group_admission_binding_changed')
+            intent = dict(plan_digest=digest(plan), admission_settings_sha256=digest(managed.settings),
+                coordinates=expected)
+            self._retain(journal, row, 'physical_intent', intent)
+            if 'physical_ready' not in retained():
+                if historical_only:
+                    raise OnboardingError('receiving_preservation_authorization_expired')
+                profile = managed.prepare_admission(plan, candidate=candidate, deadline_ns=deadline_ns,
+                    authorization_expires_at_ms=admission['activation']['expires_at_ms'])
+                self._retain(journal, row, 'physical_ready', dict(profile_sha256=digest(profile)))
+            else:
+                existing_profile = managed._profile(plan)
+                if existing_profile is None or retained()['physical_ready'] != dict(profile_sha256=digest(existing_profile)):
+                    raise OnboardingError('existing_onboarding_service_profile_preserved')
+                profile = existing_profile
+            remaining()
+            if 'controller_prepared' in retained():
+                return
+            request = retained().get('controller_intent')
+            if request is None:
+                if historical_only:
+                    raise OnboardingError('receiving_preservation_authorization_expired')
+                frozen = self.backend._target_call(plan, 'receiving-bootstrap-freeze', candidate=candidate,
+                    bootstrap_timeout_seconds=remaining(), bootstrap_initial=True)
+                expected = profile['enrollment']
+                approved = admission['receivers'][plan['name']]
+                if (frozen['plan_digest'] != digest(plan) or frozen['code_digest'] != candidate[1]
+                        or frozen['being_ref'] != approved['being_ref']
+                        or frozen['being_ref'] != expected['being_ref']
+                        or any(frozen['origin'].get(key) != expected[key]
+                               for key in ('body_ref', 'embodiment_id', 'incarnation_id'))
+                        or frozen['origin']['embodiment_id'] != approved['embodiment_id']
+                        or frozen['predecessor'] is not None or frozen['group'] is not None
+                        or frozen['group_sha256'] != digest({'group': None})
+                        or frozen['mode'] not in {'issue', 'preserve', 'renew'}):
+                    raise OnboardingError('receiving_guest_bootstrap_initial_required')
+                expires = admission['activation']['expires_at_ms']
+                if frozen['mode'] == 'preserve':
+                    expires = min(expires, frozen['preservation']['not_after_ms'])
+                elif frozen['mode'] == 'renew':
+                    expires = min(expires, frozen['renewal_not_after_ms'])
+                if time.time_ns() // 1_000_000 >= expires:
+                    raise OnboardingError('receiving_preservation_authorization_expired')
+                request = dict(schema='cluster-guest-owner-initial/v1',
+                    operation_id=str(uuid.uuid5(uuid.NAMESPACE_URL, 'cluster:portal:initial:' +
+                        row['operation_id'] + ':' + digest(plan))),
+                    **{key: frozen[key] for key in ('plan_digest', 'genesis_digest', 'code_digest',
+                        'runtime_sha256', 'group_sha256', 'predecessor', 'mode', 'preservation')},
+                    expires_at_ms=expires)
+                self._retain(journal, row, 'controller_intent', request)
+            staged = retained().get('controller_stage')
+            if staged is None:
+                if historical_only and request['mode'] != 'preserve':
+                    raise OnboardingError('receiving_preservation_authorization_expired')
+                staged = self.backend._target_call(plan, 'receiving-bootstrap-stage', candidate=candidate,
+                    bootstrap_timeout_seconds=remaining(), bootstrap_request=request)
+                if (staged.get('operation_id') != request['operation_id']
+                        or staged.get('schema') != ('cluster-receiving-owner-preserved/v1'
+                            if request['mode'] == 'preserve' else 'cluster-guest-owner-bootstrap-ready/v1')
+                        or request['mode'] != 'preserve' and re.fullmatch('[0-9a-f]{64}', staged.get('ready_sha256', '')) is None):
+                    raise OnboardingError('receiving_guest_bootstrap_ready_required')
+                self._retain(journal, row, 'controller_stage', staged)
+            result = staged
+            if request['mode'] != 'preserve':
+                result = self.backend._target_call(plan, 'receiving-bootstrap-publish', candidate=candidate,
+                    bootstrap_timeout_seconds=remaining(), bootstrap_request=request,
+                    bootstrap_ready_sha256=staged['ready_sha256'])
+                if (result.get('schema') != 'cluster-guest-owner-bootstrap-publication/v1'
+                        or result.get('operation_id') != request['operation_id']
+                        or result.get('ready_sha256') != staged['ready_sha256']
+                        or re.fullmatch('[0-9a-f]{64}', result.get('runtime_sha256', '')) is None):
+                    raise OnboardingError('receiving_guest_bootstrap_ready_required')
+            self._retain(journal, row, 'controller_prepared', result)
+            remaining()

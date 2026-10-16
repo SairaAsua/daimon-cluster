@@ -125,3 +125,23 @@ def test_foreign_or_expired_receiving_holder_proof_refuses_before_registrar_sign
     with pytest.raises(OnboardingError, match='existing_onboarding_admission_preserved'):
         holder.prepare()
     assert not holder.key.exists() and key
+
+
+def test_expired_holder_probe_cannot_fall_through_to_enrollment(monkeypatch):
+    from types import SimpleNamespace
+    from clusterctl import onboarding_admission as receiver
+    from clusterctl.admission import AdmissionError
+    clock, calls = [1], []
+    monkeypatch.setattr(receiver, 'time', SimpleNamespace(monotonic_ns=lambda: clock[0]))
+    def current():
+        calls.append('current')
+        clock[0] = 11
+        raise AdmissionError('synthetic holder not registered')
+    holder = object.__new__(ReceivingHolder)
+    def client(configuration, *, deadline_ns):
+        assert deadline_ns == 10
+        return SimpleNamespace(current=current, enroll=lambda _: calls.append('enroll'))
+    holder.configured_client = client
+    with pytest.raises(OnboardingError, match='deadline_expired'):
+        holder.ensure_enrolled({'enrollment': {}}, enroll=True, deadline_ns=10)
+    assert calls == ['current']

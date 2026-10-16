@@ -1057,14 +1057,35 @@ budget after retaining native readiness. That evidence is historical preparation
 not receiving or current health; it is not repeatedly rebuilt on worker cadence.
 The later caller must revalidate the endpoint before admission effects.
 
+After native preparation, the same caller prepares the newcomer's existing
+physical holder and optional receiving controller. It compares actual native
+being/embodiment coordinates with the approved receiver before any proxy or
+enrollment effect, and retains the complete coordinates and physical settings
+digest. The approved candidate handles only the three existing admission verbs;
+it does not select that runtime. Registry reads, proxy dispatch, holder proofs,
+current/enroll exchanges and SDK reexec share the original finite budget and
+fixed authorization expiry. Default unbounded operator calls remain compatible.
+
+The caller retains the confirmed profile digest, then freezes an initial
+controller request with no group or predecessor. Stage and publish reuse the
+existing native owner transaction, one deterministic operation ID and its fixed
+request. Lost replies recover that exact transaction; completed preparation is
+retained without repeated RPCs on worker cadence. An expired authorization allows
+only final historical preservation/publication reconciliation with a new finite
+observation budget. Native validation refuses fresh publication after expiry;
+no enrollment, freeze, new non-preservation stage or refreshed authority is
+permitted on that path. The CLI budget starts before SDK verification and
+survives same-guest reexec.
+
 Matrix and acceptance stages remain pending until this exact receiving operation
 is complete, followed by the existing actual managed-presence/acceptance checks.
-The remaining coordinator phases are unfinished: physical/controller preparation,
-signed invitation/acceptance, approved publication-command derivation/comparison,
+The remaining coordinator phases are unfinished: signed invitation/acceptance,
+approved publication-command derivation/comparison,
 full distribution, lifecycle reload/initial load, cohort/steady selection and
 scoped communication acceptance. The installed old-members/newcomer journey is
-also pending. The native phase does not complete portal admission, enable a
-Matrix sender or qualify a deployment.
+also pending. Native/physical/controller preparation does not complete portal
+admission, enable a Matrix sender or qualify a deployment. This future-admission
+work is independent of the already prepared current-member rollout.
 
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry

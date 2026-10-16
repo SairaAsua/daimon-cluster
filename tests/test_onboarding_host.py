@@ -726,3 +726,22 @@ def test_host_native_budget_and_frozen_expiry_reach_guest_before_effect(tmp_path
         command = calls[-1]
         assert float(command[command.index('--operation-timeout-seconds')+1]) == 2
         assert command[command.index('--authorization-expires-at-ms')+1] == str(expiry)
+
+
+@pytest.mark.parametrize('action', ['admission-prepare', 'admission-check', 'admission-enroll'])
+def test_candidate_physical_admission_retains_budget_and_original_expiry(tmp_path, monkeypatch, action):
+    import time
+    backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    expiry = time.time_ns() // 1_000_000 + 10000
+    options = {} if action == 'admission-prepare' else {'profile': {'synthetic': 'public-only'}}
+    assert backend._target_call(value, action, candidate=candidate, observation_timeout_seconds=2,
+        authorization_expires_at_ms=expiry, **options) == {'observed': True}
+    command, observed = calls[-1]
+    assert command[command.index('--authorization-expires-at-ms')+1] == str(expiry)
+    assert '--observation-timeout-seconds' in command and 0 < observed['timeout_seconds'] <= 2
+    with pytest.raises(OnboardingError, match='deadline_required'):
+        backend._target_call(value, action, candidate=candidate, observation_timeout_seconds=2, **options)
+    with pytest.raises(OnboardingError, match='deadline_expired'):
+        backend._target_call(value, action, candidate=candidate, observation_timeout_seconds=2,
+            authorization_expires_at_ms=1, **options)
+    assert len(calls) == 1, 'expired/missing authorization must never dispatch'

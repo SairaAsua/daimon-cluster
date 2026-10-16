@@ -77,9 +77,68 @@ def fixture(tmp_path, monkeypatch):
                 return dict(schema='cluster-native-endpoint-readiness/v1', native_process=owner.process,
                     acceptance='native-endpoint-only', model_turns_started=0, messages_sent=0)
         owner.preflight_native = preflight
+    body = dict(registered=False, physical_lost=False, publish_lost=False, preserve_lost=False,
+        publications=0, mode='issue')
+    expected = dict(being_ref=owners['newcomer'].being, body_ref='codex:fixture:newcomer',
+        embodiment_id=owners['newcomer'].server['embodiment_id'], incarnation_id='incarnation:newcomer')
+    profile = dict(enrollment=expected)
+    from clusterctl.onboarding_managed import ManagedRuntime as NativeManagedRuntime
+    class Managed(NativeManagedRuntime):
+        settings = {'synthetic': 'fixed-physical-authority'}
+        def __init__(self, _backend):
+            pass
+        def _expected(self, plan):
+            return copy.deepcopy(expected)
+        def prepare_admission(self, selected_plan, **options):
+            assert selected_plan == plans['newcomer']
+            assert options['deadline_ns'] > 0 and options['candidate'] == (
+                Path(owner_rows['newcomer']['candidate']['code']), owner_rows['newcomer']['candidate']['digest'])
+            calls.append('physical-prepare')
+            body['registered'] = True
+            if body['physical_lost']:
+                body['physical_lost'] = False
+                raise OSError('synthetic lost physical preparation reply')
+            return copy.deepcopy(profile)
+        def _profile(self, _plan):
+            return copy.deepcopy(profile) if body['registered'] else None
+    managed = Managed(backend)
+    monkeypatch.setattr('clusterctl.onboarding_managed.ManagedRuntime', Managed)
+    def target_call(selected_plan, action, **options):
+        if action == 'observe':
+            return {'phase': 'v8'}
+        assert selected_plan == plans['newcomer']
+        assert 0 < options['bootstrap_timeout_seconds'] <= 30
+        calls.append(action)
+        if action == 'receiving-bootstrap-freeze':
+            assert body['registered'], 'physical holder must precede controller freeze'
+            return dict(plan_digest=digest(selected_plan), genesis_digest='1'*64,
+                code_digest=owner_rows['newcomer']['candidate']['digest'], runtime_sha256='2'*64,
+                being_ref=expected['being_ref'], origin={k:v for k,v in expected.items() if k != 'being_ref'},
+                group=None, group_sha256=digest({'group': None}), predecessor=None, mode=body['mode'],
+                preservation=None if body['mode'] == 'issue' else dict(
+                    not_after_ms=row['intended_transition']['cohort_admission']['activation']['expires_at_ms']))
+        request = options['bootstrap_request']
+        if action == 'receiving-bootstrap-stage':
+            if request['mode'] == 'preserve':
+                if body['preserve_lost']:
+                    body['preserve_lost'] = False
+                    raise OSError('synthetic lost durable preservation reply')
+                return dict(schema='cluster-receiving-owner-preserved/v1', operation_id=request['operation_id'],
+                    runtime_sha256=request['runtime_sha256'], receiving_readiness='unobserved')
+            return dict(schema='cluster-guest-owner-bootstrap-ready/v1', operation_id=request['operation_id'],
+                ready_sha256='3'*64, receiving_readiness='unobserved')
+        assert action == 'receiving-bootstrap-publish' and options['bootstrap_ready_sha256'] == '3'*64
+        body['publications'] = 1  # Explicit native-owner seam retains exact publication.
+        result = dict(schema='cluster-guest-owner-bootstrap-publication/v1', operation_id=request['operation_id'],
+            ready_sha256='3'*64, runtime_sha256='4'*64, counter_after=1, receiving_readiness='unobserved')
+        if body['publish_lost']:
+            body['publish_lost'] = False
+            raise OSError('synthetic lost controller publication reply')
+        return result
+    backend._target_call = target_call
     monkeypatch.setattr(GroupCoordinator, '_owners', lambda self, admission: owners)
     return SimpleNamespace(store=store, stages=stages, plans=plans, owners=owners, journal=journal,
-        row=row, path=path, selected=selected, backend=backend, calls=calls, native=native)
+        row=row, path=path, selected=selected, backend=backend, calls=calls, native=native, body=body, managed=managed)
 
 
 def test_worker_prepares_native_outside_job_lock_and_cannot_complete_matrix(fixture):
@@ -93,7 +152,8 @@ def test_worker_prepares_native_outside_job_lock_and_cannot_complete_matrix(fixt
     assert result['stage'] == 'matrix' and result['reason'] == 'group_admission_pending'
     current = f.journal.get(f.row['operation_id'])
     assert current['state'] == 'planned'
-    assert set(current['runtime_observation']['portal_admission']) == {'native_intent', 'native_dispatch', 'native_ready'}
+    assert set(current['runtime_observation']['portal_admission']) == {'native_intent', 'native_dispatch', 'native_ready',
+        'physical_intent', 'physical_ready', 'controller_intent', 'controller_stage', 'controller_prepared'}
     assert f.calls.count('native-install') == 1
     worker._tick('newcomer')
     assert f.calls.count('native-install') == 1
@@ -254,3 +314,169 @@ def test_native_ready_durability_cannot_return_acceptance_after_budget(fixture, 
     retained = f.journal.get(f.row['operation_id'])
     assert 'native_ready' in retained['runtime_observation']['portal_admission']
     assert retained['state'] == 'planned'
+
+
+@pytest.mark.parametrize('phase', ['physical', 'controller'])
+def test_body_preparation_reuses_original_intent_after_lost_reply(fixture, phase):
+    f = fixture
+    f.body['physical_lost' if phase == 'physical' else 'publish_lost'] = True
+    with pytest.raises(OSError, match='synthetic lost'):
+        GroupCoordinator(f.backend).advance('newcomer')
+    prior = copy.deepcopy(f.journal.get(f.row['operation_id'])['runtime_observation']['portal_admission'])
+    result = GroupCoordinator(f.backend).advance('newcomer')
+    assert result['physical_prepared'] and result['controller_prepared']
+    retained = f.journal.get(f.row['operation_id'])['runtime_observation']['portal_admission']
+    assert retained['native_ready'] == prior['native_ready']
+    if phase == 'controller':
+        assert retained['controller_intent'] == prior['controller_intent']
+        assert f.calls.count('receiving-bootstrap-freeze') == 1
+        assert f.calls.count('receiving-bootstrap-stage') == 1
+    assert f.body['publications'] == 1
+    assert f.calls.count('native-install') == 1
+    assert all(owner.effects == 0 for owner in f.owners.values())
+    calls = list(f.calls)
+    GroupCoordinator(f.backend).advance('newcomer')
+    assert f.calls == calls, 'historical preparation must not re-dispatch each cadence'
+    assert f.journal.get(f.row['operation_id'])['state'] == 'planned'
+
+
+def test_existing_initial_controller_is_preserved_without_publication(fixture):
+    fixture.body['mode'] = 'preserve'
+    assert GroupCoordinator(fixture.backend).advance('newcomer')['controller_prepared']
+    assert 'receiving-bootstrap-publish' not in fixture.calls
+    assert fixture.body['publications'] == 0
+
+
+@pytest.mark.parametrize('mode', ['issue', 'preserve'])
+def test_expired_authorization_reconciles_only_original_final_owner_call(fixture, monkeypatch, mode):
+    from clusterctl import onboarding_group_coordinator as caller
+    f = fixture
+    f.body['mode'] = mode
+    f.body['preserve_lost' if mode == 'preserve' else 'publish_lost'] = True
+    with pytest.raises(OSError, match='synthetic lost'):
+        GroupCoordinator(f.backend).advance('newcomer')
+    prior = copy.deepcopy(f.journal.get(f.row['operation_id'])['runtime_observation']['portal_admission'])
+    future = f.row['intended_transition']['cohort_admission']['activation']['expires_at_ms'] + 1
+    monkeypatch.setattr(caller, 'time', SimpleNamespace(
+        monotonic_ns=caller.time.monotonic_ns, time_ns=lambda: future*1_000_000))
+    calls = list(f.calls)
+    assert GroupCoordinator(f.backend).advance('newcomer')['controller_prepared']
+    expected_action = 'receiving-bootstrap-stage' if mode == 'preserve' else 'receiving-bootstrap-publish'
+    assert f.calls == calls + [expected_action]
+    retained = f.journal.get(f.row['operation_id'])['runtime_observation']['portal_admission']
+    assert retained['controller_intent'] == prior['controller_intent']
+    assert retained['physical_ready'] == prior['physical_ready']
+    assert f.body['publications'] == (0 if mode == 'preserve' else 1)
+    calls = list(f.calls)
+    assert GroupCoordinator(f.backend).advance('newcomer')['controller_prepared']
+    assert f.calls == calls
+    assert f.journal.get(f.row['operation_id'])['state'] == 'planned'
+    assert all(owner.effects == 0 for owner in f.owners.values())
+
+
+def test_expired_authorization_cannot_resume_unfinished_physical_preparation(fixture, monkeypatch):
+    from clusterctl import onboarding_group_coordinator as caller
+    f = fixture
+    f.body['physical_lost'] = True
+    with pytest.raises(OSError, match='lost physical'):
+        GroupCoordinator(f.backend).advance('newcomer')
+    future = f.row['intended_transition']['cohort_admission']['activation']['expires_at_ms'] + 1
+    monkeypatch.setattr(caller, 'time', SimpleNamespace(
+        monotonic_ns=caller.time.monotonic_ns, time_ns=lambda: future*1_000_000))
+    calls = list(f.calls)
+    with pytest.raises(OnboardingError, match='authorization_expired'):
+        GroupCoordinator(f.backend).advance('newcomer')
+    assert f.calls == calls
+
+
+def qualified_target_cli(tmp_path, monkeypatch, *, late=False):
+    """Actual CLI grammar/startup; SDK custody is an explicit qualification seam."""
+    from clusterctl import onboarding_target as target
+    home, code = tmp_path/'home', tmp_path/'code'
+    plan_path, genesis = tmp_path/'plan.json', tmp_path/'genesis.json'
+    being_seed._write(plan_path, plan(browser=False))
+    being_seed._write(genesis, {})
+    (code/'sdk').mkdir(mode=0o700, parents=True)
+    being_seed._write(code/'sdk/sdk.json', {})
+    venv = home/'.local/share/daimon-matrix/sdk'/digest({})/'venv'
+    imports = venv.parent/'runtime-imports'
+    venv.parent.mkdir(mode=0o700, parents=True)
+    imports.mkdir(mode=0o700)
+    being_seed._write(venv.parent/'runtime-imports.json', {})
+    clock, calls = [1_000_000_000], []
+    monkeypatch.setattr(target, 'time', SimpleNamespace(monotonic_ns=lambda: clock[0], time_ns=lambda: 1_000_000_000_000))
+    monkeypatch.setattr(target, 'sys', SimpleNamespace(prefix=str(venv), argv=[]))
+    monkeypatch.setattr(target.onboarding_code_successor, 'selection', lambda *a, **k: code)
+    monkeypatch.setattr(target.onboarding_code_successor, 'sdk_parameters', lambda *a, **k: {
+        'matrix_commit': target.onboarding_sdk.MATRIX_COMMIT, 'matrix_wheel_sha256': 'a'*64})
+    monkeypatch.setattr(target.onboarding_release, 'regular', lambda path, **k: Path(path).read_bytes())
+    monkeypatch.setattr(target.onboarding_sdk, 'startup_context', lambda *a: True)
+    def startup(*a, **k):
+        clock[0] += 3_000_000_000 if late else 200_000_000
+        return {'synthetic': 'qualified-startup'}
+    monkeypatch.setattr(target.onboarding_sdk, 'qualified_startup', startup)
+    monkeypatch.setattr(target, 'Target', lambda *a, **k: SimpleNamespace())
+    args = ['--home', str(home), '--code', str(code), '--plan', str(plan_path), '--genesis', str(genesis)]
+    return target, args, calls
+
+
+@pytest.mark.parametrize('action', ['admission-prepare', 'admission-check', 'admission-enroll'])
+@pytest.mark.parametrize('late', [False, True])
+def test_actual_physical_cli_keeps_expiry_through_sdk_before_effect(tmp_path, monkeypatch, capsys, action, late):
+    target, args, calls = qualified_target_cli(tmp_path, monkeypatch, late=late)
+    class Holder:
+        def __init__(self, target): pass
+        def request(self, *, deadline_ns):
+            calls.append(('prepare', deadline_ns))
+            return {'synthetic': 'public-proof'}
+        def ensure_enrolled(self, profile, *, enroll, deadline_ns):
+            assert profile == {'synthetic': 'public-profile'}
+            calls.append(('enroll' if enroll else 'check', deadline_ns))
+            return True
+    monkeypatch.setattr('clusterctl.onboarding_admission.ReceivingHolder', Holder)
+    args += ['--observation-timeout-seconds', '2', '--authorization-expires-at-ms', '1000500']
+    if action != 'admission-prepare':
+        args += ['--public-profile-json', '{"synthetic":"public-profile"}']
+    assert target.main([action, *args]) == (1 if late else 0)
+    assert calls == ([] if late else [(action.removeprefix('admission-'), 1_500_000_000)])
+    assert ('"error"' in capsys.readouterr().out) == late
+
+
+def test_initial_bootstrap_cli_budget_starts_before_sdk_qualification(tmp_path, monkeypatch):
+    target, args, calls = qualified_target_cli(tmp_path, monkeypatch)
+    def freeze(target, *, deadline_ns, initial, initial_service):
+        assert initial and not initial_service
+        calls.append(deadline_ns)
+        return {'synthetic': 'initial-owner-context'}
+    monkeypatch.setattr('clusterctl.onboarding_receiving_update.freeze_guest_bootstrap', freeze)
+    assert target.main(['receiving-bootstrap-freeze', *args, '--bootstrap-initial',
+        '--bootstrap-timeout-seconds', '2']) == 0
+    assert calls == [3_000_000_000], 'SDK work must consume the original budget'
+
+
+@pytest.mark.parametrize('field', ['being_ref', 'embodiment_id'])
+def test_wrong_physical_identity_cannot_create_proxy_or_enroll(fixture, field):
+    expected = fixture.managed._expected(fixture.plans['newcomer'])
+    fixture.managed._expected = lambda plan: {**expected, field: 'unapproved'}
+    # The receiver adapter is a local fixture class; apply its changed subject
+    # to the same class constructed by the actual coordinator.
+    type(fixture.managed)._expected = lambda self, plan: {**expected, field: 'unapproved'}
+    with pytest.raises(OnboardingError, match='admission_binding_changed'):
+        GroupCoordinator(fixture.backend).advance('newcomer')
+    assert 'physical-prepare' not in fixture.calls
+    assert 'receiving-bootstrap-freeze' not in fixture.calls
+    assert fixture.body['registered'] is False
+
+
+def test_retry_cannot_change_physical_coordinates_after_lost_enrollment(fixture):
+    f = fixture
+    f.body['physical_lost'] = True
+    with pytest.raises(OSError, match='lost physical'):
+        GroupCoordinator(f.backend).advance('newcomer')
+    expected = f.managed._expected(f.plans['newcomer'])
+    type(f.managed)._expected = lambda self, plan: {**expected, 'credential_id': 'replacement'}
+    from clusterctl.operation_journal import JournalConflict
+    with pytest.raises(JournalConflict, match='evidence changed'):
+        GroupCoordinator(f.backend).advance('newcomer')
+    assert f.calls.count('physical-prepare') == 1
+    assert 'receiving-bootstrap-freeze' not in f.calls

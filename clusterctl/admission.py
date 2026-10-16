@@ -842,9 +842,13 @@ class AdmissionClient:
         manifest_hash: str,
         timeout_s: float = 2.0,
         lease_ttl_s: int = DEFAULT_LEASE_TTL_S,
+        deadline_ns: int | None = None,
     ):
         if timeout_s <= 0 or timeout_s > 30:
             raise AdmissionError("admission client timeout is invalid")
+        if deadline_ns is not None and (type(deadline_ns) is not int or deadline_ns <= 0):
+            raise AdmissionError("admission client deadline is invalid")
+        self.deadline_ns = deadline_ns
         if (
             isinstance(lease_ttl_s, bool)
             or not isinstance(lease_ttl_s, int)
@@ -898,6 +902,8 @@ class AdmissionClient:
 
     def _call(self, action: str, **values: Any) -> Any:
         deadline_ns = time.monotonic_ns() + int(self.timeout_s * 1_000_000_000)
+        if self.deadline_ns is not None:
+            deadline_ns = min(deadline_ns, self.deadline_ns)
 
         def remaining() -> float:
             budget = (deadline_ns - time.monotonic_ns()) / 1_000_000_000

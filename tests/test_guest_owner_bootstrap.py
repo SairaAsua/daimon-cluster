@@ -149,6 +149,37 @@ def test_initial_controller_publication_uses_native_writer_without_fake_predeces
         receiving_update.freeze_guest_bootstrap(target, deadline_ns=deadline(), initial=True, initial_service=True)
 
 
+@pytest.mark.parametrize('committed', [False, True])
+def test_expired_initial_publication_allows_only_exact_committed_recovery(fixture, monkeypatch, committed):
+    from daimon_matrix import operator_runtime_upgrade as upgrade
+    target, request, _, _ = fixture
+    request = initial_request(target, request)
+    owner = GuestOwnerBootstrap(target, request)
+    ready = owner.execute('stage', deadline_ns=deadline())
+    counter = target.document_bundle()['keystore']['counter']
+    if committed:
+        actual = upgrade.publish
+        def lost(**kwargs):
+            actual(**kwargs)
+            raise OSError('synthetic lost committed initial publication')
+        with monkeypatch.context() as effect:
+            effect.setattr(upgrade, 'publish', lost)
+            with pytest.raises(OSError, match='lost committed'):
+                owner.execute('publish', deadline_ns=deadline(), ready_sha256=ready['ready_sha256'])
+    ciphertext = (owner.runtime / 'custody.json').read_bytes()
+    original_request = (owner.records / 'request.json').read_bytes()
+    monkeypatch.setattr(time, 'time_ns', lambda: (request['expires_at_ms'] + 1) * 1_000_000)
+    if committed:
+        result = owner.execute('publish', deadline_ns=deadline(), ready_sha256=ready['ready_sha256'])
+        assert result['counter_after'] == counter + 1
+    else:
+        with pytest.raises(upgrade.UpgradeError, match='expired|expiry'):
+            owner.execute('publish', deadline_ns=deadline(), ready_sha256=ready['ready_sha256'])
+    assert (owner.runtime / 'custody.json').read_bytes() == ciphertext
+    assert (owner.records / 'request.json').read_bytes() == original_request
+    assert target.document_bundle()['keystore']['counter'] == counter + int(committed)
+
+
 def test_first_service_freeze_requires_a_prepared_native_controller(fixture, monkeypatch):
     target, _, group, _ = fixture
     monkeypatch.setattr('clusterctl.onboarding_peer.observed_group',

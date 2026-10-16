@@ -95,7 +95,13 @@ class ReceivingHolder:
                 keystore._atomic_write(descriptor, canonical.canonical_bytes(public))
             return public
 
-    def request(self) -> dict:
+    @staticmethod
+    def _budget(deadline_ns: int | None) -> None:
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('onboarding_observation_deadline_expired')
+
+    def request(self, *, deadline_ns: int | None = None) -> dict:
+        self._budget(deadline_ns)
         public = self.prepare()
         signer = Ed25519Signer(self.key, public["holder_key_id"])
         origin = public["coordinates"]
@@ -103,16 +109,18 @@ class ReceivingHolder:
             body_ref=origin["body_ref"], embodiment_id=origin["embodiment_id"], incarnation_id=origin["incarnation_id"],
             resource_ref="onboarding-holder:" + digest(self.target.plan), expected_epoch=-1,
             expected_proof=None, expected_current=False, fence_ttl_s=15, nonce=str(uuid.uuid4()))
+        self._budget(deadline_ns)
         return dict(schema=REQUEST_SCHEMA, holder=public, proof=proof)
 
     def client(self, endpoint: AdmissionEndpoint, *, authority_key_id: str,
-               authority_public_key: str, lease_ttl_s: int = 15) -> AdmissionClient:
+               authority_public_key: str, lease_ttl_s: int = 15,
+               deadline_ns: int | None = None) -> AdmissionClient:
         public = self.prepare()
         return AdmissionClient(endpoint, holder_signer=Ed25519Signer(self.key, public["holder_key_id"]),
             authority_key_id=authority_key_id, authority_public_key=authority_public_key,
-            lease_ttl_s=lease_ttl_s, **public["coordinates"])
+            lease_ttl_s=lease_ttl_s, deadline_ns=deadline_ns, **public["coordinates"])
 
-    def configured_client(self, configuration: dict) -> AdmissionClient:
+    def configured_client(self, configuration: dict, *, deadline_ns: int | None = None) -> AdmissionClient:
         """Bind host public configuration to this body's existing holder."""
         fields = {'schema', 'plan_digest', 'endpoint', 'authority_key_id',
                   'authority_public_key', 'lease_ttl_s', 'enrollment'}
@@ -138,23 +146,30 @@ class ReceivingHolder:
         return self.client(AdmissionEndpoint.network(endpoint['host'], endpoint['port']),
             authority_key_id=configuration['authority_key_id'],
             authority_public_key=configuration['authority_public_key'],
-            lease_ttl_s=configuration['lease_ttl_s'])
+            lease_ttl_s=configuration['lease_ttl_s'], deadline_ns=deadline_ns)
 
-    def ensure_enrolled(self, configuration: dict, *, enroll: bool = False) -> bool:
+    def ensure_enrolled(self, configuration: dict, *, enroll: bool = False,
+                        deadline_ns: int | None = None) -> bool:
         """Recover a lost enrollment ACK without refreshing a registered key."""
         from .admission import AdmissionError, AdmissionConflict, AdmissionUnavailable
-        client = self.configured_client(configuration)
+        self._budget(deadline_ns)
+        client = self.configured_client(configuration, **({} if deadline_ns is None else {'deadline_ns': deadline_ns}))
+        self._budget(deadline_ns)
         try:
             client.current()
         except AdmissionUnavailable:
             raise
         except AdmissionConflict:
             # The enrolled coordinate is held by another service session.
+            self._budget(deadline_ns)
             return True
         except AdmissionError:
             if not enroll:
+                self._budget(deadline_ns)
                 return False
+            self._budget(deadline_ns)
             client.enroll(configuration['enrollment'])
+        self._budget(deadline_ns)
         return True
 
     def launch(self, client: AdmissionClient, spawn: Callable[[], subprocess.Popen[bytes]]) -> AdmissionSupervisor:

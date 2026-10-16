@@ -73,7 +73,7 @@ def _client(
     holder: Ed25519Signer,
     authority: Ed25519Signer,
     coordinates: Mapping[str, str],
-    *, timeout_s: float = 2.0,
+    *, timeout_s: float = 2.0, deadline_ns: int | None = None,
 ) -> AdmissionClient:
     return AdmissionClient(
         socket_path,
@@ -88,6 +88,7 @@ def _client(
         credential_id=coordinates["credential_id"],
         manifest_hash=coordinates["manifest_hash"],
         timeout_s=timeout_s,
+        deadline_ns=deadline_ns,
     )
 
 
@@ -455,6 +456,31 @@ def test_late_valid_signature_cannot_report_admission_success(authority_fixture,
     monkeypatch.setattr(admission, "_verify_ed25519", delayed_verify)
     with pytest.raises(AdmissionUnavailable, match="deadline expired"):
         client.current()
+
+
+def test_original_outer_deadline_is_shared_by_successive_signed_calls(authority_fixture, tmp_path: Path, monkeypatch) -> None:
+    import json
+    import clusterctl.admission as admission
+    holder = _key(tmp_path / "bounded-holder.pem", "bounded-holder")
+    authority = authority_fixture["authority"]
+    coordinates = _coordinates("outer-deadline")
+    client = _client(authority_fixture["socket"], holder, authority, coordinates)
+    _enroll(client, authority_fixture["registrar"], holder, coordinates, authority_fixture["clock"]())
+    bounded = _client(authority_fixture["socket"], holder, authority, coordinates,
+        timeout_s=1, deadline_ns=1_100_000_000)
+    clock = [1_000_000_000]
+    verify = admission._verify_ed25519
+    def delayed_verify(payload, signature, public_key):
+        valid = verify(payload, signature, public_key)
+        if public_key == authority.public_key and json.loads(payload).get("schema") == admission.RESPONSE_SCHEMA:
+            assert valid
+            clock[0] += 60_000_000
+        return valid
+    monkeypatch.setattr(admission.time, "monotonic_ns", lambda: clock[0])
+    monkeypatch.setattr(admission, "_verify_ed25519", delayed_verify)
+    assert bounded.current() is None
+    with pytest.raises(AdmissionUnavailable, match="deadline expired"):
+        bounded.current()
 
 
 def test_authenticated_tcp_endpoint_is_network_capable_and_pinned(

@@ -1049,7 +1049,8 @@ class HostBackend:
                      bootstrap_initial_service: bool = False,
                      control_file: Path | None = None, control_command: Path | None = None,
                      control_value: dict | None = None, identity_expires_at_ms: int | None = None,
-                     native_tooling: dict | None = None, group_request: dict | None = None) -> dict:
+                     native_tooling: dict | None = None, group_request: dict | None = None,
+                     authorization_expires_at_ms: int | None = None) -> dict:
         """Invoke the qualified receiving owner within its finite host budget.
 
         Candidate calls require the already verified public read-only mount.
@@ -1057,6 +1058,12 @@ class HostBackend:
         A host timeout is uncertain observation, never proof of guest exit.
         """
         deadline_ns = None
+        admitting = action in {'admission-prepare', 'admission-check', 'admission-enroll'}
+        if ((authorization_expires_at_ms is not None and (not admitting
+                    or type(authorization_expires_at_ms) is not int or not 0 < authorization_expires_at_ms < 2**53))
+                or admitting and ((observation_timeout_seconds is None) != (authorization_expires_at_ms is None))
+                or admitting and candidate is not None and observation_timeout_seconds is None):
+            raise OnboardingError('receiving_host_deadline_required')
         bootstrapping = action in {'receiving-bootstrap-freeze', 'receiving-bootstrap-stage', 'receiving-bootstrap-publish'}
         if (type(bootstrap_initial) is not bool or type(bootstrap_initial_service) is not bool
                 or bootstrap_initial and bootstrap_initial_service
@@ -1097,11 +1104,14 @@ class HostBackend:
         elif control_file is not None or control_command is not None or control_value is not None:
             raise OnboardingError('invalid_receiving_control_request')
         if observation_timeout_seconds is not None:
-            if (action not in {'observe', 'sdk-observe', 'sdk-prepare', 'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship', 'group-publication'}
+            if (action not in {'observe', 'sdk-observe', 'sdk-prepare', 'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship', 'group-publication', 'admission-prepare', 'admission-check', 'admission-enroll'}
                     or not math.isfinite(observation_timeout_seconds)
                     or not 0 < observation_timeout_seconds <= 60):
                 raise OnboardingError('receiving_host_deadline_required')
             deadline_ns = time.monotonic_ns() + int(observation_timeout_seconds * 1_000_000_000)
+            if authorization_expires_at_ms is not None:
+                deadline_ns = min(deadline_ns, time.monotonic_ns() +
+                    (authorization_expires_at_ms - time.time_ns() // 1_000_000) * 1_000_000)
         if action == 'receiving-identity' and observation_timeout_seconds is None:
             raise OnboardingError('receiving_host_deadline_required')
         if require_loaded and action not in {'running', 'admitted-running'}:
@@ -1119,8 +1129,10 @@ class HostBackend:
         if candidate is not None:
             if (action not in {'sdk-observe', 'sdk-prepare', 'observe', 'running', 'admitted-running',
                     'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'receiving-bootstrap-freeze',
-                    'receiving-bootstrap-stage', 'receiving-bootstrap-publish', 'receiving-identity', 'group-relationship', 'group-publication'}
-                    or profile is not None or peer_packet is not None or peer_being_ref is not None
+                    'receiving-bootstrap-stage', 'receiving-bootstrap-publish', 'receiving-identity', 'group-relationship', 'group-publication',
+                    'admission-prepare', 'admission-check', 'admission-enroll'}
+                    or profile is not None and action not in {'admission-check', 'admission-enroll'}
+                    or peer_packet is not None or peer_being_ref is not None
                     or not onboarding_code_successor.sdk_parameters(candidate[0], uid=os.geteuid())
                     or not self._mounted(plan, mounts, deadline_ns=deadline_ns)):
                 raise OnboardingError('qualified_onboarding_candidate_mount_required')
@@ -1165,6 +1177,8 @@ class HostBackend:
             arguments += ['--group-request', '-']
         if identity_expires_at_ms is not None:
             arguments += ['--identity-expires-at-ms', str(identity_expires_at_ms)]
+        if authorization_expires_at_ms is not None:
+            arguments += ['--authorization-expires-at-ms', str(authorization_expires_at_ms)]
         if native_tooling is not None:
             encoded = json.dumps(native_tooling, separators=(',', ':'))
             if len(encoded.encode()) > 65536:
@@ -1185,7 +1199,8 @@ class HostBackend:
             arguments += ['--bootstrap-initial-service']
         prepared_venv = None
         if candidate is not None and (bootstrapping or action in {'running', 'admitted-running', 'receiving-identity',
-                'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship', 'group-publication'}):
+                'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship', 'group-publication',
+                'admission-prepare', 'admission-check', 'admission-enroll'}):
             # _runtime_paths verified the entire public candidate and its SDK.
             # Enter the already prepared owner generation directly; Target still
             # checks the installed SDK, startup context and actual receiving state.

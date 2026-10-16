@@ -57,7 +57,8 @@ def test_each_receiving_body_selects_its_verified_peer_application(monkeypatch):
     assert not managed._ready({'name': 'waiting'})
 
 
-def test_lost_enrollment_and_registry_ack_resume_same_holder_and_native_body(tmp_path, monkeypatch):
+@pytest.mark.parametrize('bounded', [False, True])
+def test_lost_enrollment_and_registry_ack_resume_same_holder_and_native_body(tmp_path, monkeypatch, bounded):
     ceremony, plan, blank = receiving(tmp_path)
     ceremony.prepare(plan, identity_mode='first')
     registrar = _key(tmp_path / 'host/registrar.pem', 'registrar')
@@ -87,19 +88,32 @@ def test_lost_enrollment_and_registry_ack_resume_same_holder_and_native_body(tmp
         active = []
         failures = ['enroll', 'registry']
         calls = []
-        def target_call(_plan, action, *, profile=None):
+        deadline = time.monotonic_ns() + 60_000_000_000
+        expiry = time.time_ns() // 1_000_000 + 60000
+        bounds = dict(candidate=(Path('/opt/approved-candidate'), 'a'*64), deadline_ns=deadline,
+            authorization_expires_at_ms=expiry) if bounded else {}
+        def target_call(_plan, action, *, profile=None, **options):
             calls.append(action)
+            if options:
+                assert options['candidate'] == bounds['candidate']
+                assert 0 < options['observation_timeout_seconds'] <= 60
+                assert options['authorization_expires_at_ms'] == expiry
             if action == 'admission-prepare':
-                return holder.request()
+                return holder.request(**({'deadline_ns': deadline} if options else {}))
             if action in {'admission-check', 'admission-enroll'}:
-                result = dict(registered=holder.ensure_enrolled(profile, enroll=action == 'admission-enroll'))
+                result = dict(registered=holder.ensure_enrolled(profile, enroll=action == 'admission-enroll',
+                    **({'deadline_ns': deadline} if options else {})))
                 if action == 'admission-enroll' and 'enroll' in failures:
                     failures.remove('enroll')
                     raise OSError('lost ACK after authority registration')
                 return result
             assert action == 'admitted-running'
             return target.running(admitted=True)
-        def dispatch(_plan, argv):
+        def dispatch(_plan, argv, **options):
+            if options:
+                assert options['deadline_ns'] == deadline
+            if argv == ['list', '--format=json']:
+                return json.dumps(instances)
             if argv[:3] == ['config', 'device', 'add']:
                 instances[0]['expanded_devices'][argv[4]] = dict(type=argv[5],
                     **dict(item.split('=', 1) for item in argv[6:]))
@@ -134,7 +148,7 @@ def test_lost_enrollment_and_registry_ack_resume_same_holder_and_native_body(tmp
         try:
             assert managed.observe(plan).state == 'absent'
             with pytest.raises(OSError, match='authority registration'):
-                managed.prepare_admission(plan)
+                managed.prepare_admission(plan, **bounds)
             preserved_key = holder.key.read_bytes()
             proposal = being_seed._read(tmp_path / 'service-state' / digest(plan) / 'candidate.json')
             # A shared-group owner context must be frozen after native profile
@@ -144,8 +158,8 @@ def test_lost_enrollment_and_registry_ack_resume_same_holder_and_native_body(tmp
             managed._ready = lambda _plan: False
             with pytest.raises(OnboardingError, match='visibility_selection_required'):
                 managed.execute(plan)
-            assert managed.prepare_admission(plan) == proposal
-            assert managed.prepare_admission(plan) == proposal
+            assert managed.prepare_admission(plan, **bounds) == proposal
+            assert managed.prepare_admission(plan, **bounds) == proposal
             assert active == []
             assert not managed._registered(managed._expected(plan))
             managed._ready = ready

@@ -783,6 +783,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--require-loaded', action='store_true')
     parser.add_argument('--observation-timeout-seconds', type=float)
     parser.add_argument('--observation-deadline-ns', type=int)
+    parser.add_argument('--authorization-expires-at-ms', type=int)
     parser.add_argument('--control-file', type=Path)
     parser.add_argument('--control-command', type=Path)
     parser.add_argument('--identity-expires-at-ms', type=int)
@@ -829,11 +830,23 @@ def main(argv: list[str] | None = None) -> int:
                 args.bootstrap_ready_sha256, args.bootstrap_timeout_seconds)):
             raise OnboardingError('invalid_receiving_bootstrap_request')
         timeout = args.observation_timeout_seconds
-        if timeout is not None and (args.action not in {'observe', 'sdk-observe', 'sdk-prepare', 'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship', 'group-publication'}
+        admitting = args.action in {'admission-prepare', 'admission-check', 'admission-enroll'}
+        if (args.authorization_expires_at_ms is not None and (not admitting
+                    or not 0 < args.authorization_expires_at_ms < 2**53)
+                or admitting and ((timeout is None) != (args.authorization_expires_at_ms is None))):
+            raise OnboardingError('invalid_receiving_observation_timeout')
+        if timeout is not None and (args.action not in {'observe', 'sdk-observe', 'sdk-prepare', 'running', 'admitted-running', 'receiving-identity', 'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply', 'group-relationship', 'group-publication', 'admission-prepare', 'admission-check', 'admission-enroll'}
                 or not math.isfinite(timeout) or not 0 < timeout <= 60):
             raise OnboardingError('invalid_receiving_observation_timeout')
+        if bootstrapping:
+            timeout = args.bootstrap_timeout_seconds
         now_ns = time.monotonic_ns()
         observation_deadline_ns = None if timeout is None else now_ns + int(timeout * 1_000_000_000)
+        if args.authorization_expires_at_ms is not None:
+            observation_deadline_ns = min(observation_deadline_ns, now_ns +
+                (args.authorization_expires_at_ms - time.time_ns() // 1_000_000) * 1_000_000)
+            if observation_deadline_ns <= now_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
         if args.observation_deadline_ns is not None:
             if (observation_deadline_ns is None or args.observation_deadline_ns <= now_ns
                     or args.observation_deadline_ns > observation_deadline_ns):
@@ -852,7 +865,8 @@ def main(argv: list[str] | None = None) -> int:
         runtime = onboarding_code_successor.selection(args.runtime_code, args.runtime_digest,
             args.code, plan['release_digest'], uid=0)
         sdk_parameters = onboarding_code_successor.sdk_parameters(runtime)
-        if (controlling or identity_query or bootstrapping or grouping or args.require_loaded) and not sdk_parameters:
+        if (controlling or identity_query or bootstrapping or grouping or args.require_loaded
+                or admitting and timeout is not None) and not sdk_parameters:
             raise OnboardingError('qualified_onboarding_target_observer_required')
         matrix_commit = sdk_parameters.get('matrix_commit', onboarding_sdk.MATRIX_COMMIT)
         if observation_deadline_ns is not None and time.monotonic_ns() >= observation_deadline_ns:
@@ -927,7 +941,9 @@ def main(argv: list[str] | None = None) -> int:
             raise OnboardingError('onboarding_observation_deadline_expired')
         if bootstrapping:
             from .onboarding_receiving_update import GuestOwnerBootstrap, freeze_guest_bootstrap
-            deadline_ns = time.monotonic_ns() + int(args.bootstrap_timeout_seconds * 1_000_000_000)
+            if observation_deadline_ns is None:
+                raise OnboardingError('invalid_receiving_bootstrap_request')
+            deadline_ns = observation_deadline_ns
             stage = args.action
             if args.action == 'receiving-bootstrap-freeze':
                 result = freeze_guest_bootstrap(target, deadline_ns=deadline_ns, initial=args.bootstrap_initial,
@@ -1017,12 +1033,14 @@ def main(argv: list[str] | None = None) -> int:
             if args.public_profile_json is None or len(args.public_profile_json) > 16384:
                 raise OnboardingError('onboarding_admission_profile_required')
             registered = ReceivingHolder(target).ensure_enrolled(json.loads(args.public_profile_json),
-                enroll=args.action == 'admission-enroll')
+                enroll=args.action == 'admission-enroll', deadline_ns=observation_deadline_ns)
+            if observation_deadline_ns is not None and time.monotonic_ns() >= observation_deadline_ns:
+                raise OnboardingError('onboarding_observation_deadline_expired')
             print(json.dumps(dict(registered=registered)))
             return 0
         if args.action == "admission-prepare":
             from .onboarding_admission import ReceivingHolder
-            print(json.dumps(ReceivingHolder(target).request()))
+            print(json.dumps(ReceivingHolder(target).request(deadline_ns=observation_deadline_ns)))
             return 0
         if args.action == "prepare":
             target.prepare()
