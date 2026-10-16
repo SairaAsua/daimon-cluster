@@ -415,13 +415,17 @@ class GuestGroupClient:
     def prepare_control(self, command: dict, path: Path) -> dict:
         return self._call('receiving-control-prepare', control_file=path, control_value=command)
 
-    def group_relationship(self, command: dict, *, authority_closure: dict) -> dict:
+    def group_relationship(self, command: dict, *, authority_closure: dict,
+                           expected_context_sha256: str | None = None) -> dict:
         return self._call('group-relationship', group_request=dict(command=command,
-            offline=True, authority_closure=authority_closure))
+            offline=True, authority_closure=authority_closure,
+            **({'expected_context_sha256': expected_context_sha256} if expected_context_sha256 is not None else {})))
 
-    def group_publication(self, command: dict, *, authority_closure: dict) -> dict:
+    def group_publication(self, command: dict, *, authority_closure: dict,
+                          expected_context_sha256: str | None = None) -> dict:
         return self._call('group-publication', group_request=dict(command=command,
-            offline=True, authority_closure=authority_closure))
+            offline=True, authority_closure=authority_closure,
+            **({'expected_context_sha256': expected_context_sha256} if expected_context_sha256 is not None else {})))
 
     def apply_control(self, path: Path) -> dict:
         return self._call('receiving-control-apply', control_file=path)
@@ -565,13 +569,17 @@ class SourceGroupClient:
         return self._call(['--prepare-control', str(path), '--control-command', '-'], command=command)
 
     def group_relationship(self, command: dict, *, offline: bool = False,
-                           authority_closure: dict | None = None) -> dict:
+                           authority_closure: dict | None = None,
+                           expected_context_sha256: str | None = None) -> dict:
         return self._call(['--group-request', '-'], command=dict(command=command,
-            offline=offline, authority_closure={} if authority_closure is None else authority_closure))
+            offline=offline, authority_closure={} if authority_closure is None else authority_closure,
+            **({'expected_context_sha256': expected_context_sha256} if expected_context_sha256 is not None else {})))
 
-    def group_publication(self, command: dict, *, authority_closure: dict) -> dict:
+    def group_publication(self, command: dict, *, authority_closure: dict,
+                          expected_context_sha256: str | None = None) -> dict:
         return self._call(['--group-request', '-'], command=dict(command=command,
-            offline=True, authority_closure=authority_closure))
+            offline=True, authority_closure=authority_closure,
+            **({'expected_context_sha256': expected_context_sha256} if expected_context_sha256 is not None else {})))
 
     def apply_control(self, path: Path) -> dict:
         return self._call(['--apply-control', str(path)])

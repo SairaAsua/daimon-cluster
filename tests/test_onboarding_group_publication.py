@@ -53,6 +53,67 @@ def initial_publication(group_source, profile):
 
 
 @pytest.mark.parametrize('profile', ['source', 'target'])
+def test_context_preview_is_read_only_and_pins_the_later_native_writer(group_source, monkeypatch, profile):
+    source, target, _peer, peer_bundle, _old = group_source
+    owner = source if profile == 'source' else target
+    group = source.outputs / 'tribe' if profile == 'source' else target.root / 'tribe'
+    journal = source.outputs / 'group-admission' if profile == 'source' else target.root / 'group-admission'
+    runtime = source.root if profile == 'source' else target.package / 'runtime'
+    request = invitation(source, peer_bundle)
+    preview = dict(operation_id=request['operation_id'], step='context', action='context-preview', params={})
+    approved = closure(peer_bundle)
+    before = {path: path.read_bytes() for path in runtime.rglob('*') if path.is_file()}
+    with monkeypatch.context() as read_only:
+        def forbidden(*_args, **_kwargs):
+            pytest.fail('context preparation must not acquire a writer, open custody or create an event')
+        read_only.setattr(owner, 'writer' if profile == 'source' else '_runtime_writer', forbidden)
+        read_only.setattr(owner, '_reader', forbidden)
+        result = owner.group_publication(preview, authority_closure=approved)
+        assert owner.group_publication(preview, authority_closure=approved) == result
+    assert result['schema'] == 'cluster-group-owner-context-preview/v1'
+    assert result['receiving_readiness'] == 'unobserved'
+    assert not (journal / request['operation_id']).exists()
+    assert {path: path.read_bytes() for path in before} == before
+    assert result['predecessor_selection_sha256'] == (
+        digest(being_seed._read(group / 'selection.json')) if (group / 'selection.json').exists() else None)
+    options = dict(authority_closure=approved, **({'offline': True} if profile == 'source' else {}))
+    with monkeypatch.context() as mismatch:
+        mismatch.setattr(owner, '_reader', lambda: pytest.fail('changed preparation reached custody'))
+        with pytest.raises(OnboardingError, match='owner_context_conflict'):
+            owner.group_relationship(request, expected_context_sha256='0'*64, **options)
+    assert not (journal / request['operation_id'] / 'owner/context.json').exists()
+    accepted = owner.group_relationship(request, expected_context_sha256=result['owner_context_sha256'], **options)
+    assert accepted['status'] == 'recorded' and accepted['native_error'] is None
+    context = being_seed._read(journal / request['operation_id'] / 'owner/context.json')
+    assert digest(context) == result['owner_context_sha256']
+    assert owner.group_relationship(request, expected_context_sha256=result['owner_context_sha256'], **options) == accepted
+
+
+@pytest.mark.parametrize('failure', ['deadline', 'ledger-drift'])
+def test_context_preview_refuses_expiry_or_concurrent_identity_drift(group_source, monkeypatch, failure):
+    from types import SimpleNamespace
+    from clusterctl import onboarding_group_admission as admission
+    source, _target, _peer, peer_bundle, _old = group_source
+    identifier = str(uuid.uuid4())
+    original = admission._ledger_identity
+    calls, clock = [], [1]
+    def identity(root, bundle):
+        result = original(root, bundle)
+        calls.append(True)
+        if failure == 'ledger-drift' and len(calls) == 2:
+            result['file_identity'][-1] += 1
+        if failure == 'deadline':
+            clock[0] = 11
+        return result
+    monkeypatch.setattr(admission, '_ledger_identity', identity)
+    monkeypatch.setattr(admission, 'time', SimpleNamespace(monotonic_ns=lambda: clock[0]))
+    with pytest.raises(OnboardingError, match='deadline_expired' if failure == 'deadline' else 'context_conflict'):
+        admission.preview_owner_context(source.root, source.outputs / 'tribe', identifier,
+            closure(peer_bundle), deadline_ns=10)
+    assert not (source.outputs / 'group-admission' / identifier).exists()
+
+
+@pytest.mark.parametrize('profile', ['source', 'target'])
 def test_native_first_publication_signatures_and_selector_recover_exact_lost_replies(unicode_group_source, monkeypatch, profile):
     from daimon_matrix import operator_messaging
     from daimon_matrix.messaging_config import read_publication, verify_binding
@@ -322,6 +383,11 @@ def test_publication_packets_are_closed_and_cannot_use_online_relationship_route
                  params=dict(expected_selection_sha256=None))
     assert publication_command(value) == value
     assert request_packet(dict(command=value, offline=True, authority_closure={}))['command'] == value
+    preview = {**value, 'action': 'context-preview', 'params': {}}
+    assert publication_command(preview) == preview
+    from clusterctl.onboarding_group_admission import publication_request
+    with pytest.raises(OnboardingError, match='preview_is_read_only'):
+        publication_request(None, None, None, preview)
     with pytest.raises(OnboardingError, match='writer_required'):
         request_packet(dict(command=value, offline=False, authority_closure={}))
     for changed in ({**value, 'method': 'tribe.invite'},

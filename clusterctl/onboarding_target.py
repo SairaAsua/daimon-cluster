@@ -136,6 +136,7 @@ class Target:
         return verified, request
 
     def group_relationship(self, value: dict, *, authority_closure: dict,
+                           expected_context_sha256: str | None = None,
                            deadline_ns: int | None = None) -> dict:
         """Accept/ingest through native authentication before first managed start."""
         from .onboarding_group_admission import (
@@ -144,31 +145,40 @@ class Target:
         value = command(value)
         with being_seed._locked(self.root), self._runtime_writer():
             check_retained_ledger(self.package / 'runtime', self.root / 'group-admission', value)
-            if self._observe_receiving()['phase'] != 'v8':
-                raise OnboardingError('current_onboarding_target_required')
             root = self.package / 'runtime'
             authorities = owner_authorities(root, self.root / 'tribe', self.root / 'group-admission',
-                                            value['operation_id'], authority_closure)
+                value['operation_id'], authority_closure, expected_context_sha256=expected_context_sha256)
+            if self._observe_receiving()['phase'] != 'v8':
+                raise OnboardingError('current_onboarding_target_required')
             hosted = load_owner_runtime(root, self._reader, authorities=authorities,
                                         qualified_startup=self.qualified_startup)
             return relationship_request(root, self.root / 'group-admission', value,
                                         offline=hosted, deadline_ns=deadline_ns)
 
     def group_publication(self, value: dict, *, authority_closure: dict,
+                          expected_context_sha256: str | None = None,
                           deadline_ns: int | None = None) -> dict:
         from .onboarding_receiving_update import bootstrap_group
         from .onboarding_group_admission import (
-            check_snapshot_context, load_owner_runtime, owner_authorities, publication_command, publication_request,
+            check_snapshot_context, load_owner_runtime, owner_authorities, preview_owner_context,
+            publication_command, publication_request,
         )
         value = publication_command(value)
         root = self.package / 'runtime'
         group = self.root / 'tribe'
         journal = self.root / 'group-admission'
+        if value['action'] == 'context-preview':
+            result = preview_owner_context(root, group, value['operation_id'], authority_closure,
+                deadline_ns=deadline_ns)
+            if expected_context_sha256 is not None and result['owner_context_sha256'] != expected_context_sha256:
+                raise OnboardingError('onboarding_group_owner_context_conflict')
+            return result
         with being_seed._locked(self.root), self._runtime_writer():
             check_snapshot_context(journal, value)
+            authorities = owner_authorities(root, group, journal, value['operation_id'], authority_closure,
+                expected_context_sha256=expected_context_sha256)
             if self._observe_receiving()['phase'] != 'v8':
                 raise OnboardingError('current_onboarding_target_required')
-            authorities = owner_authorities(root, group, journal, value['operation_id'], authority_closure)
             hosted = load_owner_runtime(root, self._reader, authorities=authorities,
                                         qualified_startup=self.qualified_startup)
             return publication_request(hosted, group, journal, value, deadline_ns=deadline_ns,
@@ -997,7 +1007,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise OnboardingError('onboarding_group_relationship_writer_required')
             method = target.group_publication if args.action == 'group-publication' else target.group_relationship
             print(json.dumps(method(packet['command'],
-                authority_closure=packet['authority_closure'], deadline_ns=observation_deadline_ns)))
+                authority_closure=packet['authority_closure'], deadline_ns=observation_deadline_ns,
+                **({'expected_context_sha256': packet['expected_context_sha256']}
+                   if 'expected_context_sha256' in packet else {}))))
             return 0
         if args.action == 'peer-identity':
             from .onboarding_peer import identity

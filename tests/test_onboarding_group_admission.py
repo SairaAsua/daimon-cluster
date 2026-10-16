@@ -61,18 +61,21 @@ def test_retained_owner_context_recovers_lagging_selector_without_relaxing_servi
         journal = target.root / 'group-admission'
 
     def submit(value, authorities):
+        options = {} if expected[0] is None else {'expected_context_sha256': expected[0]}
         if profile == 'source':
-            return source.group_relationship(value, offline=True, authority_closure=authorities)
-        return target.group_relationship(value, authority_closure=authorities)
+            return source.group_relationship(value, offline=True, authority_closure=authorities, **options)
+        return target.group_relationship(value, authority_closure=authorities, **options)
 
     def observe():
         return source._load(signed=False) if profile == 'source' else target.observe()
 
     supplied = closure(peer_bundle)
+    expected = [None]
     first = submit(request, supplied)
     assert first['status'] == 'recorded'
     context = journal / request['operation_id'] / 'owner/context.json'
     retained = context.read_bytes()
+    expected[0] = digest(being_seed._read(context))
     events = base.service.ledger.events()
     selector = (group / 'selection.json').read_bytes()
     before = {name: (source.root / name).read_bytes() for name in ('runtime.json', 'custody.json')}
@@ -296,6 +299,13 @@ def test_closed_commands_and_packets_reject_unrelated_methods_and_paths():
         with pytest.raises(OnboardingError, match='command_required'):
             request_packet(invalid)
     assert request_packet(dict(command=value, offline=True, authority_closure={}))['command'] == value
+    bounded = dict(command=value, offline=True, authority_closure={}, expected_context_sha256='a'*64)
+    assert request_packet(bounded) == bounded
+    for invalid in (None, True, '', 'A'*64, 'a'*63):
+        with pytest.raises(OnboardingError, match='command_required'):
+            request_packet({**bounded, 'expected_context_sha256': invalid})
+    with pytest.raises(OnboardingError, match='command_required'):
+        request_packet({**bounded, 'offline': False})
 
 
 def test_missing_or_replaced_ledger_cannot_turn_uncertainty_into_absence(group_source, monkeypatch):

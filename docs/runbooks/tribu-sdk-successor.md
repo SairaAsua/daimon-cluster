@@ -874,6 +874,25 @@ and exact retries must supply the same closure. Provision optional capabilities
 before freezing this bundle; a changed bundle or ledger requires explicit
 reassessment, not replacement of the retained context.
 
+Before stopping an existing owner, use the closed `context-preview` action
+through its qualified group-publication route with empty `params`, the same
+operation UUID and complete approved closure. Source and Target construct the
+same prospective context without a native writer, custody access, journal
+creation, event or service action. The result exposes only operation/context,
+bundle and predecessor-selector digests, with receiving readiness unobserved.
+Concurrent bundle/ledger/selector drift or an exhausted observation budget
+refuses the preview; this does not freeze a live process or qualify its identity.
+
+Freeze `owner_context_sha256` into the approved lifecycle snapshot link. Supply
+the optional `expected_context_sha256` on subsequent offline owner packets. Under
+the actual writer, both profiles compare that exact prospective or already
+retained context before custody access or dispatch. A changed preparation
+refuses; an exact retry after partial publication retains its original selector
+preimage. Old packets retain their supported behavior. This preparation removes
+the circular dependency between pre-stop lifecycle planning and offline context
+creation; it does not itself create the Source child lifecycle or complete the
+portal's signed invitation/acceptance caller.
+
 This retained context permits closed offline maintenance if application
 publication has advanced while the serving selector still names its predecessor.
 Source's normal loader and Target's public observation continue rejecting that

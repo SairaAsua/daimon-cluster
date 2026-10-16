@@ -90,6 +90,7 @@ class Source:
 
     def group_relationship(self, value: dict, *, offline: bool = False,
                            authority_closure: dict | None = None,
+                           expected_context_sha256: str | None = None,
                            deadline_ns: int | None = None) -> dict:
         """The qualified owner route supplies approval; no peer text grants it."""
         from .onboarding_group_admission import (
@@ -98,29 +99,38 @@ class Source:
         value = command(value)
         journal = self.outputs / 'group-admission'
         if not offline:
-            if authority_closure:
+            if authority_closure or expected_context_sha256 is not None:
                 raise OnboardingError('onboarding_group_relationship_writer_required')
             return relationship_request(self.root, journal, value, deadline_ns=deadline_ns)
         with self.writer():
             check_retained_ledger(self.root, journal, value)
             authorities = owner_authorities(self.root, self.outputs / 'tribe', journal,
-                                            value['operation_id'], authority_closure or {})
+                value['operation_id'], authority_closure or {}, expected_context_sha256=expected_context_sha256)
             hosted = load_owner_runtime(self.root, self._reader, authorities=authorities,
                                         qualified_startup=self.qualified_startup)
             return relationship_request(self.root, journal, value, offline=hosted, deadline_ns=deadline_ns)
 
     def group_publication(self, value: dict, *, authority_closure: dict,
+                          expected_context_sha256: str | None = None,
                           deadline_ns: int | None = None) -> dict:
         from .onboarding_receiving_update import source_bootstrap_group
         from .onboarding_group_admission import (
-            check_snapshot_context, load_owner_runtime, owner_authorities, publication_command, publication_request,
+            check_snapshot_context, load_owner_runtime, owner_authorities, preview_owner_context,
+            publication_command, publication_request,
         )
         value = publication_command(value)
         journal = self.outputs / 'group-admission'
         group = self.outputs / 'tribe'
+        if value['action'] == 'context-preview':
+            result = preview_owner_context(self.root, group, value['operation_id'], authority_closure,
+                deadline_ns=deadline_ns)
+            if expected_context_sha256 is not None and result['owner_context_sha256'] != expected_context_sha256:
+                raise OnboardingError('onboarding_group_owner_context_conflict')
+            return result
         with self.writer():
             check_snapshot_context(journal, value)
-            authorities = owner_authorities(self.root, group, journal, value['operation_id'], authority_closure)
+            authorities = owner_authorities(self.root, group, journal, value['operation_id'], authority_closure,
+                expected_context_sha256=expected_context_sha256)
             hosted = load_owner_runtime(self.root, self._reader, authorities=authorities,
                                         qualified_startup=self.qualified_startup)
             return publication_request(hosted, group, journal, value, deadline_ns=deadline_ns,
@@ -567,12 +577,14 @@ def main(argv=None) -> int:
             else:
                 packet = being_seed._read(args.group_request, limit=being_seed.MAX_SELECTION)
             packet = request_packet(packet)
+            context = ({'expected_context_sha256': packet['expected_context_sha256']}
+                       if 'expected_context_sha256' in packet else {})
             if 'action' in packet['command']:
                 result = source.group_publication(packet['command'], authority_closure=packet['authority_closure'],
-                    deadline_ns=args.observation_deadline_ns)
+                    deadline_ns=args.observation_deadline_ns, **context)
             else:
                 result = source.group_relationship(packet['command'], offline=packet['offline'],
-                    authority_closure=packet['authority_closure'], deadline_ns=args.observation_deadline_ns)
+                    authority_closure=packet['authority_closure'], deadline_ns=args.observation_deadline_ns, **context)
             print(json.dumps(result))
             return 0
         if lifecycle:

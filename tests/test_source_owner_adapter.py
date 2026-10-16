@@ -109,19 +109,21 @@ def test_owner_private_control_paths_and_public_stdin_stay_in_owner_cli(adapter)
 
 
 @pytest.mark.parametrize('publication', [False, True])
-def test_group_relationship_uses_qualified_owner_and_only_public_stdin(adapter, publication):
+@pytest.mark.parametrize('expected_context', [None, 'a'*64])
+def test_group_relationship_uses_qualified_owner_and_only_public_stdin(adapter, publication, expected_context):
     client, _, calls = adapter
+    context = {} if expected_context is None else {'expected_context_sha256': expected_context}
     command = dict(operation_id=str(uuid.uuid4()), step='invite', method='tribe.invite', params={'payload': {}})
     if publication:
         command = dict(operation_id=str(uuid.uuid4()), step='select', action='selection',
                        params=dict(expected_selection_sha256=None))
-        client.group_publication(command, authority_closure={})
+        client.group_publication(command, authority_closure={}, **context)
     else:
-        client.group_relationship(command, offline=True, authority_closure={})
+        client.group_relationship(command, offline=True, authority_closure={}, **context)
     argv, options = calls[0]
     assert argv[-2:] == ['--group-request', '-']
     assert options['user'] == client.owner_uid and options['extra_groups'] == ()
-    assert json.loads(options['input']) == dict(command=command, offline=True, authority_closure={})
+    assert json.loads(options['input']) == dict(command=command, offline=True, authority_closure={}, **context)
     assert '--observation-deadline-ns' in argv and command['operation_id'] not in argv
 
 
@@ -288,13 +290,17 @@ def cli(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('publication', [False, True])
-def test_source_cli_group_request_keeps_finite_owner_context_and_never_serves(cli, monkeypatch, capsys, publication):
+@pytest.mark.parametrize('expected_context', [None, 'a'*64])
+def test_source_cli_group_request_keeps_finite_owner_context_and_never_serves(
+        cli, monkeypatch, capsys, publication, expected_context):
     arguments, calls = cli
     command = dict(operation_id=str(uuid.uuid4()), step='invite', method='tribe.invite', params={'payload': {}})
     if publication:
         command = dict(operation_id=str(uuid.uuid4()), step='select', action='selection',
                        params=dict(expected_selection_sha256=None))
     packet = dict(command=command, offline=True, authority_closure={})
+    if expected_context is not None:
+        packet['expected_context_sha256'] = expected_context
     monkeypatch.setattr(source_cli.sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(packet).encode())))
     assert source_cli.main([*arguments, '--group-request', '-']) == 0
     assert json.loads(capsys.readouterr().out)['status'] == 'recorded'
@@ -304,6 +310,7 @@ def test_source_cli_group_request_keeps_finite_owner_context_and_never_serves(cl
         assert calls[1][2]['offline'] is True
     assert calls[1][2]['authority_closure'] == {}
     assert calls[1][2]['deadline_ns'] == int(arguments[-1])
+    assert calls[1][2].get('expected_context_sha256') == expected_context
 
 
 @pytest.mark.parametrize('verb,action', [('--prepare-control', 'receiving-control-prepare'),

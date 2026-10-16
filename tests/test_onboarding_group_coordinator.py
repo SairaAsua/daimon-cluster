@@ -442,6 +442,29 @@ def test_actual_physical_cli_keeps_expiry_through_sdk_before_effect(tmp_path, mo
     assert ('"error"' in capsys.readouterr().out) == late
 
 
+@pytest.mark.parametrize('publication', [False, True])
+def test_actual_target_cli_keeps_approved_context_guard(tmp_path, monkeypatch, capsys, publication):
+    import io
+    import json
+    import uuid
+    target, args, calls = qualified_target_cli(tmp_path, monkeypatch)
+    command = dict(operation_id=str(uuid.uuid4()), step='invite', method='tribe.invite', params={})
+    if publication:
+        command = dict(operation_id=command['operation_id'], step='context', action='context-preview', params={})
+    packet = dict(command=command, offline=True, authority_closure={}, expected_context_sha256='a'*64)
+    target.sys.stdin = SimpleNamespace(buffer=io.BytesIO(json.dumps(packet).encode()))
+    def submit(value, **options):
+        calls.append((value, options))
+        return {'status': 'recorded'}
+    monkeypatch.setattr(target, 'Target', lambda *a, **k: SimpleNamespace(
+        group_publication=submit, group_relationship=submit))
+    assert target.main(['group-publication' if publication else 'group-relationship', *args,
+        '--observation-timeout-seconds', '2', '--group-request', '-']) == 0
+    assert json.loads(capsys.readouterr().out)['status'] == 'recorded'
+    assert calls == [(command, dict(authority_closure={}, deadline_ns=3_000_000_000,
+        expected_context_sha256='a'*64))]
+
+
 def test_initial_bootstrap_cli_budget_starts_before_sdk_qualification(tmp_path, monkeypatch):
     target, args, calls = qualified_target_cli(tmp_path, monkeypatch)
     def freeze(target, *, deadline_ns, initial, initial_service):

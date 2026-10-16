@@ -21,6 +21,7 @@ from .onboarding import OnboardingError, digest, private_directory
 
 METHODS = frozenset({'tribe.invite', 'tribe.membership.accept', 'relationship.event.ingest'})
 PUBLICATIONS = {
+    'context-preview': set(),
     'application': {'expected_application_sha256', 'specification', 'additions',
                     'admitted_being_refs', 'secret_sources'},
     'visibility-disclosure': {'approved_destination', 'issued_at_ms'},
@@ -46,14 +47,20 @@ def command(value: dict) -> dict:
 
 
 def request_packet(value: dict) -> dict:
-    if (not isinstance(value, dict) or set(value) != {'command', 'offline', 'authority_closure'}
-            or type(value['offline']) is not bool or not isinstance(value['authority_closure'], dict)):
+    fields = {'command', 'offline', 'authority_closure'}
+    if (not isinstance(value, dict) or set(value) not in (fields, fields | {'expected_context_sha256'})
+            or type(value['offline']) is not bool or not isinstance(value['authority_closure'], dict)
+            or 'expected_context_sha256' in value and (not value['offline']
+                or not isinstance(value['expected_context_sha256'], str)
+                or re.fullmatch('[0-9a-f]{64}', value['expected_context_sha256']) is None)):
         raise OnboardingError('onboarding_group_relationship_command_required')
     publication = isinstance(value['command'], dict) and 'action' in value['command']
     if publication and not value['offline']:
         raise OnboardingError('onboarding_group_relationship_writer_required')
     return dict(command=(publication_command if publication else command)(value['command']), offline=value['offline'],
-                authority_closure=copy.deepcopy(value['authority_closure']))
+                authority_closure=copy.deepcopy(value['authority_closure']),
+                **({'expected_context_sha256': value['expected_context_sha256']}
+                   if 'expected_context_sha256' in value else {}))
 
 
 def publication_command(value: dict) -> dict:
@@ -160,15 +167,8 @@ def merge_authorities(current: dict, supplied: dict) -> dict:
     return result
 
 
-def owner_authorities(runtime_root: Path, group_root: Path, journal: Path,
-                      operation_id: str, closure: dict) -> dict:
-    """Freeze the complete owner-approved closure before partial publication.
-
-    The caller holds the native writer. First use validates the actual serving
-    selector and preserves all its Roots. An exact retained operation can then
-    load a closed maintenance context even while that selector lags publication.
-    Normal serving and observation keep their strict application pins.
-    """
+def _owner_context(runtime_root: Path, group_root: Path, operation_id: str, closure: dict) -> tuple[dict, dict]:
+    """Construct the same public pins for preparation and writer retention."""
     from . import onboarding_peer
     try:
         if str(uuid.UUID(operation_id)) != operation_id:
@@ -186,6 +186,60 @@ def owner_authorities(runtime_root: Path, group_root: Path, journal: Path,
     # A self-consistent replacement chain cannot erase native known history.
     onboarding_peer._group_authorities_with_history(bundle, authorities,
         {ref: authority.active for ref, authority in authorities.items()})
+    return approved, authorities
+
+
+def _first_owner_context(runtime_root: Path, group_root: Path, approved: dict, authorities: dict) -> dict:
+    from . import onboarding_peer
+    bundle = being_seed._read(runtime_root / 'runtime.json', limit=being_seed.MAX_SELECTION)
+    if digest(bundle) != approved['identity']['runtime_bundle_sha256']:
+        raise OnboardingError('onboarding_group_owner_context_conflict')
+    current = onboarding_peer.approved_group_authorities(runtime_root, group_root, bundle)
+    if not set(current) <= set(authorities):
+        raise OnboardingError('onboarding_group_owner_context_incomplete')
+    merge_authorities(current, authorities)
+    selection = group_root / 'selection.json'
+    predecessor = digest(being_seed._read(selection, limit=being_seed.MAX_SELECTION)) if selection.exists() else None
+    return {**approved, 'predecessor_selection_sha256': predecessor}
+
+
+def preview_owner_context(runtime_root: Path, group_root: Path, operation_id: str, closure: dict,
+                          *, deadline_ns: int | None = None) -> dict:
+    """Read public context pins before interruption, without custody or writes.
+
+    This is a prospective digest, not writer ownership or receiving acceptance.
+    The later writer compares these exact pins before retaining any context.
+    """
+    def budget():
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('onboarding_group_relationship_deadline_expired')
+    budget()
+    approved, authorities = _owner_context(runtime_root, group_root, operation_id, closure)
+    context = _first_owner_context(runtime_root, group_root, approved, authorities)
+    # Read-only observation must not certify a mixture across a concurrent
+    # bundle/ledger/selector change. The writer remains the final CAS boundary.
+    fresh, _ = _owner_context(runtime_root, group_root, operation_id, closure)
+    if fresh != approved or _first_owner_context(runtime_root, group_root, fresh, authorities) != context:
+        raise OnboardingError('onboarding_group_owner_context_conflict')
+    budget()
+    return dict(schema='cluster-group-owner-context-preview/v1', operation_id=operation_id,
+        owner_context_sha256=digest(context), runtime_bundle_sha256=approved['identity']['runtime_bundle_sha256'],
+        predecessor_selection_sha256=context['predecessor_selection_sha256'], receiving_readiness='unobserved')
+
+
+def owner_authorities(runtime_root: Path, group_root: Path, journal: Path,
+                      operation_id: str, closure: dict, *, expected_context_sha256: str | None = None) -> dict:
+    """Freeze the complete owner-approved closure before partial publication.
+
+    The caller holds the native writer. First use validates the actual serving
+    selector and preserves all its Roots. An exact retained operation can then
+    load a closed maintenance context even while that selector lags publication.
+    Normal serving and observation keep their strict application pins.
+    """
+    if expected_context_sha256 is not None and (not isinstance(expected_context_sha256, str)
+            or re.fullmatch('[0-9a-f]{64}', expected_context_sha256) is None):
+        raise OnboardingError('onboarding_group_owner_context_conflict')
+    approved, authorities = _owner_context(runtime_root, group_root, operation_id, closure)
     private_directory(journal, create=True)
     with being_seed._locked(journal):
         operation = private_directory(journal / operation_id, create=True)
@@ -199,14 +253,11 @@ def owner_authorities(runtime_root: Path, group_root: Path, journal: Path,
                     and (not isinstance(predecessor, str) or re.fullmatch('[0-9a-f]{64}', predecessor) is None)):
                 raise OnboardingError('onboarding_group_owner_context_conflict')
         else:
-            current = onboarding_peer.approved_group_authorities(runtime_root, group_root, bundle)
-            if not set(current) <= set(authorities):
-                raise OnboardingError('onboarding_group_owner_context_incomplete')
-            merge_authorities(current, authorities)
-            selection = group_root / 'selection.json'
-            predecessor = digest(being_seed._read(selection, limit=being_seed.MAX_SELECTION)) if selection.exists() else None
-            being_seed._write(path, {**approved, 'predecessor_selection_sha256': predecessor},
-                limit=being_seed.MAX_SELECTION)
+            retained = _first_owner_context(runtime_root, group_root, approved, authorities)
+        if expected_context_sha256 is not None and digest(retained) != expected_context_sha256:
+            raise OnboardingError('onboarding_group_owner_context_conflict')
+        if not path.exists():
+            being_seed._write(path, retained, limit=being_seed.MAX_SELECTION)
         # Retry the durability boundary even after a lost write/fsync reply.
         # No native load or relationship dispatch precedes this boundary.
         for parent in (context, operation, journal, journal.parent):
@@ -400,6 +451,8 @@ def publication_request(hosted, group_root: Path, journal: Path, value: dict, *,
     not bypass current publication checks or prove receiving readiness.
     """
     selected = publication_command(value)
+    if selected['action'] == 'context-preview':
+        raise OnboardingError('onboarding_group_context_preview_is_read_only')
     def check_deadline():
         if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
             raise OnboardingError('onboarding_group_relationship_deadline_expired')

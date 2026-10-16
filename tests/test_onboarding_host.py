@@ -600,7 +600,8 @@ def test_receiving_identity_uses_prepared_candidate_and_one_finite_owner_budget(
 
 
 @pytest.mark.parametrize('publication', [False, True])
-def test_group_request_uses_prepared_owner_stdin_without_requiring_running_group(tmp_path, monkeypatch, publication):
+@pytest.mark.parametrize('guarded', [False, True])
+def test_group_request_uses_prepared_owner_stdin_without_requiring_running_group(tmp_path, monkeypatch, publication, guarded):
     import uuid
     backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
     packet = dict(command=dict(operation_id=str(uuid.uuid4()), step='accept',
@@ -609,6 +610,8 @@ def test_group_request_uses_prepared_owner_stdin_without_requiring_running_group
     if publication:
         packet['command'] = dict(operation_id=str(uuid.uuid4()), step='select', action='selection',
                                  params=dict(expected_selection_sha256=None))
+    if guarded:
+        packet['expected_context_sha256'] = 'a'*64
     backend._target_call(value, action, candidate=candidate,
         group_request=packet, observation_timeout_seconds=5)
     argv, options = calls[0]
