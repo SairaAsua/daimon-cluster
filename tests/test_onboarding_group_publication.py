@@ -469,6 +469,7 @@ def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(
     baseline = source.group_publication(initial, authority_closure={})
     target = Target(tmp_path / 'candidate/guest', first.plan,
         document(tmp_path / 'candidate/custody' / digest(first.plan) / 'genesis.json'))
+    entrant_name = target.plan['name']
     founder_bundle = first.document_bundle()
     founder, entrant = founder_bundle['manifest']['being_ref'], peer_bundle['manifest']['being_ref']
     destination = dict(bot_id=1, chat_id=-123, topic_id=None, representation='compact-text/v1')
@@ -515,24 +516,12 @@ def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(
         body_ref=peer_bundle['local_origin']['body_ref'], route=route)
     operation = str(uuid.uuid4())
     full_closure = {**closure(founder_bundle), **closure(peer_bundle)}
-    locals_ = dict(founder=source, entrant=target)
-    roots = dict(founder=source.root, entrant=target.package/'runtime')
-    bundles = dict(founder=founder_bundle, entrant=peer_bundle)
-    # Explicit preparation prerequisite, not an automatic publication feature:
-    # fresh receiving fixtures have the legacy communication schema. Exercise
-    # the maintained offline migration, never suppress its group-load refusal.
-    from daimon_matrix import operator_communication_migration as migration
-    def prepare_communication():
-        with target._runtime_writer():
-            prepared = social.load_owner_runtime(roots['entrant'], target._reader,
-                authorities=social.public_authorities(peer_bundle, closure(founder_bundle)))
-            preview = migration.plan(prepared.service.communication.ledger.path)
-            migration.apply(prepared.service.communication, tmp_path/'entrant-schema-preparation', preview['plan_sha256'])
+    locals_ = {'founder':source, entrant_name:target}
+    roots = {'founder':source.root, entrant_name:target.package/'runtime'}
+    bundles = {'founder':founder_bundle, entrant_name:peer_bundle}
     pins = {name: owner.group_publication(dict(operation_id=operation, step='context', action='context-preview', params={}),
         authority_closure={ref: value for ref, value in full_closure.items()
             if ref != bundles[name]['manifest']['being_ref']})['owner_context_sha256'] for name, owner in locals_.items()}
-    original_identity = {name: {file: (root/file).read_bytes() for file in ('runtime.json', 'custody.json')}
-                         for name, root in roots.items()}
     invite = invitation(source, peer_bundle)['params']['payload']
     declaration = application['relationship_events'][0]
     receivers = {name: dict(being_ref=bundles[name]['manifest']['being_ref'],
@@ -549,7 +538,7 @@ def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(
         activation=dict(manifest_path=str(tmp_path/'manifest.json'), manifest_uid=0,
             expires_at_ms=invite['expires_at_ms'], observation_window_ms=1000))
     membership = dict(schema='cluster-membership-admission/v1', operation_id=operation,
-        founder_owner='founder', entrant_owner='entrant', authority_closure=full_closure,
+        founder_owner='founder', entrant_owner=entrant_name, authority_closure=full_closure,
         governance=[declaration], invitation=invite, membership_sequence=0,
         previous_membership_terminal_ref=None, acceptance_not_after_ms=invite['expires_at_ms'], owner_contexts=pins)
     steps = dict(application='application', disclosure='disclosure', acceptance='acceptance',
@@ -559,42 +548,42 @@ def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(
     preparations['founder']['steps']['snapshot'] = 'lifecycle-snapshot'
     specification = copy.deepcopy(initial['params']['specification'])
     specification['authorities'] = [full_closure[ref]['authority'] for ref in sorted(full_closure)]
-    specification['relationship_mode'].update(runtime_id=peer_bundle['runtime_id'], state_root=str(roots['entrant']),
+    specification['relationship_mode'].update(runtime_id=peer_bundle['runtime_id'], state_root=str(roots[entrant_name]),
         store_filename=peer_bundle['relationships']['store_filename'])
     specification['tribe']['policy']['membership_ref'] = None
     specification['listen']['port'] = 48676
     specification['intake'] = route
     specification['roster'].append(peer_row)
-    owner_recipes = dict(
-        founder=dict(steps=steps, application=dict(expected_application_sha256=baseline['application_sha256'],
+    owner_recipes = {
+        'founder':dict(steps=steps, application=dict(expected_application_sha256=baseline['application_sha256'],
             specification=None, additions=dict(authorities=[full_closure[entrant]['authority']],
                 relationship_events=[], roster=[peer_row]), admitted_being_refs=[entrant],
             secret_sources={peer_key.name:str(peer_key)}),
             disclosure=dict(approved_destination=destination, issued_at_ms=issued),
             visibility=dict(expected_installation_sha256=visibility['installation_sha256'], initial_configuration=None),
             selection=dict(expected_selection_sha256=old_selection)),
-        entrant=dict(steps=steps, application=dict(expected_application_sha256=None, specification=specification,
+        entrant_name:dict(steps=steps, application=dict(expected_application_sha256=None, specification=specification,
             additions=None, admitted_being_refs=[], secret_sources={**initial['params']['secret_sources'], peer_key.name:str(peer_key)}),
             disclosure=dict(approved_destination=destination, issued_at_ms=issued),
             visibility=dict(expected_installation_sha256=None, initial_configuration=configuration(target.root/'tribe/visibility')),
-            selection=dict(expected_selection_sha256=None)))
-    recipe = dict(schema='cluster-admission-publications/v1', owners=owner_recipes, signers={founder:'founder', entrant:'entrant'})
+            selection=dict(expected_selection_sha256=None))}
+    recipe = dict(schema='cluster-admission-publications/v1', owners=owner_recipes, signers={founder:'founder', entrant:entrant_name})
     assert social.publication_recipe(recipe, admission, membership, [sender], preparations) == recipe
     for mutate in (
-        lambda value: value['signers'].update({founder:'entrant'}),
-        lambda value: value['owners']['entrant']['application']['specification']['tribe']['policy'].update(membership_ref='invented'),
+        lambda value: value['signers'].update({founder:entrant_name}),
+        lambda value: value['owners'][entrant_name]['application']['specification']['tribe']['policy'].update(membership_ref='invented'),
         lambda value: value['owners']['founder']['application']['additions']['relationship_events'].append({'invented':True}),
         lambda value: value['owners']['founder']['steps'].update(application='another-child-step'),
         lambda value: value['owners']['founder']['steps'].update(snapshot='lifecycle-snapshot'),
         lambda value: value['owners']['founder']['steps'].update(disclosure='lifecycle-snapshot'),
-        lambda value: value['owners']['entrant']['steps'].update(disclosure='communication-prepare'),
-        lambda value: value['owners']['entrant']['disclosure'].update(approved_destination={**destination, 'chat_id':-999}),
+        lambda value: value['owners'][entrant_name]['steps'].update(disclosure='communication-prepare'),
+        lambda value: value['owners'][entrant_name]['disclosure'].update(approved_destination={**destination, 'chat_id':-999}),
         lambda value: value['owners']['founder']['application']['additions'].update(roster=[]),
-        lambda value: value['owners']['entrant']['application']['specification']['listen'].update(port=0),
-        lambda value: value['owners']['entrant']['application']['specification'].update(roster=[]),
-        lambda value: value['owners']['entrant']['application'].update(secret_sources={}),
-        lambda value: value['owners']['entrant']['visibility']['initial_configuration']['secrets'].update(proof_key_file='../outside'),
-        lambda value: value['owners']['entrant']['visibility']['initial_configuration']['telegram_qualification'].update(probe_chat_id=-999),
+        lambda value: value['owners'][entrant_name]['application']['specification']['listen'].update(port=0),
+        lambda value: value['owners'][entrant_name]['application']['specification'].update(roster=[]),
+        lambda value: value['owners'][entrant_name]['application'].update(secret_sources={}),
+        lambda value: value['owners'][entrant_name]['visibility']['initial_configuration']['secrets'].update(proof_key_file='../outside'),
+        lambda value: value['owners'][entrant_name]['visibility']['initial_configuration']['telegram_qualification'].update(probe_chat_id=-999),
     ):
         changed = copy.deepcopy(recipe)
         mutate(changed)
@@ -619,9 +608,13 @@ def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(
         def group_publication(self, value, **options):
             assert self.deadline_ns > time.monotonic_ns()
             calls.append((self.name, copy.deepcopy(value)))
-            if outcome == 'dispatch-winner' and self.name == 'founder' and value['action'] == 'visibility-publish':
+            # Arm a later winner only after the retained lost entrant reply;
+            # real plan names need not sort before the founder's owner name.
+            if (not fault['visibility'] and outcome == 'dispatch-winner'
+                    and self.name == 'founder' and value['action'] == 'visibility-publish'):
                 fault['winner'] = renew_application()
-            if outcome == 'visibility-winner' and self.name == 'founder' and value['action'] == 'selection':
+            if (not fault['visibility'] and outcome == 'visibility-winner'
+                    and self.name == 'founder' and value['action'] == 'selection'):
                 from daimon_matrix.canonical import canonical_bytes
                 from daimon_matrix.messaging_config import config_digest, create_binding, read_document
                 with source.writer():
@@ -645,7 +638,7 @@ def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(
                 fault['winner'] = {path:path.read_bytes() for path in
                     (installation, group/'application/publication.json', group/'selection.json')}
             result = locals_[self.name].group_publication(value, **options)
-            if self.name == 'entrant' and value['action'] == 'visibility-publish' and fault['visibility']:
+            if self.name == entrant_name and value['action'] == 'visibility-publish' and fault['visibility']:
                 fault['visibility'] = False
                 raise OSError('synthetic lost entrant visibility response')
             return result
@@ -653,8 +646,37 @@ def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(
     journal = OperationJournal(tmp_path/'group-phase')
     row = plan_update(journal, manifest_digest='f'*64, target='receiving:'+admission['tribe_ref'],
         expected_precondition=dict(tribe_ref=admission['tribe_ref'], senders=[sender], receiver_selections={name:None for name in owners}),
-        intended_transition=dict(cohort_admission=admission, portal_admission=dict(schema='cluster-portal-group-admission/v2', social=membership),
+        intended_transition=dict(cohort_admission=admission, portal_admission=dict(schema='cluster-portal-group-admission/v2', plan_digest=digest(target.plan), social=membership),
             admission_preparations=preparations, admission_publications=recipe), audit_identity={'actor':'synthetic-host'})
+    # Join actual initial controller publication to the immutable original
+    # social recipe. Native owner effects use the same actual admitted name.
+    from clusterctl.onboarding_receiving_update import GuestOwnerBootstrap, freeze_guest_bootstrap
+    frozen_owner = freeze_guest_bootstrap(target, deadline_ns=time.monotonic_ns()+60_000_000_000, initial=True)
+    controller_request = dict(schema='cluster-guest-owner-initial/v1', operation_id=str(uuid.uuid4()),
+        **{key:frozen_owner[key] for key in ('plan_digest', 'genesis_digest', 'code_digest', 'runtime_sha256',
+            'group_sha256', 'predecessor', 'mode', 'preservation')}, expires_at_ms=admission['activation']['expires_at_ms'],
+        group_context=dict(operation_id=operation, owner_name=entrant_name,
+            authority_closure=closure(founder_bundle), expected_context_sha256=pins[entrant_name]))
+    controller = GuestOwnerBootstrap(target, controller_request)
+    staged = controller.execute('stage', deadline_ns=time.monotonic_ns()+60_000_000_000)
+    published = controller.execute('publish', deadline_ns=time.monotonic_ns()+60_000_000_000,
+        ready_sha256=staged['ready_sha256'])
+    native_publication = (controller.records/'capability_published.json').read_bytes()
+    journal.advance(row['operation_id'], row['state'], runtime_observation=dict(portal_admission=dict(
+        controller_intent=controller_request, controller_stage=staged, controller_prepared=published)))
+    derived_contexts = social.admission_owner_contexts(journal.get(row['operation_id']), membership)
+    assert derived_contexts['founder'] == pins['founder']
+    assert derived_contexts[entrant_name] != pins[entrant_name]
+    assert journal.get(row['operation_id'])['intended_transition']['portal_admission']['social'] == membership
+    schema_preview = target.group_publication(dict(operation_id=operation, step='communication-context',
+        action='context-preview', params={}), authority_closure=closure(founder_bundle),
+        expected_context_sha256=derived_contexts[entrant_name])
+    target.group_publication(dict(operation_id=operation, step='communication-prepare',
+        action='communication-prepare', params=dict(expected_plan_sha256=schema_preview['communication_plan']['plan_sha256'],
+            expires_at_ms=admission['activation']['expires_at_ms'])), authority_closure=closure(founder_bundle),
+        expected_context_sha256=derived_contexts[entrant_name])
+    original_identity = {name: {file:(root/file).read_bytes() for file in ('runtime.json', 'custody.json')}
+                         for name, root in roots.items()}
     cohort = CohortController(journal, row['operation_id'], owners)
     monkeypatch.setattr(cohort, 'require_revocation_barrier', lambda: dict(
         schema='cluster-receiving-admission-barrier/v1', current_senders={'founder':dict(state=fault['barrier'])}))
@@ -667,13 +689,6 @@ def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(
         cohort.publish_admission_group(deadline_ns=time.monotonic_ns()+60_000_000_000)
     assert calls == []
     fault['barrier'] = 'stopped'
-    from daimon_matrix.messaging_config import MessagingConfigError
-    with pytest.raises(MessagingConfigError, match='semantic_migration_required'):
-        cohort.publish_admission_group(deadline_ns=time.monotonic_ns()+60_000_000_000)
-    assert not (target.root/'tribe/application').exists()
-    # This explicit prerequisite is intentionally not claimed automated. The
-    # native migration's partial-recovery gap remains future preparation work.
-    prepare_communication()
     admit = operator_messaging.admit_group_application
     def lost_application(*args, **options):
         admit(*args, **options)
@@ -707,7 +722,7 @@ def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(
     assert result['membership_sha256'] == digest(joined)
     assert journal.get(row['operation_id'])['state'] == 'planned'
     frozen = journal.get(row['operation_id'])['runtime_observation']['group_publication']['requests']
-    assert frozen['entrant']['application']['command']['params']['specification']['tribe']['policy']['membership_ref'] == joined['acceptance']['event_id']
+    assert frozen[entrant_name]['application']['command']['params']['specification']['tribe']['policy']['membership_ref'] == joined['acceptance']['event_id']
     assert (group/'application/client.json').read_bytes() == client
     assert (group/'application/client.key').read_bytes() == key
     # The generic publication snapshot must not occupy the child's original
@@ -733,6 +748,7 @@ def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(
             for name, root in roots.items()} == original_identity
     assert all(owner.deadline_ns is None for owner in owners.values())
     assert not any((root/'tribe.sock').exists() for root in roots.values())
+    assert (controller.records/'capability_published.json').read_bytes() == native_publication
 
 
 def test_pending_initial_publication_preserves_a_later_native_client_renewal(group_source, monkeypatch):
