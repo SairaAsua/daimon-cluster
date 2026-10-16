@@ -133,6 +133,7 @@ def test_launcher_keeps_the_existing_home_authority_and_browser_boundary():
     changed=['clusterctl/homes/service.py','clusterctl/homes/homemaker.py',
              'clusterctl/homes/launcher.py','clusterctl/homes/launcher/index.html',
              'clusterctl/homes/launcher/launcher.css','clusterctl/homes/launcher/launcher.js',
+             'clusterctl/homes/launcher/launch.js','tests/js/miniapp-launch.cjs',
              'tests/test_home_launcher.py','docs/design/miniapps-launcher.md',
              'tools/ci_scope.py','tests/test_ci_scope.py']
     assert select(changed,ROOT)==('homes',list(HOME_TESTS))
