@@ -61,6 +61,7 @@ def register_codex_mcp(
     command: list[str],
     *,
     previous_sha256: str | None = None,
+    deadline_ns: int | None = None,
 ) -> dict[str, Any]:
     """Configure this owner's existing Matrix role through Codex's writer.
 
@@ -68,12 +69,24 @@ def register_codex_mcp(
     Replacing an existing role needs its exact prior command digest; unrelated
     configuration and optional role settings must remain untouched.
     """
+    _registration_budget(deadline_ns)
     attachment = Path(os.path.abspath(attachment))
     home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
     if not home.is_absolute() or home.is_symlink():
         raise ValueError("agent_chat_codex_home_invalid")
     with _codex_owner_lock(home):
-        return _register_codex_mcp_locked(home, attachment, command, previous_sha256)
+        return _register_codex_mcp_locked(
+            home, attachment, command, previous_sha256, deadline_ns=deadline_ns
+        )
+
+
+def _registration_budget(deadline_ns: int | None) -> float:
+    if deadline_ns is None:
+        return 30
+    remaining = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+    if remaining <= 0:
+        raise ValueError("agent_chat_tooling_deadline_expired")
+    return min(30, remaining)
 
 
 @contextmanager
@@ -252,10 +265,16 @@ def _write_codex_role(
 
 
 def _register_codex_mcp_locked(
-    home: Path, attachment: Path, command: list[str], previous_sha256: str | None
+    home: Path,
+    attachment: Path,
+    command: list[str],
+    previous_sha256: str | None,
+    *,
+    deadline_ns: int | None = None,
 ) -> dict[str, Any]:
     # This lock serializes this receiving-owner installer, not arbitrary native
     # config writers. Reject their observed intervening edits before publication.
+    _registration_budget(deadline_ns)
     config = home / "config.toml"
     from daimon_matrix.messaging_config import protected_read
 
@@ -272,6 +291,7 @@ def _register_codex_mcp_locked(
             "startup_timeout_sec" in existing or "startup_timeout_ms" in existing
         ):
             _sync_directory(home)
+            _registration_budget(deadline_ns)
             return {"status": "configured", "catalog_acceptance": "unobserved"}
         if (
             current != wanted
@@ -281,7 +301,16 @@ def _register_codex_mcp_locked(
     history = attachment / "codex-mcp-history" / str(uuid.uuid4())
     _put(history / "config.before.toml", before)
     candidate_home = history / "candidate-home"
-    candidate = _codex_candidate(candidate_home, before, command)
+    candidate = _codex_candidate(
+        candidate_home,
+        before,
+        command,
+        **(
+            {}
+            if deadline_ns is None
+            else {"timeout_seconds": _registration_budget(deadline_ns)}
+        ),
+    )
     _put(history / "config.candidate.toml", candidate)
     _put(
         history / "selection.json",
@@ -310,8 +339,10 @@ def _register_codex_mcp_locked(
         if observed not in (before, candidate):
             raise ValueError("agent_chat_codex_mcp_configuration_changed")
         if observed != candidate:
+            _registration_budget(deadline_ns)
             os.replace(temporary, config)
         _sync_directory(home)
+        _registration_budget(deadline_ns)
     finally:
         temporary.unlink(missing_ok=True)
     return {
@@ -364,7 +395,7 @@ def _codex_candidate(
             home,
             command,
             **({"startup_timeout_seconds": 60} if startup_default else {}),
-            **({} if timeout_seconds is None else {"timeout_seconds": timeout_seconds}),
+            timeout_seconds=30 if timeout_seconds is None else timeout_seconds,
         )
         candidate = protected_read(config)
     if tomllib.loads(candidate.decode()) != expected:
@@ -498,8 +529,13 @@ def reconcile_tooling(
             for index, before in enumerate(originals[:-1]):
                 original = json.loads(before)
                 if (
-                    set(original) != {"command", "tools", "incoming_channels"}
+                    set(original) not in (
+                        {"command", "tools", "incoming_channels"},
+                        {"command", "tools", "incoming_channels", "outgoing_channels"},
+                    )
                     or original["incoming_channels"] != binding["incoming_channels"]
+                    or original.get("outgoing_channels", binding["outgoing_channels"])
+                    != binding["outgoing_channels"]
                     or not isinstance(original["command"], list)
                     or original["command"][-2:]
                     != ["--binding", str(attachment / binding_filename)]
@@ -644,6 +680,8 @@ def _tools() -> list[dict[str, Any]]:
 def install(args: argparse.Namespace) -> dict[str, Any]:
     import daimon_matrix.agent_chat as module
 
+    deadline_ns = getattr(args, "deadline_ns", None)
+    _registration_budget(deadline_ns)
     target = Path(os.path.abspath(args.attachment))
     binding = {
         "schema": SCHEMA,
@@ -668,6 +706,7 @@ def install(args: argparse.Namespace) -> dict[str, Any]:
     _mkdir(target)
     _directory(target)
     (target / "requests").mkdir(mode=0o700, exist_ok=True)
+    _registration_budget(deadline_ns)
     _put(target / "binding.json", canonical_bytes(binding))
     bridge(load_binding(target / "binding.json"))
     command = [
@@ -703,6 +742,7 @@ def install(args: argparse.Namespace) -> dict[str, Any]:
             home / "daimon-chat" / "agents/openai.yaml",
             b"policy:\n  allow_implicit_invocation: true\n",
         )
+    _registration_budget(deadline_ns)
     _put(target / "connection.json", connection)
     result: dict[str, Any] = {
         "status": "installed",
@@ -722,7 +762,9 @@ def install(args: argparse.Namespace) -> dict[str, Any]:
             target,
             result["mcp_command"],
             previous_sha256=getattr(args, "previous_codex_mcp_sha256", None),
+            deadline_ns=deadline_ns,
         )
+    _registration_budget(deadline_ns)
     return result
 
 
