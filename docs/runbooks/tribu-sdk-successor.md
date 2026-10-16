@@ -6,9 +6,13 @@ The original readable-presentation increment is retained under
 [Matrix #287](https://github.com/AlterMundi/daimon-matrix/issues/287).
 Matrix owns signed messaging and presentation; Cluster selects the exact
 executable SDK and receiving helpers on the existing bodies.
-The current source candidate pins Matrix `0dc0b555939b16a1150a220a366a6911a5ae9c28`.
-The three-body production selection remains its separately recorded predecessor
-until receiving adoption succeeds.
+Use [RESUME.md](../../RESUME.md) for the actual selected receiving generation.
+The2026-10-16 three-VPS rollout loaded SDK80542cee/receiving coded7d64a19 and
+completed cohort6365754a. SDK0dc preparation records below retain their original
+qualification; they are not an outstanding original rollout or current selection.
+The ordinary checkout/default development dependency does not select production.
+Future admission source and its isolated fixture remain separately qualified;
+current concurrent delivery acceptance is still incomplete under Matrix#363.
 
 For a separate qualified SDK candidate, run `.venv/bin/python -m tools.build_onboarding_sdk
 --matrix-commit <exact-40-hex-revision>` archives that explicit source and seals
