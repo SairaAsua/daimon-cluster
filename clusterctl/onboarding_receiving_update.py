@@ -2681,25 +2681,25 @@ class GuestBootstrapController:
         self.journal.advance(self.operation_id, row['state'], runtime_observation=observations,
             expected_runtime_observation=row['runtime_observation'])
 
-    def execute(self, *, timeout_seconds: float = 30, authority_closure: dict | None = None) -> dict:
+    def execute(self, *, timeout_seconds: float = 30, authority_closure: dict | None = None, deadline_ns: int | None = None) -> dict:
         """Resume exact local effects; never blindly stop a replacement process."""
-        return self._advance(timeout_seconds=timeout_seconds, phase='load', authority_closure=authority_closure)
+        return self._advance(timeout_seconds=timeout_seconds, phase='load', authority_closure=authority_closure, deadline_ns=deadline_ns)
 
-    def quiesce(self, *, timeout_seconds: float = 30) -> dict:
+    def quiesce(self, *, timeout_seconds: float = 30, deadline_ns: int | None = None) -> dict:
         """Retain and recheck predecessor exit without publishing or starting.
 
         Group admission needs the existing native writer while the predecessor
         is stopped. This is the same bounded lifecycle operation as execute,
         not permission to stop a replacement or report receiving readiness.
         """
-        return self._advance(timeout_seconds=timeout_seconds, phase='quiesce')
+        return self._advance(timeout_seconds=timeout_seconds, phase='quiesce', deadline_ns=deadline_ns)
 
-    def preserve(self, *, timeout_seconds: float = 30) -> dict:
+    def preserve(self, *, timeout_seconds: float = 30, deadline_ns: int | None = None) -> dict:
         """Finish existing-owner preservation before admission writes."""
-        return self._advance(timeout_seconds=timeout_seconds, phase='preserve')
+        return self._advance(timeout_seconds=timeout_seconds, phase='preserve', deadline_ns=deadline_ns)
 
-    def retain_admission_group(self, *, authority_closure: dict, timeout_seconds: float = 30) -> dict:
-        return self._advance(timeout_seconds=timeout_seconds, phase='derive', authority_closure=authority_closure)
+    def retain_admission_group(self, *, authority_closure: dict, timeout_seconds: float = 30, deadline_ns: int | None = None) -> dict:
+        return self._advance(timeout_seconds=timeout_seconds, phase='derive', authority_closure=authority_closure, deadline_ns=deadline_ns)
 
     def observe_quiescence(self, *, timeout_seconds: float = 30) -> dict:
         """Read the exact root evidence without reacquiring caller-owned job locks."""
@@ -2732,9 +2732,23 @@ class GuestBootstrapController:
             plan_digest=digest(frozen['plan']), predecessor=previous, argv=candidate['argv'])
 
     def _advance(self, *, timeout_seconds: float, phase: str,
-                 authority_closure: dict | None = None) -> dict:
+                 authority_closure: dict | None = None, deadline_ns: int | None = None) -> dict:
         from .onboarding_host import HostConfig
+        if (type(timeout_seconds) not in {int, float} or not 0 < timeout_seconds <= 60
+                or deadline_ns is not None and (type(deadline_ns) is not int or deadline_ns <= 0)):
+            raise OnboardingError('receiving_host_deadline_required')
+        deadline = min(time.monotonic_ns() + int(timeout_seconds * 1_000_000_000),
+            deadline_ns if deadline_ns is not None else 2**63 - 1)
+        def remaining():
+            value = (deadline - time.monotonic_ns()) / 1_000_000_000
+            if value <= 0:
+                raise OnboardingError('receiving_owner_deadline_expired')
+            return value
+        def record(key, value):
+            self._record(key, value)
+            remaining()
         with ExitStack() as locks:
+            locks.enter_context(onboarding_sdk.probe_budget(deadline))
             locks.enter_context(self.journal.mutation_lock(self.operation_id))
             row, frozen, candidate = self._row()
             jobs = private_directory(self.backend.config.jobs)
@@ -2754,6 +2768,7 @@ class GuestBootstrapController:
                 row['intent']['runtime_call']['manifest_digest'], being_ref=frozen['owner']['being_ref'],
                 embodiment_id=frozen['owner']['origin']['embodiment_id'],
                 code_uid=candidate['code_uid'], manifest_uid=candidate['manifest_uid'])
+            remaining()
             if checked != candidate['prepared']:
                 raise OnboardingError('receiving_guest_bootstrap_candidate_changed')
             # OperationJournal normally uses operation:UUID identifiers, while
@@ -2779,17 +2794,17 @@ class GuestBootstrapController:
                 self.journal.advance(self.operation_id, 'runtime-dispatching')
             def root_call(action):
                 return self.backend._guest_service_call(frozen['plan'], action, candidate=vector,
-                    timeout_seconds=timeout_seconds, request=root_request)
+                    timeout_seconds=remaining(), request=root_request)
             def owner_call(action, **kwargs):
                 return self.backend._target_call(frozen['plan'], action, candidate=vector,
-                    bootstrap_timeout_seconds=timeout_seconds, bootstrap_request=owner_request, **kwargs)
+                    bootstrap_timeout_seconds=remaining(), bootstrap_request=owner_request, **kwargs)
             if 'candidate_validated' not in effects:
-                self._record('candidate_validated', root_call('bootstrap-validate'))
+                record('candidate_validated', root_call('bootstrap-validate'))
             if 'controlled_loaded' in effects:
-                return self._loaded(frozen, candidate, vector, timeout_seconds)
+                return self._loaded(frozen, candidate, vector, remaining(), deadline_ns=deadline)
             if 'quiesced' not in effects:
                 current = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
-                    timeout_seconds=timeout_seconds)
+                    timeout_seconds=remaining())
                 if current['service']['manager']['ActiveState'] == 'active':
                     if frozen['owner'].get('mode', 'issue') == 'preserve':
                         preservation_authorization(frozen['owner']['preservation'], candidate['expires_at_ms'])
@@ -2797,7 +2812,7 @@ class GuestBootstrapController:
                             or candidate['expires_at_ms'] <= time.time_ns() // 1_000_000):
                         raise OnboardingError('receiving_guest_bootstrap_predecessor_or_expiry_changed')
                     fresh = self.backend._target_call(frozen['plan'], 'receiving-bootstrap-freeze', candidate=vector,
-                        bootstrap_timeout_seconds=timeout_seconds)
+                        bootstrap_timeout_seconds=remaining())
                     if any(fresh.get(key) != value for key, value in frozen['owner'].items()
                            if key != 'observer_startup'):
                         raise OnboardingError('receiving_guest_bootstrap_predecessor_changed')
@@ -2815,21 +2830,24 @@ class GuestBootstrapController:
                         raise OnboardingError('qualified_guest_bootstrap_candidate_required')
                     if candidate['expires_at_ms'] <= time.time_ns() // 1_000_000:
                         raise OnboardingError('receiving_guest_bootstrap_authorization_expired')
-                self._record('quiesced', root_call('bootstrap-quiesce'))
+                record('quiesced', root_call('bootstrap-quiesce'))
             if phase == 'quiesce':
                 # A retained exit is historical evidence. The owning root
                 # route rechecks the current unit and exact predecessor exits
                 # before returning, and refuses to stop a replacement.
                 if 'quiesced' in effects:
                     result = root_call('bootstrap-quiesce')
-                    self._record('quiesced', result)
+                    record('quiesced', result)
+                    remaining()
                     return result
-                return self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]['quiesced']
+                result = self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]['quiesced']
+                remaining()
+                return result
             # Root rechecks current quiescence before every owner mutation; its
             # retained independent exits do not imply the unit stayed stopped.
             if owner_request.get('mode', 'issue') == 'preserve':
                 current = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
-                    timeout_seconds=timeout_seconds)
+                    timeout_seconds=remaining())
                 if ('owner_preserved' not in effects or link is None
                         and current['service']['manager']['ActiveState'] == 'inactive'):
                     root_call('bootstrap-quiesce')
@@ -2838,21 +2856,23 @@ class GuestBootstrapController:
                             or preserved.get('preservation') != owner_request['preservation']
                             or preserved.get('request_sha256') != digest(owner_request)):
                         raise OnboardingError('receiving_controller_preservation_changed')
-                    self._record('owner_preserved', preserved)
+                    record('owner_preserved', preserved)
             else:
                 if 'owner_ready' not in effects:
                     root_call('bootstrap-quiesce')
                     ready = owner_call('receiving-bootstrap-stage')
-                    self._record('owner_ready', ready)
+                    record('owner_ready', ready)
                 else:
                     ready = effects['owner_ready']
                 if 'owner_published' not in effects:
                     root_call('bootstrap-quiesce')
                     published = owner_call('receiving-bootstrap-publish', bootstrap_ready_sha256=ready['ready_sha256'])
-                    self._record('owner_published', published)
+                    record('owner_published', published)
             if phase == 'preserve':
                 root_call('bootstrap-quiesce')
-                return self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]['owner_preserved']
+                result = self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]['owner_preserved']
+                remaining()
+                return result
             if phase == 'derive' and current['service']['manager']['ActiveState'] != 'inactive':
                 raise OnboardingError('receiving_guest_bootstrap_quiescence_required')
             if link is not None and current['service']['manager']['ActiveState'] == 'inactive':
@@ -2860,31 +2880,37 @@ class GuestBootstrapController:
                     raise OnboardingError('receiving_admission_owner_context_required')
                 root_call('bootstrap-quiesce')
                 snapshot = self.backend._target_call(frozen['plan'], 'group-publication', candidate=vector,
-                    observation_timeout_seconds=timeout_seconds, group_request=dict(
+                    observation_timeout_seconds=remaining(), group_request=dict(
                         command=link['snapshot_request'], offline=True, authority_closure=authority_closure))
                 derived = admission_group_derivation(link, snapshot,
                     previous=frozen['owner']['group'], stores=frozen['owner']['store_bindings'])
-                self._record('admission_group', derived)
+                record('admission_group', derived)
                 if phase == 'derive':
                     return derived
             if 'unit_selected' not in effects:
                 if owner_request.get('mode') == 'preserve' and current['service']['unit_sha256'] == frozen['root']['service']['unit_sha256']:
                     preservation_authorization(owner_request['preservation'], candidate['expires_at_ms'])
-                self._record('unit_selected', root_call('bootstrap-select'))
+                record('unit_selected', root_call('bootstrap-select'))
             # Reconcile the retained start, rather than reissuing it after a
             # lost ACK. Actual owner load/admission is checked independently.
             if owner_request.get('mode') == 'preserve' and current['service']['manager']['ActiveState'] == 'inactive':
                 preservation_authorization(owner_request['preservation'], candidate['expires_at_ms'])
-            self._record('started', root_call('bootstrap-start'))
-            loaded = self._loaded(frozen, candidate, vector, timeout_seconds)
-            self._record('controlled_loaded', loaded)
+            record('started', root_call('bootstrap-start'))
+            loaded = self._loaded(frozen, candidate, vector, remaining(), deadline_ns=deadline)
+            record('controlled_loaded', loaded)
             return loaded
 
-    def _loaded(self, frozen: dict, candidate: dict, vector: tuple[Path, str], timeout_seconds: float) -> dict:
+    def _loaded(self, frozen: dict, candidate: dict, vector: tuple[Path, str], timeout_seconds: float,
+                *, deadline_ns: int) -> dict:
+        def remaining():
+            value = min(timeout_seconds, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
+            if value <= 0:
+                raise OnboardingError('receiving_owner_deadline_expired')
+            return value
         observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=vector,
-            observation_timeout_seconds=timeout_seconds, require_loaded=True)
+            observation_timeout_seconds=remaining(), require_loaded=True)
         root = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
-            timeout_seconds=timeout_seconds, owner_observation={key: observed[key]
+            timeout_seconds=remaining(), owner_observation={key: observed[key]
                 for key in ('process', 'admission_parent')})
         effects = self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]
         expected_runtime, _ = bootstrap_effects(effects, source=False, mode=frozen['owner'].get('mode', 'issue'))
@@ -2901,6 +2927,7 @@ class GuestBootstrapController:
             initial_observation='controlled_loaded' not in effects))
         if effects.get('controlled_loaded', result) != result:
             raise OnboardingError('receiving_guest_bootstrap_loaded_conflict')
+        remaining()
         return result
 
 

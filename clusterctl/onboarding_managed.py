@@ -54,6 +54,15 @@ class ManagedRuntime:
             self.backend.config.qualification and plan['name'].startswith('qualify-'))
 
     def _selection(self, plan: dict) -> tuple[str | None, str | None]:
+        if getattr(self.backend.config, 'group_admission', None) is not None:
+            from .onboarding_group_coordinator import GroupCoordinator
+            try:
+                _row, _approved, selected = GroupCoordinator(self.backend).selection(plan)
+            except OnboardingError as error:
+                if str(error) != 'onboarding_group_admission_pending':
+                    raise
+                return None, None
+            return selected['application'], selected['visibility']
         if getattr(self.backend.config, 'peer', None) is not None:
             from .onboarding_peer_host import PeerHost
             return PeerHost(self.backend).application(plan) or (None, None)
@@ -128,13 +137,33 @@ class ManagedRuntime:
         values = dict(line.split('=', 1) for line in properties.splitlines() if '=' in line)
         if values.get('ActiveState') != 'active' or not values.get('MainPID', '').isdigit():
             return Observation('absent', safe_to_execute=True)
-        presence = self.backend._target_call(plan, 'admitted-running')
+        options: dict = {}
+        receiving = None
+        if getattr(self.backend.config, 'group_admission', None) is not None:
+            from .onboarding_group_coordinator import GroupCoordinator
+            row, approved, group = GroupCoordinator(self.backend).selection(plan)
+            receiving = row, group
+            options['candidate'] = (Path(approved['candidate']['code']), approved['recipe']['prepared']['code_digest'])
+            options['require_loaded'] = True
+        presence = self.backend._target_call(plan, 'admitted-running', **options)
         if (presence.get('schema') != 'cluster-onboarding-runtime-presence/v1'
                 or presence.get('plan_digest') != digest(plan)
                 or any(presence.get('origin', {}).get(key) != expected[key]
                        for key in ('body_ref', 'embodiment_id', 'incarnation_id'))
                 or presence.get('process', {}).get('pid') == int(values['MainPID'])):
             raise OnboardingError('onboarding_managed_presence_rejected')
+        if receiving is not None:
+            from .onboarding_group_coordinator import loaded_selection
+            row, group = receiving
+            try:
+                observed = loaded_selection(dict(loaded_runtime=presence['runtime_status']['loaded_runtime'],
+                    loaded_application=presence['group_runtime_status']['loaded_application']))
+                original = row['runtime_observation']['initial_managed'][plan['name']]['intent']['owner']['origin']
+                selection = row['runtime_observation']['admission_activation_plan']['plan']['receivers'][plan['name']]['selection']
+                if observed != selection or presence.get('group') != group or presence.get('origin') != original:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError, OnboardingError):
+                raise OnboardingError('onboarding_managed_presence_rejected') from None
         if not registered:
             return Observation('absent', safe_to_execute=True)
         return Observation('complete', dict(verified=True, identity_verified=True))
@@ -210,6 +239,12 @@ class ManagedRuntime:
         return configuration
 
     def execute(self, plan: dict) -> None:
+        if getattr(self.backend.config, 'group_admission', None) is not None:
+            # The coordinator owns controlled first load and steady handoff.
+            # Never replace that unit through the legacy generic installer.
+            if self.observe(plan).state != 'complete':
+                raise OnboardingError('onboarding_group_runtime_recovery_required')
+            return
         if not self._ready(plan):
             raise OnboardingError('onboarding_visibility_selection_required')
         self.prepare_admission(plan)

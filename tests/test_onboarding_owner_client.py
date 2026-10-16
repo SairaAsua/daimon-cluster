@@ -244,8 +244,14 @@ def test_group_acceptance_preserves_approved_tooling_without_legacy_peer(tmp_pat
         accepted['command_sha256'] = '0'*64
     elif fault == 'pending':
         row['state'] = 'prepared'
+    def completed_selection(value):
+        # This case isolates later tooling acceptance. The coordinator's full
+        # retained completion is qualified by its orchestration tests.
+        if row['state'] != 'completed':
+            raise OnboardingError('onboarding_group_admission_pending')
+        return row, approved, selected
     monkeypatch.setattr(onboarding_group_coordinator, 'GroupCoordinator',
-        lambda host: SimpleNamespace(_binding=lambda p: (None, row, dict(receivers=dict(eko=approved)))))
+        lambda host: SimpleNamespace(selection=completed_selection))
     observed = []
     def verify(source, **kwargs):
         assert source == approved_source and kwargs['uid'] == 0

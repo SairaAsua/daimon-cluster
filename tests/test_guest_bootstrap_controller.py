@@ -741,3 +741,46 @@ def test_wrong_admission_tribe_refuses_before_guest_quiescence(fixture):
     with pytest.raises(OnboardingError, match='admission_tribe_changed'):
         GuestBootstrapController(controller.journal, row['operation_id'], backend, 'eko').preserve()
     assert not calls and backend.active and backend.stops == 0
+
+
+@pytest.mark.parametrize('boundary',['preflight','bootstrap-validate','admitted-running'])
+def test_guest_lifecycle_keeps_one_deadline_across_preflight_and_both_routes(fixture,monkeypatch,boundary):
+    from types import SimpleNamespace
+    controller,backend,calls,_path = fixture
+    clock = [time.monotonic_ns()]
+    deadline = clock[0]+1_000_000_000
+    local_time = SimpleNamespace(monotonic_ns=lambda:clock[0],time_ns=time.time_ns)
+    monkeypatch.setattr(updates,'time',local_time)
+    monkeypatch.setattr(updates.onboarding_sdk,'time',local_time)
+    preflight = updates.preflight
+    root,owner = backend._guest_service_call,backend._target_call
+    def checked(*args,**options):
+        result = preflight(*args,**options)
+        if boundary == 'preflight':
+            clock[0] = deadline
+        return result
+    def root_call(plan,action,**options):
+        assert 0 < options['timeout_seconds'] <= 1
+        result = root(plan,action,**options)
+        if action == boundary:
+            clock[0] = deadline
+        return result
+    def owner_call(plan,action,**options):
+        result = owner(plan,action,**options)
+        if action == boundary:
+            clock[0] = deadline
+        return result
+    monkeypatch.setattr(updates,'preflight',checked)
+    monkeypatch.setattr(backend,'_guest_service_call',root_call)
+    monkeypatch.setattr(backend,'_target_call',owner_call)
+    with pytest.raises(OnboardingError,match='owner_deadline_expired'):
+        controller.execute(timeout_seconds=30,deadline_ns=deadline)
+    if boundary == 'preflight':
+        assert calls == []
+    elif boundary == 'bootstrap-validate':
+        assert calls == ['bootstrap-validate']
+        assert 'candidate_validated' in controller.journal.get(controller.operation_id)['runtime_observation']['guest_bootstraps']['eko']
+    else:
+        assert calls[-1] == 'admitted-running'
+        assert backend.starts == 1
+        assert 'controlled_loaded' not in controller.journal.get(controller.operation_id)['runtime_observation']['guest_bootstraps']['eko']

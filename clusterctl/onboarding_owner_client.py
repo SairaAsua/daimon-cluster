@@ -931,10 +931,8 @@ class OwnerClient:
         receiving = None
         if getattr(self.host.config, 'group_admission', None) is not None:
             from .onboarding_group_coordinator import GroupCoordinator
-            bound = GroupCoordinator(self.host)._binding(plan)
-            if bound is None or bound[1]['state'] != 'completed':
-                raise OnboardingError('onboarding_group_admission_pending')
-            receiving = bound[1], bound[2]['receivers'][plan['name']]
+            selected_row, approved, _selected_group = GroupCoordinator(self.host).selection(plan)
+            receiving = selected_row, approved
         if receiving is None:
             _, code, _ = self.host._guest_paths(plan)
             runtime_code, _, _ = self.host._runtime_paths(plan, code)

@@ -25,6 +25,7 @@ SOURCE_FIELDS = frozenset({'config', 'config_sha256', 'owner_uid', 'owner_gid', 
     'code_digest', 'code_uid', 'venv', 'imports', 'root', 'socket_path', 'lifecycle_journal'})
 SOURCE_PATHS = frozenset({'config', 'code', 'venv', 'imports', 'root', 'socket_path', 'lifecycle_journal'})
 COMMUNICATION_SCHEMA = 'cluster-admission-communication/v1'
+COMPLETION_SCHEMA = 'cluster-portal-group-completion/v1'
 
 
 def _path(value) -> bool:
@@ -124,6 +125,22 @@ def communication_result(response: dict, intent: dict, *, tribe_ref: str, parent
             visibility=visibility, inbound=inbound, response_sha256=digest(response))
     except (KeyError, TypeError, ValueError, AttributeError):
         raise OnboardingError('receiving_communication_unobserved') from None
+
+
+def loaded_selection(loaded: dict) -> dict:
+    """Use the same six observed pins as the existing receiving adopter."""
+    try:
+        runtime, application = loaded['loaded_runtime'], loaded['loaded_application']
+        startup = runtime['qualified_startup']
+        value = dict(receiving_code=startup['code_digest'], matrix_sdk=startup['matrix_wheel_sha256'],
+            runtime_bundle_sha256=runtime['runtime_bundle_sha256'], application_sha256=application['application_sha256'],
+            publication_sha256=application['publication_sha256'],
+            visibility_installation_sha256=application['visibility']['installation_sha256'])
+        if any(not isinstance(item, str) or re.fullmatch('[0-9a-f]{64}', item) is None for item in value.values()):
+            raise ValueError
+        return value
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise OnboardingError('onboarding_group_load_unobserved') from None
 
 
 def configuration(path: Path) -> dict:
@@ -233,6 +250,12 @@ class GroupCoordinator:
                 raise OnboardingError('onboarding_group_publication_recipe_required')
             publication_recipe(after['admission_publications'], admission, caller['social'],
                 before['senders'], preparations)
+        if 'admission_communication' in after:
+            if (caller['schema'] != SOCIAL_CALLER_SCHEMA or preparations is None
+                    or 'admission_publications' not in after
+                    or any(item['recipe']['tooling']['profile'] != 'codex' for item in admission['receivers'].values())):
+                raise OnboardingError('onboarding_group_finisher_scope_required')
+            communication_recipe(after['admission_communication'], row, admission)
         entrant = admission['receivers'][plan['name']]
         selected = self.settings['owners'][plan['name']]
         if (selected['profile'] != 'guest' or selected['plan'] != plan
@@ -246,12 +269,29 @@ class GroupCoordinator:
         selected = self._binding(plan)
         if selected is None:
             return Observation('waiting', reason='group_admission_required')
-        _journal, row, _admission = selected
+        _journal, row, admission = selected
         # Only the completed receiving transaction can release the normal
         # stage's actual managed-presence check. Native preparation is not it.
         if row['state'] != 'completed':
             return Observation('waiting', reason='group_admission_pending')
+        if (row.get('result') != self._completion(row, admission)
+                or (row['runtime_observation'] or {}).get('portal_admission', {}).get('completed') != row['result']):
+            raise OnboardingError('onboarding_group_completion_unobserved')
         return Observation('complete', dict(verified=True, identity_verified=True))
+
+    def selection(self, plan: dict) -> tuple[dict, dict, dict]:
+        """A locator is usable only after this admission's complete closure."""
+        bound = self._binding(plan)
+        if bound is None or bound[1]['state'] != 'completed':
+            raise OnboardingError('onboarding_group_admission_pending')
+        self.observe(plan)
+        _journal, row, admission = bound
+        approved = admission['receivers'][plan['name']]
+        group = row['runtime_observation']['group_publication']['result']['snapshots'][plan['name']]['group']['selected']
+        if (group.get('channel_id') != 'tribe' or group.get('socket') != approved['socket']
+                or group.get('tribe_ref') != admission['tribe_ref']):
+            raise OnboardingError('receiving_native_tooling_group_changed')
+        return row, approved, group
 
     def _owners(self, admission: dict) -> dict:
         from .onboarding_receiving_update import GuestGroupClient, SourceGroupClient
@@ -301,11 +341,353 @@ class GroupCoordinator:
         return journal.advance(row['operation_id'], current['state'], runtime_observation=observations,
             expected_runtime_observation=current['runtime_observation'])
 
-    def advance(self, name: str, *, timeout_seconds: float = 30) -> dict | None:
-        """Prepare the exact native endpoint before any irreversible admission.
+    def _completion(self, row: dict, admission: dict) -> dict:
+        """Revalidate historical closure without restarting or renewing effects."""
+        try:
+            observations = row['runtime_observation'] or {}
+            phases = observations['portal_admission']
+            scope = communication_recipe(row['intended_transition']['admission_communication'], row, admission)
+            names = set(admission['receivers'])
+            old = {item['name'] for item in row['expected_precondition']['senders']}
+            caller = row['intended_transition']['portal_admission']
+            entrant = caller['social']['entrant_owner']
+            intent = dict(cohort_intent_sha256=digest(row['intent']), plan_digest=caller['plan_digest'],
+                owners_sha256=caller['owners_sha256'], communication_scope_sha256=digest(scope))
+            membership, publication = observations['membership_admission'], observations['group_publication']
+            activation = observations['admission_activation_plan']
+            plan = activation['plan']
+            selected = phases['activation_ready']
+            steady = phases['steady_ready']
+            if (phases['execution_intent'] != intent or membership['recipe_sha256'] != digest(caller['social'])
+                    or membership['result_sha256'] != digest(membership['result'])
+                    or publication['result_sha256'] != digest(publication['result'])
+                    or publication['membership_sha256'] != membership['result_sha256']
+                    or publication['recipe_sha256'] != digest(row['intended_transition']['admission_publications'])
+                    or set(publication['result']['snapshots']) != names
+                    or set(observations['admission_lifecycles']) != old
+                    or activation['admission_sha256'] != digest(admission) or activation['plan_sha256'] != digest(plan)
+                    or any(plan[key] != value for key,value in admission['activation'].items())
+                    or set(plan['receivers']) != names or set(observations['sender_selections']) != names
+                    or set(observations['cohort_activation']['records']) != names
+                    or selected['schema'] != 'cluster-receiving-cohort-selection/v1'
+                    or selected['operation_id'] != row['operation_id']
+                    or selected['sender_selections'] != observations['sender_selections']
+                    or selected['readers'] != observations['cohort_activation']['readers']
+                    or selected['evidence_sha256'] != observations['cohort_activation']['evidence_sha256']
+                    or steady != observations['initial_steady'][entrant]['completed']
+                    or steady['schema'] != 'cluster-managed-initial-steady/v1'
+                    or steady['cohort_selection_sha256'] != digest(selected)
+                    or steady['initial_sha256'] != digest(observations['initial_managed'][entrant]['controlled_loaded'])
+                    or 'cohort_reassessment' in observations):
+                raise ValueError
+            proofs: dict[str, dict] = {}
+            inbound: set[tuple[str, str]] = set()
+            for name, approved in admission['receivers'].items():
+                recipe = plan['receivers'][name]
+                if (any(recipe[key] != value for key,value in approved['recipe'].items())
+                        or recipe['selection'] != loaded_selection(phases['loaded-'+name])
+                        or recipe['lifecycle_operation_id'] != (row['operation_id'] if name == entrant
+                            else observations['admission_lifecycles'][name]['lifecycle_operation_id'])
+                        or recipe['tooling']['profile'] == 'codex' and name not in observations['native_tooling']):
+                    raise ValueError
+            for step in ('group', 'direct', 'reply'):
+                saved = phases['communication-'+step]
+                expected = self._communication_intent(row, scope, step, proofs.get('group'))
+                if saved['intent'] != expected or phases['communication-intent-'+step] != expected:
+                    raise ValueError
+                proof = communication_result(saved['response'], expected, tribe_ref=admission['tribe_ref'],
+                    parent=proofs.get('group') if step == 'reply' else None)
+                if proof != saved['proof']:
+                    raise ValueError
+                proofs[step] = proof
+                inbound.update((item['being_ref'],item['embodiment_id']) for item in proof['inbound'])
+            if not {(item['being_ref'],item['embodiment_id']) for item in admission['receivers'].values()} <= inbound:
+                raise ValueError
+            # Hash the retained producer evidence too: a completed marker alone
+            # must not release the target or select a runtime for a later stage.
+            keys = ('membership_admission', 'group_publication', 'admission_lifecycles', 'initial_managed',
+                'admission_activation_plan', 'native_tooling', 'cohort_activation', 'sender_revocations',
+                'sender_replacements', 'sender_initials', 'sender_selections', 'initial_steady')
+            retained = {key:value for key,value in phases.items() if key != 'completed'}
+            return dict(schema=COMPLETION_SCHEMA, operation_id=row['operation_id'],
+                plan_digest=caller['plan_digest'], manifest_digest=row['intent']['runtime_call']['manifest_digest'],
+                evidence_sha256=digest(dict(phases=retained, **{key:observations.get(key) for key in keys})),
+                receiving_readiness='qualified-local-projection', communication_acceptance='signed-intake-and-confirmed-echo')
+        except (KeyError, TypeError, ValueError, AttributeError, OnboardingError):
+            raise OnboardingError('onboarding_group_completion_unobserved') from None
 
-        Social publication/lifecycle/communication remain separate retained
-        receiving phases. This preparation cannot mark the operation complete.
+    @staticmethod
+    def _communication_intent(row: dict, scope: dict, step: str, parent: dict | None) -> dict:
+        send_id = str(uuid.uuid5(uuid.NAMESPACE_URL, 'portal-communication:'+row['operation_id']+':'+step))
+        item = scope[step]
+        parameters = dict(channel_id='tribe', send_id=send_id, text=item['text'])
+        if step == 'reply':
+            if parent is None:
+                raise OnboardingError('receiving_communication_unobserved')
+            parameters.update(received_channel_id='tribe', message_id=parent['message_id'])
+        else:
+            parameters['thread_id'] = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                'portal-communication-thread:'+row['operation_id']+':'+step))
+            if step == 'direct':
+                parameters['destination'] = item['destination']
+        return dict(step=step, sender=item['sender'], parameters=parameters)
+
+    def _finish(self, plan, journal, row, admission, cohort, *, deadline_ns: int) -> dict:
+        """Join maintained lifecycle, activation and communication operations.
+
+        Only the closed, explicitly scoped full operation can enter here. Old
+        preparation-only bindings never gain interruption or messaging effects.
+        """
+        from .onboarding_managed import ManagedRuntime
+        from .onboarding_receiving_update import GuestBootstrapController
+        scope = communication_recipe(row['intended_transition']['admission_communication'], row, admission)
+        caller = row['intended_transition']['portal_admission']
+        def current():
+            return journal.get(row['operation_id'])
+        def phases():
+            return (current()['runtime_observation'] or {}).get('portal_admission', {})
+        def remaining():
+            seconds = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+            if seconds <= 0:
+                raise OnboardingError('receiving_host_deadline_expired')
+            return seconds
+        def retain(key, value):
+            remaining()
+            self._retain(journal, row, key, value)
+        def authorized():
+            remaining()
+            with self._job_scope(plan):
+                self._binding(plan)
+        managed = ManagedRuntime(self.backend)
+        if 'admission_activation_plan' not in (current()['runtime_observation'] or {}):
+            authorized()
+            if ('execution_intent' not in phases()
+                    and time.time_ns() // 1_000_000 >= admission['activation']['expires_at_ms']):
+                raise OnboardingError('receiving_preservation_authorization_expired')
+            # Fresh exact endpoint checks precede the first interruption, even
+            # if the earlier preparation was retained by another worker turn.
+            if 'execution_intent' not in phases():
+                for name, receiver in sorted(admission['receivers'].items()):
+                    cohort.owners[name].preflight_native(Path(receiver['recipe']['tooling']['native_endpoint']))
+                    remaining()
+            retain('execution_intent', dict(cohort_intent_sha256=digest(row['intent']),
+                plan_digest=caller['plan_digest'], owners_sha256=caller['owners_sha256'],
+                communication_scope_sha256=digest(scope)))
+            cohort.revoke_senders()
+            for name in sorted(row['intended_transition']['admission_preparations']):
+                authorized()
+                recipe, _child = cohort._bound_admission_lifecycle(current(), name)
+                if 'loaded-'+name in phases():
+                    continue
+                if 'preserved-'+name not in phases():
+                    if recipe['profile'] == 'source':
+                        owner = cohort.owners[name]
+                        if 'quiesced-'+name not in phases():
+                            retain('quiesced-'+name, dict(result_sha256=digest(owner.lifecycle_action(
+                                recipe['lifecycle_operation_id'], 'quiesce'))))
+                        result = owner.lifecycle_action(recipe['lifecycle_operation_id'], 'preserve')
+                    else:
+                        controller = GuestBootstrapController(journal, recipe['lifecycle_operation_id'], self.backend, name)
+                        if 'quiesced-'+name not in phases():
+                            retain('quiesced-'+name, dict(result_sha256=digest(controller.quiesce(timeout_seconds=remaining(), deadline_ns=deadline_ns))))
+                        result = controller.preserve(timeout_seconds=remaining(), deadline_ns=deadline_ns)
+                    retain('preserved-'+name, dict(result_sha256=digest(result)))
+            authorized()
+            cohort.admit_membership(deadline_ns=deadline_ns)
+            cohort.publish_admission_group(deadline_ns=deadline_ns)
+            for name in sorted(row['intended_transition']['admission_preparations']):
+                authorized()
+                recipe, _child = cohort._bound_admission_lifecycle(current(), name)
+                if 'loaded-'+name in phases():
+                    continue
+                if recipe['profile'] == 'source':
+                    owner = cohort.owners[name]
+                    if 'derived-'+name not in phases():
+                        retain('derived-'+name, dict(result_sha256=digest(owner.lifecycle_action(
+                            recipe['lifecycle_operation_id'], 'derive'))))
+                    loaded = owner.lifecycle_action(recipe['lifecycle_operation_id'], 'start')
+                else:
+                    controller = GuestBootstrapController(journal, recipe['lifecycle_operation_id'], self.backend, name)
+                    closure = {ref:value for ref,value in caller['social']['authority_closure'].items()
+                        if ref != admission['receivers'][name]['being_ref']}
+                    if 'derived-'+name not in phases():
+                        retain('derived-'+name, dict(result_sha256=digest(controller.retain_admission_group(
+                            authority_closure=closure, timeout_seconds=remaining(), deadline_ns=deadline_ns))))
+                    loaded = controller.execute(authority_closure=closure, timeout_seconds=remaining(), deadline_ns=deadline_ns)
+                retain('loaded-'+name, loaded)
+            authorized()
+            entrant = plan['name']
+            if 'loaded-'+entrant not in phases():
+                loaded = managed.execute_initial(plan, cohort, timeout_seconds=remaining())
+                # execute_initial has reconciled physical registry adoption too;
+                # a native controlled_loaded marker alone cannot skip that work.
+                retain('loaded-'+entrant, loaded)
+            owner = cohort.owners[entrant]
+            tooling = admission['receivers'][entrant]['recipe']['tooling']
+            publication = current()['runtime_observation']['group_publication']['result']['snapshots'][entrant]['group']
+            loaded = phases()['loaded-'+entrant]
+            if 'attachment_ready' not in phases():
+                request = dict(schema='cluster-group-chat-attachment/v1',
+                    operation_id=str(uuid.uuid5(uuid.NAMESPACE_URL, 'portal-chat-attachment:'+row['operation_id'])),
+                    runtime_root=str(owner.root), server=current()['runtime_observation']['initial_managed'][entrant]['intent']['owner']['origin'],
+                    runtime_bundle_sha256=loaded_selection(loaded)['runtime_bundle_sha256'], group=publication)
+                authorized()
+                result = owner.prepare_attachment(request, attachment=Path(tooling['attachment']), codex_home=Path(tooling['codex_home']))
+                retain('attachment_ready', result)
+            cohort.retain_admission_activation(self._activation_plan(current(), admission, cohort, deadline_ns=deadline_ns))
+        authorized()
+        if 'host_runtime' in row['intended_transition'] and 'host_selection' not in (current()['runtime_observation'] or {}):
+            cohort.apply_host_selection(Path(row['expected_precondition']['host_config']))
+        if 'activation_ready' not in phases():
+            retain('activation_ready', cohort.activate())
+        if 'steady_ready' not in phases():
+            retain('steady_ready', managed.complete_initial(plan, cohort, timeout_seconds=remaining()))
+        authoring_until = 0
+        def before_authoring():
+            nonlocal authoring_until
+            authorized()
+            # Completed activation is an observation-only native path. Retained
+            # ACKs cannot authorize new speech from a restarted receiver set.
+            if time.monotonic_ns() >= authoring_until:
+                begun = time.monotonic_ns()
+                selected = cohort.activate()
+                if selected != phases()['activation_ready']:
+                    raise OnboardingError('receiving_cohort_selection_changed')
+                reader_until = min(item['expires_at_ms'] for item in selected['readers'])
+                authoring_until = min(deadline_ns,
+                    begun + admission['activation']['observation_window_ms'] * 1_000_000,
+                    time.monotonic_ns() + (reader_until-time.time_ns()//1_000_000)*1_000_000)
+            if time.monotonic_ns() >= authoring_until:
+                raise OnboardingError('receiving_cohort_observation_expired')
+        if not self._communicate(plan, journal, row, admission, cohort.owners, scope,
+                deadline_ns=deadline_ns, before_authoring=before_authoring):
+            return dict(operation_id=row['operation_id'], receiving_readiness='qualified-local-projection',
+                communication_acceptance='unobserved')
+        authorized()
+        row = current()
+        complete = self._completion(row, admission)
+        observations = copy.deepcopy(row['runtime_observation'])
+        observations['portal_admission']['completed'] = complete
+        journal.advance(row['operation_id'], 'completed', result=complete, runtime_observation=observations,
+            expected_runtime_observation=row['runtime_observation'])
+        remaining()
+        return complete
+
+    def _activation_plan(self, row: dict, admission: dict, cohort, *, deadline_ns: int) -> dict:
+        """Derive late pins from actual loads and correlate owner publications."""
+        from .onboarding_receiving_update import admission_lifecycle_projection
+        observations = row['runtime_observation']
+        snapshots = observations['group_publication']['result']['snapshots']
+        plans, rosters = {}, set()
+        old = {item['name'] for item in row['expected_precondition']['senders']}
+        for name, approved in sorted(admission['receivers'].items()):
+            loaded = observations['portal_admission']['loaded-'+name]
+            selection = loaded_selection(loaded)
+            group = snapshots[name]['group']
+            if (selection['receiving_code'] != approved['recipe']['prepared']['code_digest']
+                    or selection['matrix_sdk'] != approved['recipe']['prepared']['matrix_wheel_sha256']
+                    or any(selection[key] != group[field] for key,field in (
+                        ('application_sha256','application_sha256'), ('publication_sha256','publication_sha256'),
+                        ('visibility_installation_sha256','installation_sha256')))):
+                raise OnboardingError('onboarding_group_load_unobserved')
+            lifecycle_id = row['operation_id']
+            if name in old:
+                recipe, child = cohort._bound_admission_lifecycle(row, name)
+                lifecycle_id = recipe['lifecycle_operation_id']
+                proof = child['admission'] if recipe['profile'] == 'source' else admission_lifecycle_projection(child, profile='guest', name=name)
+                if not isinstance(proof, dict):
+                    raise OnboardingError('receiving_admission_lifecycle_unobserved')
+                derived = proof['derived']
+                if not isinstance(derived, dict) or derived['group'] != {key:group[key] for key in (
+                        'application_sha256','publication_sha256','installation_sha256')}:
+                    raise OnboardingError('onboarding_group_publication_changed')
+                for action, key in (('application','application'), ('visibility-publish','visibility'), ('selection','selection')):
+                    request = observations['group_publication']['requests'][name][key]
+                    if derived['publications'][action] != dict(command_sha256=digest(request['command']), result_sha256=digest(request['result'])):
+                        raise OnboardingError('onboarding_group_publication_changed')
+            if time.monotonic_ns() >= deadline_ns:
+                raise OnboardingError('receiving_host_deadline_expired')
+            observed = cohort.owners[name].status()
+            if observed['process'] != loaded['process'] or observed['runtime_status']['loaded_runtime'] != loaded['loaded_runtime']:
+                raise OnboardingError('onboarding_group_load_unobserved')
+            roster = observed['runtime_status']['receiving']['rosters']['tribe']
+            if (roster.get('schema') != 'dm.runtime.tribe-roster/v1'
+                    or re.fullmatch('[0-9a-f]{64}', roster.get('roster_sha256','')) is None):
+                raise OnboardingError('receiving_cohort_roster_unready')
+            rosters.add(roster['roster_sha256'])
+            plans[name] = {**approved['recipe'], 'selection':selection, 'lifecycle_operation_id':lifecycle_id}
+        if len(rosters) != 1 or time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('receiving_cohort_roster_unready')
+        return {**admission['activation'], 'roster_sha256':rosters.pop(), 'receivers':plans}
+
+    def _communicate(self, plan: dict, journal, row: dict, admission: dict, owners: dict, scope: dict,
+                     *, deadline_ns: int, before_authoring) -> bool:
+        """One finite check per phase on worker cadence; exact IDs never renew."""
+        proofs = {}
+        for step in ('group', 'direct', 'reply'):
+            phases = (journal.get(row['operation_id'])['runtime_observation'] or {}).get('portal_admission', {})
+            if 'communication-'+step in phases:
+                proofs[step] = phases['communication-'+step]['proof']
+                continue
+            intent = self._communication_intent(row, scope, step, proofs.get('group'))
+            attempted = 'communication-intent-'+step in phases
+            self._retain(journal, row, 'communication-intent-'+step, intent)
+            if time.monotonic_ns() >= deadline_ns:
+                raise OnboardingError('receiving_host_deadline_expired')
+            owner = owners[intent['sender']['owner']]
+            tooling = admission['receivers'][intent['sender']['owner']]['recipe']['tooling']
+            binding = Path(tooling['attachment'])/tooling.get('binding_filename','binding.json')
+            response = None
+            dispatched = False
+            if attempted:
+                try:
+                    response = owner.messaging('messaging_delivery', dict(channel_id='tribe', send_id=intent['parameters']['send_id']), binding=binding)
+                except (OnboardingError, OSError):
+                    pass
+            if response is None:
+                if time.time_ns() // 1_000_000 >= scope['expires_at_ms']:
+                    return False
+                before_authoring()
+                response = owner.messaging('messaging_reply' if step == 'reply' else 'messaging_send',
+                    intent['parameters'], binding=binding, authoring_expires_at_ms=scope['expires_at_ms'])
+                dispatched = True
+            required = {(item['being_ref'],item['embodiment_id']) for item in admission['receivers'].values()
+                if (item['being_ref'],item['embodiment_id']) != (intent['sender']['being_ref'],intent['sender']['embodiment_id'])}
+            if step == 'direct':
+                target = intent['parameters']['destination']
+                required = {item for item in required if item[0] == target['being_ref']
+                    and (target['kind'] != 'body' or item[1] == target['embodiment_id'])}
+            def qualify(value):
+                try:
+                    proof = communication_result(value, intent, tribe_ref=admission['tribe_ref'],
+                        parent=proofs.get('group') if step == 'reply' else None)
+                except OnboardingError:
+                    return None
+                inbound = {(item['being_ref'],item['embodiment_id']) for item in proof['inbound']}
+                return proof if required <= inbound else None
+            proof = qualify(response)
+            if (proof is None and attempted and not dispatched
+                    and time.time_ns() // 1_000_000 < scope['expires_at_ms']):
+                # Inspection cannot resume a busy/interrupted native fanout.
+                # Replay the SAME durable request, never another message ID.
+                before_authoring()
+                response = owner.messaging('messaging_reply' if step == 'reply' else 'messaging_send',
+                    intent['parameters'], binding=binding, authoring_expires_at_ms=scope['expires_at_ms'])
+                proof = qualify(response)
+            if proof is None:
+                return False
+            if time.monotonic_ns() >= deadline_ns:
+                raise OnboardingError('receiving_host_deadline_expired')
+            self._retain(journal, row, 'communication-'+step, dict(intent=intent, response=response, proof=proof))
+            proofs[step] = proof
+        return True
+
+    def advance(self, name: str, *, timeout_seconds: float = 30) -> dict | None:
+        """Resume the approved admission, preserving preparation-only bindings.
+
+        A complete v2 operation with explicit technical communication scope can
+        join the retained lifecycle/publication/activation/receiving phases.
+        Other bindings prepare their existing prerequisites without stopping.
         """
         if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 60:
             raise OnboardingError('receiving_host_deadline_required')
@@ -333,10 +715,11 @@ class GroupCoordinator:
                     return None
                 retained = (row['runtime_observation'] or {}).get('portal_admission', {})
                 native_prepared = isinstance(retained.get('native_ready'), dict)
+                finishing = 'execution_intent' in retained
                 expired = time.time_ns() // 1_000_000 >= admission['activation']['expires_at_ms']
                 if expired:
                     request = retained.get('controller_intent')
-                    if (not native_prepared or 'physical_ready' not in retained
+                    if not finishing and (not native_prepared or 'physical_ready' not in retained
                             or not isinstance(request, dict)
                             or not (request.get('mode') == 'preserve'
                                     or 'controller_stage' in retained)):
@@ -349,7 +732,7 @@ class GroupCoordinator:
                         (admission['activation']['expires_at_ms'] - time.time_ns() // 1_000_000) * 1_000_000)
                 candidate = (Path(self.settings['owners'][name]['candidate']['code']),
                     self.settings['owners'][name]['candidate']['digest'])
-                if not native_prepared and not self.backend.prepare_group_target(plan, candidate, deadline_ns=deadline):
+                if not finishing and not native_prepared and not self.backend.prepare_group_target(plan, candidate, deadline_ns=deadline):
                     return None
                 owners = self._owners(admission)
                 from .onboarding_receiving_update import CohortController
@@ -363,6 +746,8 @@ class GroupCoordinator:
             with ExitStack() as scopes:
                 for owner in owners.values():
                     scopes.enter_context(cohort._owner_deadline(owner, deadline))
+                if finishing:
+                    return self._finish(plan, journal, row, admission, cohort, deadline_ns=deadline)
                 if not native_prepared:
                     readiness = {}
                     for current in sorted(owners):
@@ -403,6 +788,8 @@ class GroupCoordinator:
                 remaining()
                 lifecycles = self._prepare_lifecycles(plan, journal, row, admission, cohort, deadline_ns=deadline)
                 remaining()
+                if 'admission_communication' in row['intended_transition']:
+                    return self._finish(plan, journal, row, admission, cohort, deadline_ns=deadline)
                 return dict(operation_id=row['operation_id'], native_prepared=True,
                     physical_prepared=True, controller_prepared=True, receiving_readiness='unobserved',
                     **({'lifecycle_prepared': True} if lifecycles else {}))

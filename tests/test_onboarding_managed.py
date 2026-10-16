@@ -643,3 +643,53 @@ def test_expired_post_steady_budget_retains_repair_without_more_owner_calls(tmp_
     assert manager.starts == manager.reloads == 1 and manager.stops == 0
     expired.clear()
     assert all(value['state'] == 'disabled' for value in cohort.reconcile_reassessment().values())
+
+
+@pytest.mark.parametrize('fault',[None,'selection','group','principal'])
+def test_completed_group_admission_observes_approved_native_pins_without_legacy_fallback(monkeypatch,fault):
+    from clusterctl.onboarding import Observation
+    from clusterctl import onboarding_group_coordinator as group
+    value = {'name':'newcomer'}
+    origin = dict(body_ref='codex:fixture:newcomer',embodiment_id='body:newcomer',incarnation_id='incarnation:newcomer',principal_id='principal:newcomer')
+    selected = dict(application='/home/agent/group/application',visibility='/home/agent/group/visibility',tribe_ref='tribe:fixture')
+    actual = dict(loaded_runtime=dict(runtime_bundle_sha256='a'*64,
+        qualified_startup=dict(code_digest='b'*64,matrix_wheel_sha256='c'*64)),
+        loaded_application=dict(application_sha256='d'*64,publication_sha256='e'*64,visibility=dict(installation_sha256='f'*64)))
+    selection = group.loaded_selection(actual)
+    row = dict(runtime_observation=dict(admission_activation_plan=dict(plan=dict(receivers=dict(newcomer=dict(selection=selection)))),
+        initial_managed=dict(newcomer=dict(intent=dict(owner=dict(origin=copy.deepcopy(origin)))))))
+    approved = dict(candidate=dict(code='/approved/code'),recipe=dict(prepared=dict(code_digest='b'*64)))
+    monkeypatch.setattr(group,'GroupCoordinator',lambda backend:SimpleNamespace(selection=lambda plan:(row,approved,selected)))
+    presence = dict(schema='cluster-onboarding-runtime-presence/v1',plan_digest=digest(value),origin=copy.deepcopy(origin),
+        process=dict(pid=2),group=copy.deepcopy(selected),runtime_status=dict(loaded_runtime=actual['loaded_runtime']),
+        group_runtime_status=dict(loaded_application=actual['loaded_application']))
+    if fault == 'selection':
+        actual['loaded_application']['visibility']['installation_sha256'] = '0'*64
+    elif fault == 'group':
+        presence['group']['application'] = '/home/agent/wrong/application'
+    elif fault == 'principal':
+        presence['origin']['principal_id'] = 'principal:another'
+    calls = []
+    def target(plan,action,**options):
+        assert options == dict(candidate=(Path('/approved/code'),'b'*64),require_loaded=True)
+        calls.append(action)
+        return presence
+    managed = object.__new__(ManagedRuntime)
+    managed.settings = dict(messaging_application='/wrong/default/application',visibility_installation='/wrong/default/visibility')
+    managed.backend = SimpleNamespace(config=SimpleNamespace(group_admission=Path('/protected/map'),peer=None,qualification=False),
+        _target_call=target,instance=lambda plan:'dm-newcomer',
+        _dispatch=lambda *args:'ActiveState=active\nMainPID=1\n')
+    managed._expected = lambda plan:dict(being_ref='being:newcomer',**origin)
+    managed._registered = lambda expected:True
+    managed._profile = lambda plan:{'registered':True}
+    managed._check_proxy = lambda plan:True
+    assert managed._selection(value) == (selected['application'],selected['visibility'])
+    if fault:
+        with pytest.raises(OnboardingError,match='managed_presence_rejected'):
+            managed.observe(value)
+    else:
+        assert managed.observe(value) == Observation('complete',dict(verified=True,identity_verified=True))
+        # A completed qualified unit is observed, never overwritten with the
+        # generic install path, even if its approved code is not the host default.
+        managed.execute(value)
+    assert calls == ['admitted-running']*(1 if fault else 2)

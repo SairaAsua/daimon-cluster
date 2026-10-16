@@ -633,8 +633,8 @@ This record alone cannot enable senders. Native loaded adoption must still prove
 the same Tribe, and an added receiver cannot borrow another operation's replacement
 history as its own first managed start. The first-load producer and cohort
 consumer below require the actual protected initial records, current native
-adoption and all-required revocations. Admission publication/lifecycle derivation
-and complete portal orchestration remain unfinished, not deployed acceptance.
+adoption and all-required revocations. The closed full caller below now joins
+those source components; installed admission acceptance remains unqualified.
 
 `GuestBootstrapController.quiesce()` exposes the existing guest stop/exit phase
 without running owner publication, unit selection or replacement startup. It
@@ -643,9 +643,9 @@ as `execute()`. An exact retry asks the root owner to recheck current quiescence
 a retained exit alone is insufficient. A replacement already started by this
 operation cannot be stopped through this method. `execute()` can continue the
 same operation afterwards. This is the publication seam, not completed group
-admission: the approved before/after group binding and the admission-aware
-revocation barrier still need their caller integration. Live use retains the
-existing scoped interruption-consent requirement.
+admission by itself. The full opt-in caller below joins the approved before/after
+group binding and admission-aware barrier. Live use retains scoped interruption
+consent and its still-pending installed admission qualification.
 
 ### Controller preparation before initial group admission
 
@@ -695,7 +695,8 @@ The qualified host route retains the guest owner, prepared SDK and finite budget
 
 This snapshot has no process predecessor and does not authorize a start or enable
 delivery. The first-load producer below retains/revalidates that exact context;
-the cohort consumer remains unfinished and after-only activation still refuses.
+the cohort consumes that genuine record. After-only activation still refuses
+without the original before-set barrier and complete all-required proof.
 
 ### First guest service publication and start
 
@@ -804,9 +805,8 @@ and reobserves the same execution. A dead/replaced invocation is refused.
 Later cohorts that change the selected application use the maintained
 `GuestBootstrapController` replacement path with the actual current service and
 process as predecessor. They must not borrow the earlier initial-load proof;
-no separate initial-proof reuse framework is required. The unfinished portal
-orchestration must derive that current lifecycle and qualify installed new-member
-acceptance. Do not leave completed onboarding dependent on a startup-only guard.
+no separate initial-proof reuse framework is required. The portal orchestration
+derives that current lifecycle; installed new-member acceptance remains pending. Do not leave completed onboarding dependent on a startup-only guard.
 
 ### Public authority histories for future group admission
 
@@ -917,8 +917,8 @@ ID and parent intent hash into each other's immutable intent would be circular.
 A lost plan reply recovers the original target before fresh expiry/process reads.
 Changed requests, including another manifest for the same social operation,
 refuse instead of planning another child. This is historical preparation, not
-permission to stop, social membership or receiving acceptance. The complete
-social caller and installed cohort journey remain unfinished.
+permission to stop, social membership or receiving acceptance. The full opt-in
+caller joins these components; the installed cohort journey remains pending.
 
 This retained context permits closed offline maintenance if application
 publication has advanced while the serving selector still names its predecessor.
@@ -1125,19 +1125,21 @@ survives same-guest reexec.
 
 Matrix and acceptance stages remain pending until this exact receiving operation
 is complete, followed by the existing actual managed-presence/acceptance checks.
-The remaining automatic-caller integration joins the supported offline social
-and publication phases, lifecycle reload/initial load, cohort/steady selection and
-scoped communication acceptance. The installed old-members/newcomer journey is
-also pending. Native/physical/controller preparation does not complete portal
-admission, enable a Matrix sender or qualify a deployment. This future-admission
-work is independent of the already prepared current-member rollout.
+A full v2 operation explicitly supplies `admission_communication` alongside its
+approved lifecycle and publication recipes. Only that closed opt-in can join the
+supported offline social/publication, lifecycle reload/initial load, cohort/steady
+selection and scoped communication acceptance. Old operations without it retain
+preparation-only behavior. Installed old-members/newcomer qualification is still
+pending. Preparation alone does not complete portal admission or qualify a
+deployment. This work is independent of the prepared current-member rollout.
 
 ### Protected social and publication phases
 
 The protected v2 caller now supports `CohortController.admit_membership()` and
 `publish_admission_group()` as separate, resumable offline phases. The automatic
-Worker path remains preparation-only until the complete lifecycle finisher is
-joined. Do not enable a partial path that stops existing members.
+Worker bindings without the complete technical communication scope remain
+preparation-only. The full opt-in uses the lifecycle finisher described below;
+never enable a partial stopping path or infer live interruption consent.
 
 `admission_publications` freezes one closed recipe for every approved receiver
 and one visibility signer per being. Static native schema, complete active Root
@@ -1197,9 +1199,9 @@ contexts are refused, never rewritten.
 The coordinator retains this transition before schema preparation. Social,
 schema and publication phases resolve only the matching entrant's derived pin;
 the immutable social recipe and old-member pins remain unchanged. A malformed
-transition refuses before dependent owner effects. This source join does not
-enable the unfinished automatic lifecycle finisher or establish installed
-admission acceptance.
+transition refuses before dependent owner effects. The full finisher consumes
+this join only through its protected opt-in; installed admission acceptance is
+not established by the source component.
 
 After actual group publication and load, the entrant can prepare its messaging
 attachment through `OwnerClient.prepare_attachment` and the existing qualified
@@ -1217,8 +1219,8 @@ its code/SDK, group and complete native origin from the completed admission,
 including when no legacy `peer` is configured. It requires that operation's exact
 tooling receipt and preserves the qualified connection/configuration instead of
 reinstalling the generic command. Changed configuration is refused before
-personal guidance is written. The automatic caller still needs to join these
-supported actions with its lifecycle finisher and installed acceptance.
+personal guidance is written. The full caller joins these supported actions;
+installed receiving acceptance remains a separate pending qualification.
 
 First-load registry coordinates contain body, embodiment and incarnation. Compare
 those fields against the authenticated native origin without discarding its
@@ -1238,11 +1240,60 @@ The protected technical-speech contract selects the exact group author, entrant
 direct/reply author, direct destination, bounded text and signed group parent.
 Delivery evidence distinguishes author retention from each actual receiving
 body's signed receipt, full confirmed human echo and exact reply parent. Expired
-transport does not erase later authenticated intake proof. These contracts and
-the owner route are components of the unfinished finisher; their presence does
-not enable interruption, automatic completion or the worker's full admission.
+transport does not erase later authenticated intake proof. These components
+release no old preparation-only binding and grant no live interruption consent.
 The additive SDK evidence projection also needs its qualified future SDK pin;
 it does not replace the independent prepared2144 production candidate.
+
+### Full protected portal finisher
+
+`admission_communication` uses `cluster-admission-communication/v1` with exact
+`group`, `direct`, `reply` entries and one fixed `expires_at_ms` no later than
+activation expiry. Each entry selects its approved owner/being/body and bounded
+text; direct selects the approved founder destination and reply selects the
+group parent. This increment requires the already supported Codex tooling profile
+for all required owners. Other explicit profiles retain preparation support;
+they are not silently downgraded to obtain full admission acceptance.
+
+After fresh exact native endpoint checks, the same operation freezes its
+execution intent, revokes the before-set and uses each original Source/guest
+lifecycle to quiesce/preserve. Native social/group publication precedes derivation
+and load; the newcomer uses the supported first-load producer, including physical
+registry reconciliation. Parent markers resume a lost response without repeating
+quiescence/publication over a loaded writer. Child publication command/result
+hashes must match the parent's exact requests before late six-pin selection is
+retained. Required loaded owners must agree on the signed roster. Host CAS, if
+configured, follows all retained loads; retries then skip old child preparation.
+
+The existing cohort controller owns tooling adoption, replacement/initial fences,
+all-reader selection and repair. The existing steady helper removes the initial
+startup guard. A later invocation with missing technical speech reobserves the
+completed cohort before authoring; its one observation round can be reused only
+within the original invocation deadline, approved observation window and fixed
+reader horizon. The SDK owner route independently enforces every send deadline.
+
+Technical checks use deterministic group/direct/reply IDs and exact native request
+journals. A busy/incomplete native fanout resumes with that same request while its
+original scope permits; later expiry allows delivery inspection only. Require
+actual non-author signed intake for each required body and complete confirmed
+Tribu echo. Do not confuse author retention, a transport ACK or a partial page
+with that acceptance. Final late proof may close historical completion without
+new speech or fresh positive selection.
+
+Completion evidence and `completed` state are committed in one observation CAS.
+The historical closure binds social/publication, original lifecycle links, loads,
+late plan, tooling, native selections, steady handoff and exact communication
+proofs. Reading a completed operation validates that closure without native RPC
+or renewing authority. Managed presence and later owner acceptance resolve this
+same completed selection; actual loaded six pins, full origin and group must
+match. Never fall back to legacy peer/global settings or overwrite the qualified
+unit through the generic managed installer. A failed current runtime needs its
+own supported recovery, not another onboarding install.
+
+The Source/guest worker recovery and deadline fixtures are source qualification
+with explicit native/manager seams. The exact future SDK pin, installed cohort
+journey and receiving acceptance are still pending. Existing production2144 and
+its scoped interruption permission remain independent.
 
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry
@@ -1254,9 +1305,8 @@ Results report `receiving_readiness=unobserved`; these operations neither start
 the group listener nor enable delivery. The admission coordinator still owns
 the real old-sender barrier, full publication distribution and managed start.
 
-Cluster #227 still owns orchestrated application/visibility/selector publication,
-distinct before/after receiving cohorts, first managed start and integrated
-admission qualification. The prepared2144 update is a separate immutable candidate;
+Cluster #227 owns installed qualification of the complete publication,
+distinct before/after cohort, first managed start and receiving acceptance join. The prepared2144 update is a separate immutable candidate;
 future-admission source does not replace it.
 
 Qualification must use the dependency route that owns the operation. The ordinary
