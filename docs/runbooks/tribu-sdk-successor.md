@@ -1133,6 +1133,39 @@ also pending. Native/physical/controller preparation does not complete portal
 admission, enable a Matrix sender or qualify a deployment. This future-admission
 work is independent of the already prepared current-member rollout.
 
+### Protected social and publication phases
+
+The protected v2 caller now supports `CohortController.admit_membership()` and
+`publish_admission_group()` as separate, resumable offline phases. The automatic
+Worker path remains preparation-only until the complete lifecycle finisher is
+joined. Do not enable a partial path that stops existing members.
+
+`admission_publications` freezes one closed recipe for every approved receiver
+and one visibility signer per being. Static native schema, complete active Root
+roster tuples, destination, qualification and secret-reference requirements are
+validated before interruption. Actual invitation/acceptance events and the new
+member's membership reference come from the retained native social result.
+Applications and disclosures precede own-being visibility signatures, followed
+by owner visibility, selector and authenticated snapshots. An observed stopped
+barrier is required; recorded publication never means receiving readiness.
+
+Reserve every old child's private snapshot step against all six public step
+names. Its application/visibility/selection names must still match the retained
+child. The later owner-local derivation uses its original stronger snapshot with
+private preservation/store checks; a generic public snapshot cannot replace it.
+On partial retries, existing native publication/CAS checks preserve later winners.
+Dependent commands pin their retained application under the actual owner writer;
+selector publication additionally pins the retained/current visibility installation.
+A completed phase is historical evidence and never re-quiesces replacements.
+
+Genuine first group publication also requires the newcomer's native communication
+schema to support receipts V2 and legs V3. This prerequisite is not yet automated
+by the caller. The installed journey must prepare it before stopping old members.
+Use the maintained offline migration with its exact plan/evidence. Its `apply()`
+alone is not safely repeatable after partial migration: bounded continuation of
+the retained source/intermediate/target evidence remains required. Do not hide
+that gap with fixture-only upgrades, another directory or an unverified restore.
+
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry
 rechecks the real SDK publication/CAS even if a result is cached. Preserve a

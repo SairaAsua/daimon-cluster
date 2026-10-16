@@ -131,6 +131,12 @@ class GroupCoordinator:
                         or profile == 'source' and any(not _path(preparation[key]) for key in ('unit', 'home'))
                         or profile == 'guest' and not _path(before.get('host_config'))):
                     raise OnboardingError('onboarding_group_admission_preparations_required')
+        if 'admission_publications' in after:
+            from .onboarding_group_admission import publication_recipe
+            if caller['schema'] != SOCIAL_CALLER_SCHEMA:
+                raise OnboardingError('onboarding_group_publication_recipe_required')
+            publication_recipe(after['admission_publications'], admission, caller['social'],
+                before['senders'], preparations)
         entrant = admission['receivers'][plan['name']]
         selected = self.settings['owners'][plan['name']]
         if (selected['profile'] != 'guest' or selected['plan'] != plan

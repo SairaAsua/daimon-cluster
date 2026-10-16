@@ -280,6 +280,286 @@ def test_native_first_publication_signatures_and_selector_recover_exact_lost_rep
     assert (group / 'application/publication.json').read_bytes() == winner
 
 
+@pytest.mark.parametrize('outcome', ['recover', 'later-winner', 'dispatch-winner', 'visibility-winner'])
+def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(group_source, tmp_path, monkeypatch, outcome):
+    """Actual native publications and signed reducers; physical stop is a seam."""
+    from clusterctl import onboarding_group_admission as social
+    from clusterctl.onboarding_code_successor import plan_update
+    from clusterctl.onboarding_receiving_update import CohortController
+    from clusterctl.operation_journal import OperationJournal
+    from daimon_matrix import operator_messaging
+    from daimon_matrix.messaging_config import read_publication
+
+    _original_source, first, _peer, peer_bundle, _old = group_source
+    source, group, _owner_journal, initial, native = initial_publication(group_source, 'source')
+    baseline = source.group_publication(initial, authority_closure={})
+    target = Target(tmp_path / 'candidate/guest', first.plan,
+        document(tmp_path / 'candidate/custody' / digest(first.plan) / 'genesis.json'))
+    founder_bundle = first.document_bundle()
+    founder, entrant = founder_bundle['manifest']['being_ref'], peer_bundle['manifest']['being_ref']
+    destination = dict(bot_id=1, chat_id=-123, topic_id=None, representation='compact-text/v1')
+    issued = time.time_ns() // 1_000_000
+    def configuration(directory):
+        directory.parent.mkdir(mode=0o700, exist_ok=True)
+        directory.mkdir(mode=0o700, exist_ok=True)
+        token, proof = b'1:SYNTHETIC_NOT_A_TOKEN', os.urandom(32)
+        for name, raw in (('telegram.token', token), ('proof.key', proof)):
+            path = directory / name
+            path.write_bytes(raw)
+            path.chmod(0o600)
+        return dict(destination=destination,
+            secrets=dict(telegram_token_file='telegram.token', telegram_token_sha256=hashlib.sha256(token).hexdigest(),
+                proof_key_file='proof.key'),
+            telegram_qualification=dict(schema='dm.messaging.telegram-qualification/v1', qualified_at_ms=issued,
+                token_sha256=hashlib.sha256(token).hexdigest(), get_me_bot_id=1, probe_chat_id=-123,
+                probe_topic_id=None, probe_message_id=1, probe_text_sha256='b'*64))
+    def baseline_request(step, action, params):
+        return source.group_publication(dict(operation_id=initial['operation_id'], step=step,
+            action=action, params=params), authority_closure={})
+    disclosure = baseline_request('disclosure', 'visibility-disclosure', dict(
+        approved_destination=destination, issued_at_ms=issued))['disclosure']
+    bindings = baseline_request('accept', 'visibility-accept', dict(
+        approved_destination=destination, disclosures=[disclosure]))['bindings']
+    visibility = baseline_request('visibility', 'visibility-publish', dict(disclosure=disclosure,
+        bindings=[item['binding'] for item in bindings], expected_installation_sha256=None,
+        initial_configuration=configuration(group/'visibility')))
+    baseline_request('selection', 'selection', dict(expected_selection_sha256=None))
+    from clusterctl.onboarding_receiving_update import source_bootstrap_group
+    before_group = source_bootstrap_group(source, founder_bundle)
+    original_stores = {role:json.loads(binding.observation) for role, binding in native.service.loaded_stores.items()}
+    old_selection = digest(being_seed._read(group/'selection.json'))
+    application, metadata = read_publication(native, group/'application')
+    client = (metadata/'client.json').read_bytes()
+    key = (metadata/'client.key').read_bytes()
+    peer_key = tmp_path/'peer-route.key'
+    peer_key.write_bytes(os.urandom(32))
+    peer_key.chmod(0o600)
+    route = dict(provider_ref='peer', route_ref='peer', key_ref='peer',
+        endpoint='http://127.0.0.1:48676/dm-messaging/v1/message', secret_file=peer_key.name,
+        secret_sha256=hashlib.sha256(peer_key.read_bytes()).hexdigest())
+    peer_row = dict(being_ref=entrant, embodiment_id=peer_bundle['local_origin']['embodiment_id'],
+        body_ref=peer_bundle['local_origin']['body_ref'], route=route)
+    operation = str(uuid.uuid4())
+    full_closure = {**closure(founder_bundle), **closure(peer_bundle)}
+    locals_ = dict(founder=source, entrant=target)
+    roots = dict(founder=source.root, entrant=target.package/'runtime')
+    bundles = dict(founder=founder_bundle, entrant=peer_bundle)
+    # Explicit preparation prerequisite, not an automatic publication feature:
+    # fresh receiving fixtures have the legacy communication schema. Exercise
+    # the maintained offline migration, never suppress its group-load refusal.
+    from daimon_matrix import operator_communication_migration as migration
+    def prepare_communication():
+        with target._runtime_writer():
+            prepared = social.load_owner_runtime(roots['entrant'], target._reader,
+                authorities=social.public_authorities(peer_bundle, closure(founder_bundle)))
+            preview = migration.plan(prepared.service.communication.ledger.path)
+            migration.apply(prepared.service.communication, tmp_path/'entrant-schema-preparation', preview['plan_sha256'])
+    pins = {name: owner.group_publication(dict(operation_id=operation, step='context', action='context-preview', params={}),
+        authority_closure={ref: value for ref, value in full_closure.items()
+            if ref != bundles[name]['manifest']['being_ref']})['owner_context_sha256'] for name, owner in locals_.items()}
+    original_identity = {name: {file: (root/file).read_bytes() for file in ('runtime.json', 'custody.json')}
+                         for name, root in roots.items()}
+    invite = invitation(source, peer_bundle)['params']['payload']
+    declaration = application['relationship_events'][0]
+    receivers = {name: dict(being_ref=bundles[name]['manifest']['being_ref'],
+        embodiment_id=bundles[name]['local_origin']['embodiment_id'], root=str(root), socket=str(root/'tribe.sock'),
+        candidate=dict(code=str(tmp_path/'qualified-code'), code_uid=0),
+        recipe=dict(profile='source' if name == 'founder' else 'guest',
+            prepared=dict(being_ref=bundles[name]['manifest']['being_ref'],
+                embodiment_id=bundles[name]['local_origin']['embodiment_id'], code_digest='a'*64,
+                matrix_wheel_sha256='b'*64), tooling={'profile':'matrix-only'})) for name, root in roots.items()}
+    sender = dict(name='founder', root=str(source.root), socket=str(source.root/'tribe.sock'),
+        being_ref=founder, server=founder_bundle['local_origin'], process={}, gate={})
+    admission = dict(schema='cluster-receiving-admission/v1', tribe_ref=invite['tribe_ref'],
+        entrant=dict(being_ref=entrant, embodiment_ids=[peer_bundle['local_origin']['embodiment_id']]), receivers=receivers,
+        activation=dict(manifest_path=str(tmp_path/'manifest.json'), manifest_uid=0,
+            expires_at_ms=invite['expires_at_ms'], observation_window_ms=1000))
+    membership = dict(schema='cluster-membership-admission/v1', operation_id=operation,
+        founder_owner='founder', entrant_owner='entrant', authority_closure=full_closure,
+        governance=[declaration], invitation=invite, membership_sequence=0,
+        previous_membership_terminal_ref=None, acceptance_not_after_ms=invite['expires_at_ms'], owner_contexts=pins)
+    steps = dict(application='application', disclosure='disclosure', acceptance='acceptance',
+        visibility='visibility', selection='selection', snapshot='snapshot')
+    preparations = dict(founder=dict(profile='source', unit=str(tmp_path/'source.service'), home=str(tmp_path),
+        steps={key: steps[key] for key in ('application', 'visibility', 'selection', 'snapshot')}))
+    preparations['founder']['steps']['snapshot'] = 'lifecycle-snapshot'
+    specification = copy.deepcopy(initial['params']['specification'])
+    specification['authorities'] = [full_closure[ref]['authority'] for ref in sorted(full_closure)]
+    specification['relationship_mode'].update(runtime_id=peer_bundle['runtime_id'], state_root=str(roots['entrant']),
+        store_filename=peer_bundle['relationships']['store_filename'])
+    specification['tribe']['policy']['membership_ref'] = None
+    specification['listen']['port'] = 48676
+    specification['intake'] = route
+    specification['roster'].append(peer_row)
+    owner_recipes = dict(
+        founder=dict(steps=steps, application=dict(expected_application_sha256=baseline['application_sha256'],
+            specification=None, additions=dict(authorities=[full_closure[entrant]['authority']],
+                relationship_events=[], roster=[peer_row]), admitted_being_refs=[entrant],
+            secret_sources={peer_key.name:str(peer_key)}),
+            disclosure=dict(approved_destination=destination, issued_at_ms=issued),
+            visibility=dict(expected_installation_sha256=visibility['installation_sha256'], initial_configuration=None),
+            selection=dict(expected_selection_sha256=old_selection)),
+        entrant=dict(steps=steps, application=dict(expected_application_sha256=None, specification=specification,
+            additions=None, admitted_being_refs=[], secret_sources={**initial['params']['secret_sources'], peer_key.name:str(peer_key)}),
+            disclosure=dict(approved_destination=destination, issued_at_ms=issued),
+            visibility=dict(expected_installation_sha256=None, initial_configuration=configuration(target.root/'tribe/visibility')),
+            selection=dict(expected_selection_sha256=None)))
+    recipe = dict(schema='cluster-admission-publications/v1', owners=owner_recipes, signers={founder:'founder', entrant:'entrant'})
+    assert social.publication_recipe(recipe, admission, membership, [sender], preparations) == recipe
+    for mutate in (
+        lambda value: value['signers'].update({founder:'entrant'}),
+        lambda value: value['owners']['entrant']['application']['specification']['tribe']['policy'].update(membership_ref='invented'),
+        lambda value: value['owners']['founder']['application']['additions']['relationship_events'].append({'invented':True}),
+        lambda value: value['owners']['founder']['steps'].update(application='another-child-step'),
+        lambda value: value['owners']['founder']['steps'].update(snapshot='lifecycle-snapshot'),
+        lambda value: value['owners']['founder']['steps'].update(disclosure='lifecycle-snapshot'),
+        lambda value: value['owners']['entrant']['disclosure'].update(approved_destination={**destination, 'chat_id':-999}),
+        lambda value: value['owners']['founder']['application']['additions'].update(roster=[]),
+        lambda value: value['owners']['entrant']['application']['specification']['listen'].update(port=0),
+        lambda value: value['owners']['entrant']['application']['specification'].update(roster=[]),
+        lambda value: value['owners']['entrant']['application'].update(secret_sources={}),
+        lambda value: value['owners']['entrant']['visibility']['initial_configuration']['secrets'].update(proof_key_file='../outside'),
+        lambda value: value['owners']['entrant']['visibility']['initial_configuration']['telegram_qualification'].update(probe_chat_id=-999),
+    ):
+        changed = copy.deepcopy(recipe)
+        mutate(changed)
+        with pytest.raises(OnboardingError, match='publication_recipe_required'):
+            social.publication_recipe(changed, admission, membership, [sender], preparations)
+    calls, fault = [], dict(barrier='stopped', visibility=True, winner=None)
+    def renew_application():
+        from daimon_matrix.messaging_config import config_digest
+        with source.writer():
+            current = social.load_owner_runtime(source.root, source._reader,
+                authorities=social.public_authorities(founder_bundle, closure(peer_bundle)))
+            selected = read_publication(current, group/'application')[0]
+            operator_messaging.renew(current, group/'application', expected_application_sha256=config_digest(selected))
+        paths = [group/'application/publication.json', group/'visibility/installation.json', group/'selection.json']
+        return {path:path.read_bytes() for path in paths}
+    class Owner:
+        deadline_ns = None
+        def __init__(self, name):
+            self.name, self.root, self.socket = name, roots[name], roots[name]/'tribe.sock'
+        def group_relationship(self, value, **options):
+            return locals_[self.name].group_relationship(value, **options)
+        def group_publication(self, value, **options):
+            assert self.deadline_ns > time.monotonic_ns()
+            calls.append((self.name, copy.deepcopy(value)))
+            if outcome == 'dispatch-winner' and self.name == 'founder' and value['action'] == 'visibility-publish':
+                fault['winner'] = renew_application()
+            if outcome == 'visibility-winner' and self.name == 'founder' and value['action'] == 'selection':
+                from daimon_matrix.canonical import canonical_bytes
+                from daimon_matrix.messaging_config import config_digest, create_binding, read_document
+                with source.writer():
+                    current = social.load_owner_runtime(source.root, source._reader,
+                        authorities=social.public_authorities(founder_bundle, closure(peer_bundle)))
+                    installation = group/'visibility/installation.json'
+                    successor = copy.deepcopy(read_document(installation)['document'])
+                    successor['generation'] += 1
+                    successor['policy']['generation'] = successor['generation']
+                    installation.write_bytes(canonical_bytes(dict(document=successor, binding=create_binding(current, successor))))
+                    app = read_publication(current, group/'application')[0]
+                    # Authenticate the later owner-signed installation through
+                    # exactly the existing native receiving validator.
+                    operator_messaging._owner_visibility_controller(
+                        authorities=operator_messaging._application_authorities(app),
+                        application_sha256=config_digest(app), installation_path=installation,
+                        authority=operator_messaging._runtime_authority(current), origin=current.service.origin,
+                        runtime_id=current.service.runtime_id, runtime_label=current.service.runtime_label,
+                        signer_public_key=current.service.signer.public_key, clock=current.service.clock,
+                        catalog_mode='validate')
+                fault['winner'] = {path:path.read_bytes() for path in
+                    (installation, group/'application/publication.json', group/'selection.json')}
+            result = locals_[self.name].group_publication(value, **options)
+            if self.name == 'entrant' and value['action'] == 'visibility-publish' and fault['visibility']:
+                fault['visibility'] = False
+                raise OSError('synthetic lost entrant visibility response')
+            return result
+    owners = {name:Owner(name) for name in locals_}
+    journal = OperationJournal(tmp_path/'group-phase')
+    row = plan_update(journal, manifest_digest='f'*64, target='receiving:'+admission['tribe_ref'],
+        expected_precondition=dict(tribe_ref=admission['tribe_ref'], senders=[sender], receiver_selections={name:None for name in owners}),
+        intended_transition=dict(cohort_admission=admission, portal_admission=dict(schema='cluster-portal-group-admission/v2', social=membership),
+            admission_preparations=preparations, admission_publications=recipe), audit_identity={'actor':'synthetic-host'})
+    cohort = CohortController(journal, row['operation_id'], owners)
+    monkeypatch.setattr(cohort, 'require_revocation_barrier', lambda: dict(
+        schema='cluster-receiving-admission-barrier/v1', current_senders={'founder':dict(state=fault['barrier'])}))
+    with pytest.raises(OnboardingError, match='membership_unobserved'):
+        cohort.publish_admission_group(deadline_ns=time.monotonic_ns()+60_000_000_000)
+    assert calls == []
+    joined = cohort.admit_membership(deadline_ns=time.monotonic_ns()+60_000_000_000)
+    fault['barrier'] = 'revoked-original'
+    with pytest.raises(OnboardingError, match='quiescence_required'):
+        cohort.publish_admission_group(deadline_ns=time.monotonic_ns()+60_000_000_000)
+    assert calls == []
+    fault['barrier'] = 'stopped'
+    from daimon_matrix.messaging_config import MessagingConfigError
+    with pytest.raises(MessagingConfigError, match='semantic_migration_required'):
+        cohort.publish_admission_group(deadline_ns=time.monotonic_ns()+60_000_000_000)
+    assert not (target.root/'tribe/application').exists()
+    # This explicit prerequisite is intentionally not claimed automated. The
+    # native migration's partial-recovery gap remains future preparation work.
+    prepare_communication()
+    admit = operator_messaging.admit_group_application
+    def lost_application(*args, **options):
+        admit(*args, **options)
+        raise OSError('synthetic lost additive publication response')
+    monkeypatch.setattr(operator_messaging, 'admit_group_application', lost_application)
+    with pytest.raises(OSError, match='lost additive'):
+        cohort.publish_admission_group(deadline_ns=time.monotonic_ns()+60_000_000_000)
+    monkeypatch.setattr(operator_messaging, 'admit_group_application', admit)
+    with pytest.raises(OSError, match='lost entrant visibility'):
+        cohort.publish_admission_group(deadline_ns=time.monotonic_ns()+60_000_000_000)
+    if outcome == 'later-winner':
+        renew_application()
+        paths = [group/'application/publication.json', group/'visibility/installation.json',
+            group/'selection.json', target.root/'tribe/visibility/installation.json']
+        winner = {path:path.read_bytes() for path in paths}
+        with pytest.raises((ValueError, OnboardingError)):
+            cohort.publish_admission_group(deadline_ns=time.monotonic_ns()+60_000_000_000)
+        assert {path:path.read_bytes() for path in paths} == winner
+        assert not (target.root/'tribe/selection.json').exists()
+        assert 'result' not in journal.get(row['operation_id'])['runtime_observation']['group_publication']
+        return
+    if outcome in {'dispatch-winner', 'visibility-winner'}:
+        rejected = 'publication_application_changed' if outcome == 'dispatch-winner' else 'publication_visibility_changed'
+        with pytest.raises(OnboardingError, match=rejected):
+            cohort.publish_admission_group(deadline_ns=time.monotonic_ns()+60_000_000_000)
+        assert fault['winner'] and {path:path.read_bytes() for path in fault['winner']} == fault['winner']
+        assert 'result' not in journal.get(row['operation_id'])['runtime_observation']['group_publication']
+        return
+    result = cohort.publish_admission_group(deadline_ns=time.monotonic_ns()+60_000_000_000)
+    assert result['receiving_readiness'] == 'unobserved' and set(result['snapshots']) == set(owners)
+    assert result['membership_sha256'] == digest(joined)
+    assert journal.get(row['operation_id'])['state'] == 'planned'
+    frozen = journal.get(row['operation_id'])['runtime_observation']['group_publication']['requests']
+    assert frozen['entrant']['application']['command']['params']['specification']['tribe']['policy']['membership_ref'] == joined['acceptance']['event_id']
+    assert (group/'application/client.json').read_bytes() == client
+    assert (group/'application/client.key').read_bytes() == key
+    # The generic publication snapshot must not occupy the child's original
+    # stronger owner-local request. Native store checks and the existing
+    # derivation consumer still accept that distinct request and its exact retry.
+    from clusterctl.onboarding_receiving_update import admission_group_derivation
+    stores = original_stores
+    child_snapshot = dict(operation_id=operation, step='lifecycle-snapshot', action='snapshot', params=dict(
+        application_step='application', visibility_step='visibility', selection_step='selection',
+        owner_context_sha256=pins['founder'], expected_stores=stores))
+    stronger = source.group_publication(child_snapshot, authority_closure=closure(peer_bundle))
+    assert source.group_publication(child_snapshot, authority_closure=closure(peer_bundle)) == stronger
+    link = dict(cohort_operation_id=row['operation_id'], cohort_intent_sha256=digest(row['intent']),
+        tribe_ref=admission['tribe_ref'], snapshot_request=child_snapshot)
+    derivation = admission_group_derivation(link, stronger, previous=before_group, stores=stores)
+    assert derivation['snapshot'] == stronger
+    assert child_snapshot['step'] != recipe['owners']['founder']['steps']['snapshot']
+    total = len(calls)
+    monkeypatch.setattr(cohort, 'require_revocation_barrier', lambda:pytest.fail('completed publication quiesced replacements'))
+    assert cohort.publish_admission_group(deadline_ns=time.monotonic_ns()+60_000_000_000) == result
+    assert len(calls) == total
+    assert {name: {file:(root/file).read_bytes() for file in ('runtime.json', 'custody.json')}
+            for name, root in roots.items()} == original_identity
+    assert all(owner.deadline_ns is None for owner in owners.values())
+    assert not any((root/'tribe.sock').exists() for root in roots.values())
+
+
 def test_pending_initial_publication_preserves_a_later_native_client_renewal(group_source, monkeypatch):
     from daimon_matrix import operator_messaging
     from daimon_matrix.messaging_config import config_digest, read_publication
@@ -382,6 +662,16 @@ def test_publication_packets_are_closed_and_cannot_use_online_relationship_route
     value = dict(operation_id=str(uuid.uuid4()), step='select', action='selection',
                  params=dict(expected_selection_sha256=None))
     assert publication_command(value) == value
+    guard = dict(application_step='application', application_sha256='a'*64)
+    assert publication_command({**value, 'application_precondition':guard})['application_precondition'] == guard
+    for invalid in ({**guard, 'extra':True}, {**guard, 'application_step':'../other'},
+                    {**guard, 'application_sha256':'unknown'}):
+        with pytest.raises(OnboardingError, match='publication_command_required'):
+            publication_command({**value, 'application_precondition':invalid})
+    visibility = dict(visibility_step='visibility', installation_sha256='b'*64)
+    assert publication_command({**value, 'visibility_precondition':visibility})['visibility_precondition'] == visibility
+    with pytest.raises(OnboardingError, match='publication_command_required'):
+        publication_command({**value, 'visibility_precondition':{**visibility, 'visibility_step':'../outside'}})
     assert request_packet(dict(command=value, offline=True, authority_closure={}))['command'] == value
     preview = {**value, 'action': 'context-preview', 'params': {}}
     assert publication_command(preview) == preview

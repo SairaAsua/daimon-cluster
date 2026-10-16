@@ -286,6 +286,296 @@ def admit_membership(cohort, *, deadline_ns: int) -> dict:
         return result
 
 
+def publication_recipe(value: dict, admission: dict, social: dict, senders: list[dict],
+                       preparations: dict) -> dict:
+    """Close approved publication inputs before any old service is stopped.
+
+    The recipe is protected receiving intent, not a portal-supplied program.
+    Only the actual retained invitation/acceptance are filled in later. Native
+    owner APIs still validate and sign each application/visibility/selection.
+    """
+    from daimon_matrix.messaging_config import application_routes, validate_shape
+    from daimon_matrix.native_egress import _SAFE_LEAF
+    from daimon_matrix.operator_messaging import public_authority_history
+    from daimon_matrix.telegram_mirror import REPRESENTATIONS
+
+    try:
+        receivers = admission['receivers']
+        old = {row['name'] for row in senders}
+        refs = {row['being_ref'] for row in receivers.values()}
+        entrant = admission['entrant']['being_ref']
+        required = {(ref, body['embodiment_id'], body['body_ref'])
+            for ref, item in social['authority_closure'].items()
+            for body in public_authority_history(item['authority'], item['history']).active.manifest.value['embodiments']
+            if body['status'] == 'active'}
+        if (not isinstance(value, dict) or set(value) != {'schema', 'owners', 'signers'}
+                or value['schema'] != 'cluster-admission-publications/v1'
+                or not isinstance(value['owners'], dict) or set(value['owners']) != set(receivers)
+                or not isinstance(value['signers'], dict) or set(value['signers']) != refs
+                or any(name not in receivers or receivers[name]['being_ref'] != ref
+                       for ref, name in value['signers'].items())
+                or not isinstance(preparations, dict) or set(preparations) != old):
+            raise ValueError
+        destination = None
+        for name, row in value['owners'].items():
+            if (not isinstance(row, dict) or set(row) != {'application', 'disclosure', 'visibility', 'selection', 'steps'}
+                    or not isinstance(row['steps'], dict)
+                    or set(row['steps']) != {'application', 'disclosure', 'acceptance', 'visibility', 'selection', 'snapshot'}
+                    or any(not isinstance(step, str) or re.fullmatch('[a-z][a-z0-9-]{0,79}', step) is None
+                           for step in row['steps'].values())
+                    or len(set(row['steps'].values())) != 6
+                    or name in old and (any(row['steps'][key] != preparations[name]['steps'][key]
+                        for key in ('application', 'visibility', 'selection'))
+                        or preparations[name]['steps']['snapshot'] in row['steps'].values())):
+                raise ValueError
+            for action, key in (('application', 'application'), ('visibility-disclosure', 'disclosure'),
+                                ('selection', 'selection')):
+                publication_command(dict(operation_id=social['operation_id'], step=row['steps'][key],
+                    action=action, params=row[key]))
+            app = row['application']
+            first = name not in old
+            if ((app['expected_application_sha256'] is None) != first
+                    or app['admitted_being_refs'] != ([] if first else [entrant])
+                    or any(not isinstance(path, str) or not Path(path).is_absolute() or '..' in Path(path).parts
+                           for path in app['secret_sources'].values())):
+                raise ValueError
+            if first:
+                spec = app['specification']
+                if (spec['tribe']['channel_id'] != 'tribe'
+                        or spec['tribe']['policy']['tribe_ref'] != admission['tribe_ref']
+                        or spec['tribe']['policy']['membership_ref'] is not None
+                        or spec['relationship_events'] != social['governance']
+                        or spec['authorities'] != [social['authority_closure'][ref]['authority'] for ref in sorted(refs)]):
+                    raise ValueError
+                pending = copy.deepcopy(spec)
+                pending['tribe']['policy']['membership_ref'] = 'pending-native-acceptance'
+                validate_shape(pending, specification=True)
+                if ({(row['being_ref'], row['embodiment_id'], row['body_ref']) for row in spec['roster']} != required
+                        or set(app['secret_sources']) != {route['secret_file'] for route in application_routes(spec)}):
+                    raise ValueError
+            elif (re.fullmatch('[0-9a-f]{64}', app['expected_application_sha256']) is None
+                    or app['additions']['relationship_events'] != []
+                    or app['additions']['authorities'] != [social['authority_closure'][entrant]['authority']]):
+                raise ValueError
+            if not first:
+                # Validate added rows through the same native group shape, using
+                # an approved entrant template solely as its public schema context.
+                template = copy.deepcopy(value['owners'][social['entrant_owner']]['application']['specification'])
+                template['tribe']['policy']['membership_ref'] = 'pending-native-acceptance'
+                template['roster'] = app['additions']['roster']
+                validate_shape(template, specification=True)
+                rows = app['additions']['roster']
+                if ({(row['being_ref'], row['embodiment_id'], row['body_ref']) for row in rows}
+                        != {row for row in required if row[0] == entrant}
+                        or set(app['secret_sources']) != {row['route']['secret_file'] for row in rows}):
+                    raise ValueError
+            disclosure, visibility = row['disclosure'], row['visibility']
+            if (not isinstance(visibility, dict) or set(visibility) != {'expected_installation_sha256', 'initial_configuration'}
+                    or type(disclosure['issued_at_ms']) is not int
+                    or not 0 <= disclosure['issued_at_ms'] < social['acceptance_not_after_ms']
+                    or not isinstance(disclosure['approved_destination'], dict)
+                    or set(disclosure['approved_destination']) != {'bot_id', 'chat_id', 'topic_id', 'representation'}):
+                raise ValueError
+            if destination is None:
+                destination = disclosure['approved_destination']
+            if (disclosure['approved_destination'] != destination
+                    or type(destination['bot_id']) is not int or not 0 < destination['bot_id'] < 2**52
+                    or type(destination['chat_id']) is not int or not 0 < abs(destination['chat_id']) < 2**52
+                    or destination['topic_id'] is not None and (
+                        type(destination['topic_id']) is not int or not 0 < destination['topic_id'] < 2**52)
+                    or destination['representation'] not in REPRESENTATIONS):
+                raise ValueError
+            if first:
+                if (visibility['expected_installation_sha256'] is not None
+                        or not isinstance(visibility['initial_configuration'], dict)
+                        or set(visibility['initial_configuration']) != {'destination', 'secrets', 'telegram_qualification'}
+                        or visibility['initial_configuration']['destination'] != destination
+                        or row['selection']['expected_selection_sha256'] is not None):
+                    raise ValueError
+                initial = visibility['initial_configuration']
+                secrets, qualification = initial['secrets'], initial['telegram_qualification']
+                if (not isinstance(secrets, dict) or set(secrets) != {
+                        'telegram_token_file', 'telegram_token_sha256', 'proof_key_file'}
+                        or any(not isinstance(secrets[key], str) or _SAFE_LEAF.fullmatch(secrets[key]) is None
+                               for key in ('telegram_token_file', 'proof_key_file'))
+                        or re.fullmatch('[0-9a-f]{64}', secrets['telegram_token_sha256']) is None
+                        or not isinstance(qualification, dict) or set(qualification) != {
+                            'schema', 'qualified_at_ms', 'token_sha256', 'get_me_bot_id', 'probe_chat_id',
+                            'probe_topic_id', 'probe_message_id', 'probe_text_sha256'}
+                        or qualification['schema'] != 'dm.messaging.telegram-qualification/v1'
+                        or type(qualification['qualified_at_ms']) is not int
+                        or not 0 <= qualification['qualified_at_ms'] < 2**52
+                        or qualification['token_sha256'] != secrets['telegram_token_sha256']
+                        or any(qualification[field] != destination[key] for field, key in (
+                            ('get_me_bot_id', 'bot_id'), ('probe_chat_id', 'chat_id'), ('probe_topic_id', 'topic_id')))
+                        or type(qualification['probe_message_id']) is not int or qualification['probe_message_id'] <= 0
+                        or re.fullmatch('[0-9a-f]{64}', qualification['probe_text_sha256']) is None):
+                    raise ValueError
+            elif (visibility['initial_configuration'] is not None
+                    or re.fullmatch('[0-9a-f]{64}', visibility['expected_installation_sha256']) is None
+                    or re.fullmatch('[0-9a-f]{64}', row['selection']['expected_selection_sha256']) is None):
+                raise ValueError
+        digest(value)
+    except (KeyError, TypeError, ValueError, AttributeError, OnboardingError):
+        raise OnboardingError('onboarding_group_publication_recipe_required') from None
+    return copy.deepcopy(value)
+
+
+def publish_admission_group(cohort, *, deadline_ns: int) -> dict:
+    """Resume fixed offline publication after actual native social completion.
+
+    No lifecycle, sender enable or readiness is implied. Exact native owner
+    operations own recovery and CAS; a completed phase is historical evidence.
+    """
+    from daimon_matrix.messaging_config import config_digest
+
+    def budget():
+        if type(deadline_ns) is not int or time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('onboarding_group_relationship_deadline_expired')
+
+    with cohort.journal.mutation_lock(cohort.operation_id), ExitStack() as scope:
+        row = cohort._row()
+        admission = cohort._admission(row)
+        portal = row['intended_transition'].get('portal_admission', {})
+        if admission is None or portal.get('schema') != 'cluster-portal-group-admission/v2':
+            raise OnboardingError('onboarding_group_membership_recipe_required')
+        social = membership_recipe(portal.get('social'), admission, row['expected_precondition']['senders'])
+        recipe = publication_recipe(row['intended_transition'].get('admission_publications'), admission,
+            social, row['expected_precondition']['senders'], row['intended_transition'].get('admission_preparations'))
+        budget()
+        membership = (row['runtime_observation'] or {}).get('membership_admission', {})
+        joined = membership.get('result')
+        if (membership.get('recipe_sha256') != digest(social) or not isinstance(joined, dict)
+                or membership.get('result_sha256') != digest(joined)
+                or joined.get('schema') != 'cluster-native-membership-admission/v1'
+                or joined.get('operation_id') != social['operation_id']
+                or joined.get('receiving_readiness') != 'unobserved'):
+            raise OnboardingError('onboarding_group_membership_unobserved')
+        identity = dict(recipe_sha256=digest(recipe), membership_sha256=digest(joined))
+        previous = (row['runtime_observation'] or {}).get('group_publication')
+        if previous is not None:
+            if any(previous.get(key) != pin for key, pin in identity.items()):
+                raise OnboardingError('onboarding_group_publication_intent_conflict')
+            if previous.get('result') is not None:
+                if previous.get('result_sha256') != digest(previous['result']):
+                    raise OnboardingError('onboarding_group_publication_changed')
+                return copy.deepcopy(previous['result'])
+        for owner in cohort.owners.values():
+            scope.enter_context(cohort._owner_deadline(owner, deadline_ns))
+
+        def barrier():
+            budget()
+            proof = cohort.require_revocation_barrier()
+            if (proof.get('schema') != 'cluster-receiving-admission-barrier/v1'
+                    or set(proof.get('current_senders', {})) != {s['name'] for s in row['expected_precondition']['senders']}
+                    or any(item.get('state') != 'stopped' for item in proof['current_senders'].values())):
+                raise OnboardingError('onboarding_group_membership_quiescence_required')
+
+        barrier()
+
+        applications: dict[str, str] = {}
+        installations: dict[str, str] = {}
+
+        def submit(name: str, key: str, action: str, params: dict) -> dict:
+            value = publication_command(dict(operation_id=social['operation_id'],
+                step=recipe['owners'][name]['steps'][key], action=action, params=params,
+                **({} if action == 'application' else {'application_precondition': dict(
+                    application_step=recipe['owners'][name]['steps']['application'],
+                    application_sha256=applications[name])}),
+                **({} if action != 'selection' else {'visibility_precondition': dict(
+                    visibility_step=recipe['owners'][name]['steps']['visibility'],
+                    installation_sha256=installations[name])})))
+            current = cohort._row()
+            observations = copy.deepcopy(current['runtime_observation'] or {})
+            phase = observations.setdefault('group_publication', {**identity, 'requests': {}})
+            entries = phase['requests'].setdefault(name, {})
+            entry = entries.get(key)
+            if entry is None:
+                entries[key] = entry = dict(command=value, result=None)
+                cohort.journal.advance(cohort.operation_id, current['state'], runtime_observation=observations,
+                    expected_runtime_observation=current['runtime_observation'])
+            elif entry['command'] != value:
+                raise OnboardingError('onboarding_group_publication_intent_conflict')
+            # Incomplete phases must validate retained native publications too.
+            # An authentic later renewal must win before dependent visibility or
+            # selector effects, not merely fail the final snapshot afterward.
+            barrier()
+            owner = cohort.owners[name]
+            result = owner.group_publication(value, expected_context_sha256=social['owner_contexts'][name],
+                authority_closure={ref: item for ref, item in social['authority_closure'].items()
+                    if ref != admission['receivers'][name]['being_ref']})
+            budget()
+            if entry['result'] is None:
+                current = cohort._row()
+                observations = copy.deepcopy(current['runtime_observation'] or {})
+                saved = observations['group_publication']['requests'][name][key]
+                if saved != entry:
+                    raise OnboardingError('onboarding_group_publication_intent_conflict')
+                saved['result'] = result
+                cohort.journal.advance(cohort.operation_id, current['state'], runtime_observation=observations,
+                    expected_runtime_observation=current['runtime_observation'])
+            elif entry['result'] != result:
+                raise OnboardingError('onboarding_group_publication_changed')
+            if (result.get('schema') != 'cluster-group-publication-result/v1'
+                    or any(result.get(field) != value[field] for field in ('operation_id', 'step', 'action'))
+                    or result.get('status') != 'recorded' or result.get('receiving_readiness') != 'unobserved'):
+                raise OnboardingError('onboarding_group_publication_changed')
+            return result
+
+        disclosures = {}
+        for name, owner in sorted(recipe['owners'].items()):
+            app = copy.deepcopy(owner['application'])
+            events = app['specification']['relationship_events'] if app['specification'] is not None else app['additions']['relationship_events']
+            events.extend([joined['invitation'], joined['acceptance']])
+            if app['specification'] is not None:
+                app['specification']['tribe']['policy']['membership_ref'] = joined['acceptance']['event_id']
+            application = submit(name, 'application', 'application', app)
+            applications[name] = application['application_sha256']
+            result = submit(name, 'disclosure', 'visibility-disclosure', owner['disclosure'])
+            disclosure = result.get('disclosure')
+            if (not isinstance(disclosure, dict) or result.get('disclosure_sha256') != config_digest(disclosure)
+                    or disclosure.get('destination') != owner['disclosure']['approved_destination']
+                    or disclosure.get('issued_at_ms') != owner['disclosure']['issued_at_ms']
+                    or set(disclosure.get('participants', [])) != set(recipe['signers'])):
+                raise OnboardingError('onboarding_group_publication_changed')
+            disclosures[name] = disclosure
+        accepted = {}
+        ordered = [disclosures[name] for name in sorted(disclosures)]
+        for ref, name in sorted(recipe['signers'].items()):
+            result = submit(name, 'acceptance', 'visibility-accept', dict(disclosures=ordered,
+                approved_destination=recipe['owners'][name]['disclosure']['approved_destination']))
+            bindings = result.get('bindings')
+            if (not isinstance(bindings, list) or len(bindings) != len(ordered)
+                    or any(not isinstance(binding, dict) or set(binding) != {'disclosure_sha256', 'binding'}
+                        or binding['disclosure_sha256'] != config_digest(disclosure)
+                        or binding['binding'].get('body', {}).get('being_ref') != ref
+                        for binding, disclosure in zip(bindings, ordered, strict=True))):
+                raise OnboardingError('onboarding_group_publication_changed')
+            accepted[ref] = bindings
+        snapshots = {}
+        for index, (name, owner) in enumerate(sorted(recipe['owners'].items())):
+            visibility = submit(name, 'visibility', 'visibility-publish', dict(disclosure=disclosures[name],
+                bindings=[accepted[ref][index]['binding'] for ref in sorted(accepted)], **owner['visibility']))
+            installations[name] = visibility['installation_sha256']
+            submit(name, 'selection', 'selection', owner['selection'])
+            snapshot = submit(name, 'snapshot', 'snapshot', dict(
+                **{key+'_step': owner['steps'][key] for key in ('application', 'visibility', 'selection')},
+                owner_context_sha256=social['owner_contexts'][name]))
+            if (snapshot.get('owner_context_sha256') != social['owner_contexts'][name]
+                    or snapshot.get('group', {}).get('selected', {}).get('tribe_ref') != admission['tribe_ref']):
+                raise OnboardingError('onboarding_group_publication_changed')
+            snapshots[name] = snapshot
+        barrier()
+        result = dict(schema='cluster-admission-group-publications/v1', operation_id=social['operation_id'],
+            **identity, snapshots=snapshots, receiving_readiness='unobserved')
+        current = cohort._row()
+        observations = copy.deepcopy(current['runtime_observation'])
+        observations['group_publication'].update(result=result, result_sha256=digest(result))
+        cohort.journal.advance(cohort.operation_id, current['state'], runtime_observation=observations,
+            expected_runtime_observation=current['runtime_observation'])
+        return result
+
+
 def command(value: dict) -> dict:
     try:
         if (not isinstance(value, dict) or set(value) != {'operation_id', 'step', 'method', 'params'}
@@ -377,7 +667,7 @@ def request_packet(value: dict) -> dict:
 
 def publication_command(value: dict) -> dict:
     try:
-        if (not isinstance(value, dict) or set(value) != {'operation_id', 'step', 'action', 'params'}
+        if (not isinstance(value, dict) or set(value) - {'application_precondition', 'visibility_precondition'} != {'operation_id', 'step', 'action', 'params'}
                 or str(uuid.UUID(value['operation_id'])) != value['operation_id']
                 or not isinstance(value['step'], str)
                 or re.fullmatch(r'[a-z][a-z0-9-]{0,79}', value['step']) is None
@@ -389,6 +679,24 @@ def publication_command(value: dict) -> dict:
                     and set(value['params']) - PUBLICATIONS['snapshot'] <= {'expected_stores', 'expected_preservation'})):
             raise ValueError
         params = value['params']
+        if 'application_precondition' in value:
+            guard = value['application_precondition']
+            if (value['action'] in {'application', 'context-preview'}
+                    or not isinstance(guard, dict) or set(guard) != {'application_step', 'application_sha256'}
+                    or not isinstance(guard['application_step'], str)
+                    or re.fullmatch('[a-z][a-z0-9-]{0,79}', guard['application_step']) is None
+                    or not isinstance(guard['application_sha256'], str)
+                    or re.fullmatch('[0-9a-f]{64}', guard['application_sha256']) is None):
+                raise ValueError
+        if 'visibility_precondition' in value:
+            guard = value['visibility_precondition']
+            if (value['action'] != 'selection' or not isinstance(guard, dict)
+                    or set(guard) != {'visibility_step', 'installation_sha256'}
+                    or not isinstance(guard['visibility_step'], str)
+                    or re.fullmatch('[a-z][a-z0-9-]{0,79}', guard['visibility_step']) is None
+                    or not isinstance(guard['installation_sha256'], str)
+                    or re.fullmatch('[0-9a-f]{64}', guard['installation_sha256']) is None):
+                raise ValueError
         if value['action'] == 'application':
             from daimon_matrix.messaging_config import APPLICATION_SCHEMA_V3
             first = params['expected_application_sha256'] is None
@@ -798,6 +1106,45 @@ def publication_request(hosted, group_root: Path, journal: Path, value: dict, *,
         for parent in (directory, operation, journal, journal.parent):
             _sync(parent)
         check_deadline()
+        if 'application_precondition' in selected:
+            from daimon_matrix.messaging_config import config_digest, read_publication
+            guard = selected['application_precondition']
+            application = being_seed._read(directory / (guard['application_step'] + '.json'),
+                                           limit=being_seed.MAX_SELECTION)
+            application_result = application.get('result')
+            if (application.get('owner_context_sha256') != digest(context)
+                    or application.get('command', {}).get('operation_id') != selected['operation_id']
+                    or application['command'].get('action') != 'application'
+                    or application['command'].get('step') != guard['application_step']
+                    or not isinstance(application_result, dict) or application_result.get('status') != 'recorded'
+                    or application_result.get('schema') != 'cluster-group-publication-result/v1'
+                    or any(application_result.get(key) != application['command'][key]
+                           for key in ('operation_id', 'step', 'action'))
+                    or application_result.get('application_sha256') != guard['application_sha256']
+                    or config_digest(read_publication(hosted, group_root / 'application')[0]) != guard['application_sha256']):
+                raise OnboardingError('onboarding_group_publication_application_changed')
+            # The caller still holds the native writer: a later valid renewal
+            # cannot interleave this check and the dependent native effect.
+            check_deadline()
+        if 'visibility_precondition' in selected:
+            from daimon_matrix.messaging_config import config_digest, read_document
+            guard = selected['visibility_precondition']
+            visibility = being_seed._read(directory / (guard['visibility_step'] + '.json'),
+                                         limit=being_seed.MAX_SELECTION)
+            visibility_result = visibility.get('result')
+            if (visibility.get('owner_context_sha256') != digest(context)
+                    or visibility.get('command', {}).get('operation_id') != selected['operation_id']
+                    or visibility['command'].get('action') != 'visibility-publish'
+                    or visibility['command'].get('step') != guard['visibility_step']
+                    or not isinstance(visibility_result, dict) or visibility_result.get('status') != 'recorded'
+                    or visibility_result.get('schema') != 'cluster-group-publication-result/v1'
+                    or any(visibility_result.get(key) != visibility['command'][key]
+                           for key in ('operation_id', 'step', 'action'))
+                    or visibility_result.get('installation_sha256') != guard['installation_sha256']
+                    or config_digest(read_document(group_root / 'visibility/installation.json')['document'])
+                       != guard['installation_sha256']):
+                raise OnboardingError('onboarding_group_publication_visibility_changed')
+            check_deadline()
         observed = _publication_effect(hosted, group_root, selected, context['authority_closure'],
             operation=operation, context=context, snapshot=snapshot)
         if (selected['action'] == 'snapshot' and retained['result'] is not None

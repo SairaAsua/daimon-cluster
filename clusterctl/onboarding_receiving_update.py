@@ -3027,6 +3027,11 @@ class CohortController:
         from .onboarding_group_admission import admit_membership
         return admit_membership(self, deadline_ns=deadline_ns)
 
+    def publish_admission_group(self, *, deadline_ns: int) -> dict:
+        """Publish only the protected post-membership offline group phase."""
+        from .onboarding_group_admission import publish_admission_group
+        return publish_admission_group(self, deadline_ns=deadline_ns)
+
     def _activation(self, row: dict) -> tuple[dict, dict]:
         """Resolve fixed activation or the admission's retained late derivation."""
         admission = self._admission(row)
