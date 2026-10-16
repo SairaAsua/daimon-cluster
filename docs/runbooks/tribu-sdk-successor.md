@@ -1201,6 +1201,25 @@ transition refuses before dependent owner effects. This source join does not
 enable the unfinished automatic lifecycle finisher or establish installed
 admission acceptance.
 
+After actual group publication and load, the entrant can prepare its messaging
+attachment through `OwnerClient.prepare_attachment` and the existing qualified
+owner CLI. It verifies the signed public application, full native origin and
+authenticated loaded status, then uses the captured Matrix installer with the
+original finite deadline. Messaging client metadata may live in a renewed
+generation; its existing key remains relative to the selected application.
+Authenticated public preimages are rechecked around installation and durable
+result publication. This prepares messaging only; it does not install personal
+guidance, reload the native catalog, start a model or qualify receiving readiness.
+
+The same retained request recovers a lost result without reverting a later exact
+tooling reconciliation to the generic command. Later owner acceptance derives
+its code/SDK, group and complete native origin from the completed admission,
+including when no legacy `peer` is configured. It requires that operation's exact
+tooling receipt and preserves the qualified connection/configuration instead of
+reinstalling the generic command. Changed configuration is refused before
+personal guidance is written. The automatic caller still needs to join these
+supported actions with its lifecycle finisher and installed acceptance.
+
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry
 rechecks the real SDK publication/CAS for application/visibility changes even if

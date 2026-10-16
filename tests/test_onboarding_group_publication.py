@@ -751,6 +751,175 @@ def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(
     assert (controller.records/'capability_published.json').read_bytes() == native_publication
 
 
+@pytest.mark.parametrize('drift', [None, 'before-install', 'after-fingerprint'])
+def test_fresh_group_attachment_recovers_lost_result_and_preserves_qualified_tooling(group_source, tmp_path, monkeypatch, drift):
+    """Real native messaging grant/installer; daemon and Codex writer are seams."""
+    import tomllib
+    from pathlib import Path
+    from clusterctl import onboarding_owner_client as owner
+    from clusterctl import onboarding_receiving_update as updates
+    from daimon_matrix.canonical import canonical_bytes
+    from daimon_matrix.messaging_config import config_digest, read_document, read_publication, create_binding
+    from daimon_matrix import operator_messaging
+    source, target, *_ = group_source
+    root = source.root
+    application = source.outputs/'tribe/application'
+    hosted = source._load(signed=False)
+    value, _ = read_publication(hosted, application)
+    operator_messaging.renew(hosted, application, expected_application_sha256=config_digest(value))
+    value, metadata = read_publication(hosted, application)
+    assert metadata != application and not (metadata/'client.key').exists()
+    selection_path = source.outputs/'tribe/selection.json'
+    document = being_seed._read(selection_path)['document']
+    document['application_sha256'] = digest(value)
+    being_seed._write(selection_path, dict(document=document, binding=create_binding(hosted, document)))
+    selected = dict(channel_id='tribe', socket=str(root/'tribe.sock'), application=str(application),
+        tribe_ref=value['tribe']['policy']['tribe_ref'])
+    group = dict(selected=selected, application_sha256=config_digest(value),
+        publication_sha256=config_digest(read_document(application/'publication.json')), installation_sha256='e'*64)
+    bundle = target.document_bundle()
+    request = dict(schema='cluster-group-chat-attachment/v1', operation_id=str(uuid.uuid4()),
+        runtime_root=str(root), server=bundle['local_origin'],
+        runtime_bundle_sha256=hashlib.sha256(canonical_bytes(bundle)).hexdigest(), group=group)
+    code = tmp_path/'qualified-code'
+    (code/'clusterctl').mkdir(parents=True, mode=0o700)
+    captured = code/'clusterctl'/owner.TOOLING_INSTALLER_MODULE
+    captured.write_bytes((Path(__file__).resolve().parents[1]/'clusterctl'/owner.TOOLING_INSTALLER_MODULE).read_bytes())
+    captured.chmod(0o600)
+    installer = owner._installer(code, os.geteuid())
+    monkeypatch.setattr(owner, '_installer', lambda *_args:installer)
+    observations = []
+    class StatusOwner:
+        def __init__(self, actual_root, socket, *, deadline_ns):
+            assert actual_root == root and socket == root/'tribe.sock' and deadline_ns > time.monotonic_ns()
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def status(self):
+            observations.append(True)
+            return dict(server=bundle['local_origin'], runtime_status=dict(loaded_runtime=dict(
+                runtime_id=bundle['runtime_id'], runtime_bundle_sha256=request['runtime_bundle_sha256']),
+                loaded_application={**{key:group[key] for key in ('application_sha256', 'publication_sha256')},
+                    'visibility':dict(installation_sha256=group['installation_sha256']),
+                    'tribe':value['tribe']}))
+    monkeypatch.setattr(updates, 'OwnerGroupClient', StatusOwner)
+    def config_writer(_binary, home, command, **options):
+        path = home/'config.toml'
+        old = path.read_text() if path.exists() else ''
+        old = old.split('[mcp_servers.matrix]')[0]
+        path.write_text(old+'[mcp_servers.matrix]\ncommand = '+json.dumps(command[0])+
+            '\nargs = '+json.dumps(command[1:])+'\nstartup_timeout_sec = 60\n')
+        path.chmod(0o600)
+    monkeypatch.setattr(installer, '_write_codex_role', config_writer)
+    monkeypatch.setattr(installer.shutil, 'which', lambda _: '/synthetic/codex')
+    home = tmp_path/'codex'
+    home.mkdir(mode=0o700)
+    (home/'config.toml').write_text('model = "preserved"\n')
+    (home/'config.toml').chmod(0o600)
+    attachment = tmp_path/'new-messaging-attachment'
+    startup = dict(code_digest='a'*64, process_id=os.getpid(), isolated=True, no_site=True, no_bytecode=True,
+        sdk_digest='b'*64, matrix_commit='c'*40, matrix_wheel_sha256='d'*64)
+    args = dict(code=code, code_digest=startup['code_digest'], startup=startup, codex_home=home,
+        code_uid=os.geteuid(), deadline_ns=time.monotonic_ns()+30_000_000_000)
+    original = {path:path.read_bytes() for path in (root/'runtime.json', root/'custody.json',
+        metadata/'client.json', application/'client.key')}
+    if drift:
+        client_path = metadata/'client.json'
+        changed = client_path.read_bytes()+b'\n'
+        if drift == 'before-install':
+            atomic = being_seed._write
+            def swap_after_intent(path, value, **options):
+                atomic(path, value, **options)
+                if path.name == 'intent.json':
+                    client_path.write_bytes(changed)
+            monkeypatch.setattr(being_seed, '_write', swap_after_intent)
+        else:
+            fingerprint = installer._binding_fingerprint
+            def swap_after_fingerprint(*arguments, **options):
+                result = fingerprint(*arguments, **options)
+                client_path.write_bytes(changed)
+                return result
+            monkeypatch.setattr(installer, '_binding_fingerprint', swap_after_fingerprint)
+        with pytest.raises(OnboardingError, match='native_tooling_changed'):
+            owner.prepare_group_chat_attachment(attachment, request, **args)
+        assert client_path.read_bytes() == changed
+        assert not (attachment/'preparation'/request['operation_id']/'result.json').exists()
+        if drift == 'before-install':
+            assert not (attachment/'binding.json').exists()
+        assert not (target.home/'Projects/being/AGENTS.md').exists()
+        return
+    put, lost = being_seed._write, [True]
+    def lose_result(path, raw, **options):
+        put(path, raw, **options)
+        if path.name == 'result.json' and lost[0]:
+            lost[0] = False
+            raise OSError('synthetic lost attachment result')
+    monkeypatch.setattr(being_seed, '_write', lose_result)
+    with pytest.raises(OSError, match='lost attachment result'):
+        owner.prepare_group_chat_attachment(attachment, request, **args)
+    result = owner.prepare_group_chat_attachment(attachment, request, **args)
+    assert result['request_sha256'] == digest(request) and result['receiving_readiness'] == 'unobserved'
+    assert json.loads((attachment/'binding.json').read_bytes())['outgoing_channels'] == ['tribe']
+    assert tomllib.loads((home/'config.toml').read_text())['model'] == 'preserved'
+    # The real existing reconciler replaces the generic command. Retrying the
+    # original preparation must observe it without restoring the legacy command.
+    accepted = owner.reconcile_chat_tooling(attachment, str(uuid.uuid4()), **args)
+    assert accepted['status'] == 'configured'
+    retained = {path:path.read_bytes() for path in (attachment/'binding.json', attachment/'connection.json', home/'config.toml')}
+    assert owner.prepare_group_chat_attachment(attachment, request, **args) == result
+    assert {path:path.read_bytes() for path in retained} == retained
+    assert {path:path.read_bytes() for path in original} == original
+    assert len(observations) == 6
+    assert not (target.home/'Projects/being/AGENTS.md').exists()
+    # The later acceptance program consumes that qualified installation. Its
+    # daemon/script status calls are explicit seams; cryptographic client and
+    # binding/config validation and all filesystem effects remain genuine.
+    import subprocess
+    import sys
+    from types import SimpleNamespace
+    from daimon_matrix.client import LocalClient
+    personal = target.home/'Projects/being/AGENTS.md'
+    (target.home/'Projects').mkdir(mode=0o700)
+    personal.parent.mkdir(mode=0o700)
+    personal.write_text('# Preserved personal context\n')
+    personal.chmod(0o600)
+    status = dict(being_ref=bundle['manifest']['being_ref'], local_origin=bundle['local_origin'], integrity='ok')
+    monkeypatch.setattr(LocalClient, 'runtime_status', lambda _self: ({}, dict(ok=True, result=status)))
+    def script_status(argv, **options):
+        assert argv[-1] == 'status'
+        return SimpleNamespace(returncode=0, stdout=json.dumps(status))
+    monkeypatch.setattr(subprocess, 'run', script_status)
+    payload = dict(home=str(target.home), state_relative=str(target.package.relative_to(target.home)),
+        prog='qualified-codex', script='# Synthetic rendered owner client\n', instructions=personal.read_text(),
+        plan_digest='f'*64, origin=bundle['local_origin'], being_ref=bundle['manifest']['being_ref'], install=True,
+        chat=dict(application=str(application), attachment=str(attachment), socket=str(root/'tribe.sock'),
+            incoming_channels=['tribe'], outgoing_channels=['tribe'], codex_mcp=True,
+            installer=captured.read_text(), installer_sha256=owner.TOOLING_INSTALLER_SHA256,
+            qualified_tooling=dict(accepted=accepted, command=json.loads(retained[attachment/'connection.json'])['command'],
+                codex_home=str(home))))
+    def accept(value):
+        with monkeypatch.context() as context:
+            context.setenv('HOME', str(target.home))
+            context.setattr(sys, 'argv', ['owner-client', json.dumps(value)])
+            previous = os.umask(0o077)
+            try:
+                exec(compile(owner.PROGRAM, '<owner-program>', 'exec'), {})
+            finally:
+                os.umask(previous)
+    forged = copy.deepcopy(payload)
+    forged['chat']['qualified_tooling']['accepted']['config_sha256'] = '0'*64
+    with pytest.raises(AssertionError):
+        accept(forged)
+    assert not (target.package/'owner-client/qualified-codex').exists()
+    assert personal.read_text() == payload['instructions']
+    accept(payload)
+    accept({**payload, 'install':False})
+    assert {path:path.read_bytes() for path in retained} == retained
+    assert {path:path.read_bytes() for path in original} == original
+    assert personal.read_text() == payload['instructions']
+
+
 def test_pending_initial_publication_preserves_a_later_native_client_renewal(group_source, monkeypatch):
     from daimon_matrix import operator_messaging
     from daimon_matrix.messaging_config import config_digest, read_publication

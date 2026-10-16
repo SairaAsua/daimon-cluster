@@ -19,7 +19,7 @@ from .onboarding import Observation, OnboardingError, digest, validate_plan
 
 INSTALLER_SHA256 = 'aaef1a28614722a1f52d4c32dbbd3add5f1abfcd6f766cfaf6b7cfa3073a9af9'
 TOOLING_INSTALLER_MODULE = 'onboarding_chat_native.py'
-TOOLING_INSTALLER_SHA256 = '75bd210889cae7f68ec365b635d57d107db99b4991391a3831040012e8dd103b'
+TOOLING_INSTALLER_SHA256 = 'c39245861024a6e7fe6155f5afc45b8d41f29353cdebfe913b8c3d2f0b7a71cc'
 
 
 # Only these maintained domain codes may cross the CLI boundary. Exception
@@ -389,6 +389,165 @@ def reconcile_chat_tooling(attachment: Path, operation_id: str, *, code: Path,
         'installer_sha256': TOOLING_INSTALLER_SHA256}
 
 
+def prepare_group_chat_attachment(attachment: Path, request: dict, *, code: Path,
+                                  code_digest: str, startup: dict, codex_home: Path,
+                                  code_uid: int, deadline_ns: int) -> dict:
+    """Prepare messaging only, before receiving releases the acceptance stage.
+
+    The installed daemon and existing status/messaging clients remain the
+    authority. No runtime is loaded, model started or personal guidance edited.
+    The captured installer owns exact partial-install and Codex-config recovery.
+    """
+    import argparse
+    import os
+    import sys
+    import tomllib
+    import uuid
+    from daimon_matrix.agent_chat import load_binding
+    from daimon_matrix.canonical import unb64url
+    from daimon_matrix.client import ClientConfig
+    from daimon_matrix.messaging_config import (protected_read, config_digest, _public_identity,
+        verify_public_binding, _read_verified_publication)
+    from daimon_matrix.operator_rebirth import authority_from_runtime_bundle
+    from . import being_seed
+    from .onboarding import private_directory
+    from .onboarding_receiving_update import OwnerGroupClient
+    def budget():
+        if time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('receiving_owner_deadline_expired')
+    budget()
+    if (startup.get('code_digest') != code_digest or startup.get('process_id') != os.getpid()
+            or any(startup.get(key) is not True for key in ('isolated', 'no_site', 'no_bytecode'))):
+        raise OnboardingError('qualified_native_peer_tool_required')
+    try:
+        if (set(request) != {'schema', 'operation_id', 'runtime_root', 'server', 'runtime_bundle_sha256', 'group'}
+                or request['schema'] != 'cluster-group-chat-attachment/v1'
+                or str(uuid.UUID(request['operation_id'])) != request['operation_id']):
+            raise ValueError
+        root = Path(request['runtime_root'])
+        selected = request['group']['selected']
+        application = Path(selected['application'])
+        if (selected['channel_id'] != 'tribe' or selected['socket'] != str(root/'tribe.sock')
+                or any(not path.is_absolute() or '..' in path.parts
+                    for path in (root, application, attachment, codex_home))
+                or any(not isinstance(value, str) or re.fullmatch('[0-9a-f]{64}', value) is None for value in (
+                    request['runtime_bundle_sha256'], request['group']['application_sha256'],
+                    request['group']['publication_sha256'], request['group']['installation_sha256']))):
+            raise ValueError
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise OnboardingError('receiving_chat_attachment_request_required') from None
+    installer = _installer(code, code_uid)
+    bundle_raw = onboarding_release.regular(root/'runtime.json', uid=os.geteuid())
+    bundle = json.loads(bundle_raw)
+    if bundle['local_origin'] != request['server']:
+        raise OnboardingError('receiving_native_tooling_identity_changed')
+    authority = authority_from_runtime_bundle(bundle)
+    identity = _public_identity(authority, bundle['local_origin'], bundle['runtime_id'],
+        bundle['runtime_label'], time.time_ns()//1_000_000)
+    key = unb64url(authority.credentials[identity['credential_id']]['body']['signing_key']['public'])
+    actual, metadata, publication = _read_verified_publication(application,
+        lambda value, signature: verify_public_binding(identity, key, value, signature))
+    if actual['client']['secret_file'] != 'client.key':
+        raise OnboardingError('receiving_native_tooling_group_changed')
+    client_key = application/actual['client']['secret_file']
+    peer = ClientConfig.load(metadata/'client.json', protected_read(client_key, size=32))
+    if peer.expected_server != request['server'] or peer.runtime_id != bundle['runtime_id']:
+        raise OnboardingError('receiving_native_tooling_identity_changed')
+    if (config_digest(actual) != request['group']['application_sha256']
+            or config_digest(publication) != request['group']['publication_sha256']
+            or actual['client']['descriptor'] != peer.capability.descriptor
+            or actual['client']['secret_sha256'] != hashlib.sha256(protected_read(client_key, size=32)).hexdigest()):
+        raise OnboardingError('receiving_native_tooling_group_changed')
+    preimages = {path:protected_read(path) for path in (root/'runtime.json', application/'publication.json',
+        metadata/'application.json', metadata/'binding.json', metadata/'client.json', client_key)}
+    if (preimages[root/'runtime.json'] != bundle_raw
+            or json.loads(preimages[application/'publication.json']) != publication
+            or json.loads(preimages[metadata/'application.json']) != actual
+            or json.loads(preimages[metadata/'client.json']) != dict(schema='dm.local.client-config/v3',
+                capability=peer.capability.descriptor, expected_server=dict(peer.expected_server),
+                runtime_id=peer.runtime_id, runtime_label=peer.runtime_label)
+            or _read_verified_publication(application,
+                lambda value, signature: verify_public_binding(identity, key, value, signature)) != (actual, metadata, publication)):
+        raise OnboardingError('receiving_native_tooling_changed')
+    def unchanged():
+        if any(protected_read(path) != raw for path,raw in preimages.items()):
+            raise OnboardingError('receiving_native_tooling_changed')
+        budget()
+    unchanged()
+    binding = dict(schema='dm.agent-chat.binding/v1', socket=selected['socket'],
+        client_config=str(metadata/'client.json'), client_key=str(client_key),
+        request_dir=str(attachment/'requests'), incoming_channels=['tribe'], outgoing_channels=['tribe'])
+    legacy = [sys.executable, '-I', '-m', 'daimon_matrix.agent_chat', '--binding', str(attachment/'binding.json')]
+    qualified = chat_command(Path(sys.prefix), Path(sys.prefix).parent/'runtime-imports', code,
+        code_digest=code_digest, binding=attachment/'binding.json', code_uid=code_uid)
+    with OwnerGroupClient(root, root/'tribe.sock', deadline_ns=deadline_ns) as owner:
+        def observed():
+            value = owner.status()
+            status = value['runtime_status']
+            loaded, app = status['loaded_runtime'], status['loaded_application']
+            if (value['server'] != request['server'] or loaded['runtime_id'] != peer.runtime_id
+                    or loaded['runtime_bundle_sha256'] != request['runtime_bundle_sha256']
+                    or any(app.get(key) != request['group'][key] for key in ('application_sha256', 'publication_sha256'))
+                    or app.get('visibility', {}).get('installation_sha256') != request['group']['installation_sha256']
+                    or app.get('tribe', {}).get('policy', {}).get('tribe_ref') != selected['tribe_ref']):
+                raise OnboardingError('receiving_native_tooling_group_changed')
+            budget()
+        observed()
+        # Retain original intent before the supported installer publishes files.
+        installer._mkdir(attachment)
+        installer._directory(attachment)
+        installer._mkdir(attachment/'preparation')
+        history = private_directory(attachment/'preparation'/request['operation_id'], create=True)
+        def retain(name, value):
+            path = history/(name+'.json')
+            with being_seed._locked(history):
+                if path.exists() and being_seed._read(path, limit=being_seed.MAX_SELECTION) != value:
+                    raise OnboardingError('receiving_native_tooling_changed')
+                # Atomic write also re-establishes durability after lost fsync.
+                being_seed._write(path, value, limit=being_seed.MAX_SELECTION)
+                for parent in (history, history.parent, attachment, attachment.parent):
+                    installer._sync_directory(parent)
+        retain('intent', dict(schema='cluster-group-chat-attachment-intent/v1', request=request,
+            attachment=str(attachment), binding_filename='binding.json', codex_home=str(codex_home), command=qualified,
+            qualification={key:startup[key] for key in ('code_digest', 'sdk_digest', 'matrix_commit', 'matrix_wheel_sha256')}))
+        unchanged()
+        previous = os.environ.get('CODEX_HOME')
+        os.environ['CODEX_HOME'] = str(codex_home)
+        try:
+            connection = attachment/'connection.json'
+            current = json.loads(protected_read(connection)) if connection.exists() else None
+            if current is None or current.get('command') == legacy:
+                installer.install(argparse.Namespace(attachment=attachment, socket=Path(selected['socket']),
+                    client_config=metadata/'client.json', client_key=client_key,
+                    incoming=['tribe'], outgoing=['tribe'], hermes_home=None, skills_dir=None,
+                    register_codex_mcp=True, deadline_ns=deadline_ns))
+            else:
+                # A later exact tooling reconciliation must never be reset to
+                # the generic command when the preparation reply was lost.
+                role = tomllib.loads(protected_read(codex_home/'config.toml').decode()).get('mcp_servers', {}).get('matrix', {})
+                if (current != dict(command=qualified, incoming_channels=['tribe'], tools=installer._tools())
+                        or role.get('command') != qualified[0] or role.get('args') != [*qualified[1:], 'mcp']):
+                    raise OnboardingError('receiving_native_tooling_changed')
+            if load_binding(attachment/'binding.json') != binding:
+                raise OnboardingError('receiving_native_tooling_changed')
+            _binding, fingerprint = installer._binding_fingerprint(attachment)
+        finally:
+            if previous is None:
+                os.environ.pop('CODEX_HOME', None)
+            else:
+                os.environ['CODEX_HOME'] = previous
+        observed()
+        unchanged()
+        result = dict(schema='cluster-group-chat-attachment-prepared/v1', operation_id=request['operation_id'],
+            request_sha256=digest(request), binding_sha256=fingerprint, server=request['server'], runtime_id=peer.runtime_id,
+            code_digest=code_digest, sdk_digest=startup['sdk_digest'], matrix_commit=startup['matrix_commit'],
+            matrix_wheel_sha256=startup['matrix_wheel_sha256'], receiving_readiness='unobserved')
+        retain('result', result)
+        unchanged()
+        budget()
+        return result
+
+
 def main(argv: list[str] | None = None) -> int:
     """Qualify once in this MCP process, then serve the existing chat adapter."""
     import argparse
@@ -403,6 +562,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--observation-deadline-ns', type=int)
     parser.add_argument('--observation-timeout-seconds', type=float)
     parser.add_argument('--reconcile-tooling')
+    parser.add_argument('--prepare-group-attachment')
     parser.add_argument('--codex-home', type=Path)
     parser.add_argument('--connection-mirror', type=Path, action='append', default=[])
     parser.add_argument('--native-endpoint', type=Path)
@@ -414,7 +574,7 @@ def main(argv: list[str] | None = None) -> int:
         import math
         import time
         timeout = args.observation_timeout_seconds
-        if not (args.reconcile_tooling or args.native_preflight) or not math.isfinite(timeout) or not 0 < timeout <= 60:
+        if not (args.reconcile_tooling or args.native_preflight or args.prepare_group_attachment) or not math.isfinite(timeout) or not 0 < timeout <= 60:
             raise OnboardingError('receiving_owner_deadline_expired')
         deadline = time.monotonic_ns() + int(timeout * 1_000_000_000)
         args.observation_deadline_ns = min(args.observation_deadline_ns or deadline, deadline)
@@ -427,11 +587,16 @@ def main(argv: list[str] | None = None) -> int:
     elif args.expected_config_sha256 is not None:
         raise OnboardingError('receiving_source_configuration_changed')
     if args.native_preflight:
-        if (args.native_endpoint is None or args.binding is not None or args.reconcile_tooling
+        if (args.native_endpoint is None or args.binding is not None or args.reconcile_tooling or args.prepare_group_attachment
                 or args.codex_home is not None or args.connection_mirror or args.native_thread
                 or args.chat_arguments or args.observation_deadline_ns is None):
             raise OnboardingError('qualified_native_peer_tool_required')
     elif args.binding is None:
+        raise OnboardingError('qualified_native_peer_tool_required')
+    if args.prepare_group_attachment and (args.reconcile_tooling or args.native_preflight
+            or args.binding is None or args.binding.name != 'binding.json' or args.codex_home is None
+            or args.connection_mirror or args.native_endpoint is not None or args.native_thread
+            or args.chat_arguments or args.observation_deadline_ns is None):
         raise OnboardingError('qualified_native_peer_tool_required')
     code = Path(__file__).resolve().parents[1]
     parameters = onboarding_code_successor.sdk_parameters(code, uid=args.code_owner)
@@ -448,6 +613,12 @@ def main(argv: list[str] | None = None) -> int:
     binding = args.binding
     if binding is None:
         raise OnboardingError('qualified_native_peer_tool_required')
+    if args.prepare_group_attachment:
+        result = prepare_group_chat_attachment(binding.parent, json.loads(args.prepare_group_attachment),
+            code=code, code_digest=args.code_digest, startup=startup, codex_home=args.codex_home,
+            code_uid=args.code_owner, deadline_ns=args.observation_deadline_ns)
+        print(json.dumps(result))
+        return 0
     if args.reconcile_tooling:
         if args.chat_arguments or binding.name not in {'binding.json', 'owner-binding.json'} or args.codex_home is None:
             raise OnboardingError('qualified_native_peer_tool_required')
@@ -530,6 +701,40 @@ def publish(path,raw,mode,previous=None):
   try:os.fsync(descriptor)
   finally:os.close(descriptor)
  finally:temporary.unlink(missing_ok=True)
+def qualified_chat(chat,root):
+ from daimon_matrix.agent_chat import load_binding,bridge
+ from daimon_matrix.client import ClientConfig
+ from daimon_matrix.messaging_config import protected_read
+ import tomllib
+ attachment=Path(chat['attachment'])
+ qualified=chat['qualified_tooling']
+ candidate=load_binding(attachment/'binding.json')
+ import types
+ installer=types.ModuleType('qualified_agent_chat_installer')
+ assert hashlib.sha256(chat['installer'].encode()).hexdigest()==chat['installer_sha256']
+ exec(compile(chat['installer'],'<qualified-agent-chat-installer>','exec'),installer.__dict__)
+ _,fingerprint=installer._binding_fingerprint(attachment)
+ accepted=qualified['accepted']
+ assert accepted['binding_sha256']==fingerprint
+ assert hashlib.sha256(installer.canonical_bytes(qualified['command'])).hexdigest()==accepted['command_sha256']
+ assert candidate['schema']=='dm.agent-chat.binding/v1' and candidate['socket']==chat['socket']
+ assert candidate['request_dir']==str(attachment/'requests')
+ assert candidate['incoming_channels']==candidate['outgoing_channels']==['tribe']
+ assert Path(candidate['client_config']).is_relative_to(Path(chat['application']))
+ assert Path(candidate['client_key'])==Path(chat['application'])/'client.key'
+ peer=bridge(candidate).client.config
+ native=ClientConfig.load(root/'runtime/client.json',bytearray(protected_read(root/'runtime/client.key',size=32)))
+ assert peer.expected_server==native.expected_server==accepted['server']
+ assert peer.runtime_id==native.runtime_id==accepted['runtime_id']
+ assert accepted['schema']=='cluster-native-chat-tooling/v1' and accepted['status']=='configured'
+ connection=json.loads(protected_read(attachment/'connection.json'))
+ assert connection['command']==qualified['command'] and connection['tools']==installer._tools()
+ assert connection['incoming_channels']==['tribe']
+ config=Path(qualified['codex_home'])/'config.toml'
+ assert hashlib.sha256(protected_read(config)).hexdigest()==accepted['config_sha256']
+ role=tomllib.loads(protected_read(config).decode()).get('mcp_servers',{}).get('matrix',{})
+ assert role.get('command')==qualified['command'][0]
+ assert role.get('args')==[*qualified['command'][1:],'mcp'] and role.get('enabled',True) is True
 root=home/payload['state_relative']
 directory(root)
 script=root/'owner-client'/payload['prog']
@@ -569,7 +774,8 @@ if payload['install']:
  assert current['being_ref']==payload['being_ref'] and current['integrity']=='ok'
  assert all(current['local_origin'].get(key)==value for key,value in payload['origin'].items())
  chat=payload.get('chat')
- if chat is not None:
+ if chat is not None and 'qualified_tooling' in chat:qualified_chat(chat,root)
+ if chat is not None and 'qualified_tooling' not in chat:
   from daimon_matrix.messaging_config import protected_read
   peer=ClientConfig.load(Path(chat['application'])/'client.json',protected_read(Path(chat['application'])/'client.key',size=32))
   assert peer.expected_server==config.expected_server and peer.runtime_id==config.runtime_id
@@ -598,38 +804,43 @@ if chat is not None:
  from daimon_matrix.agent_chat import load_binding,bridge
  from daimon_matrix.messaging_config import protected_read
  attachment=Path(chat['attachment'])
- if not all((attachment/name).exists() for name in ('binding.json','connection.json')) or (not payload['install'] and not (attachment/'installation.json').exists()):
+ qualified=chat.get('qualified_tooling')
+ if not all((attachment/name).exists() for name in ('binding.json','connection.json')) or (qualified is None and not payload['install'] and not (attachment/'installation.json').exists()):
   print(json.dumps(dict(installed=False)));raise SystemExit(0)
  candidate=load_binding(attachment/'binding.json')
- assert candidate==dict(schema='dm.agent-chat.binding/v1',socket=chat['socket'],
-  client_config=str(Path(chat['application'])/'client.json'),client_key=str(Path(chat['application'])/'client.key'),
-  request_dir=str(attachment/'requests'),incoming_channels=chat.get('incoming_channels',['peer-in']),outgoing_channels=chat.get('outgoing_channels',['peer-out']))
+ if qualified is None:
+  assert candidate==dict(schema='dm.agent-chat.binding/v1',socket=chat['socket'],
+   client_config=str(Path(chat['application'])/'client.json'),client_key=str(Path(chat['application'])/'client.key'),
+   request_dir=str(attachment/'requests'),incoming_channels=chat.get('incoming_channels',['peer-in']),outgoing_channels=chat.get('outgoing_channels',['peer-out']))
+ else:qualified_chat(chat,root)
  peer=bridge(candidate).client
  from daimon_matrix.client import ClientConfig
  native=ClientConfig.load(root/'runtime/client.json',bytearray(protected_read(root/'runtime/client.key',size=32)))
  assert peer.config.expected_server==native.expected_server and peer.config.runtime_id==native.runtime_id
  connection=json.loads(protected_read(attachment/'connection.json'))
- assert connection['command']==[sys.executable,'-I','-m','daimon_matrix.agent_chat','--binding',str(attachment/'binding.json')]
+ expected_command=qualified['command'] if qualified is not None else [sys.executable,'-I','-m','daimon_matrix.agent_chat','--binding',str(attachment/'binding.json')]
+ assert connection['command']==expected_command
  assert connection['incoming_channels']==chat.get('incoming_channels',['peer-in'])
  if chat.get('codex_mcp',False):
   import tomllib
-  codex_config=Path(os.environ.get('CODEX_HOME',str(home/'.codex')))/'config.toml'
+  codex_config=Path(qualified['codex_home'] if qualified is not None else os.environ.get('CODEX_HOME',str(home/'.codex')))/'config.toml'
   if not codex_config.exists():
    print(json.dumps(dict(installed=False)));raise SystemExit(0)
   role=tomllib.loads(protected_read(codex_config).decode()).get('mcp_servers',{}).get('matrix',{})
+  if qualified is not None:assert hashlib.sha256(protected_read(codex_config)).hexdigest()==qualified['accepted']['config_sha256']
   assert role.get('command')==connection['command'][0]
   assert role.get('args')==connection['command'][1:]+['mcp'] and role.get('enabled',True) is True
  from daimon_matrix.mcp_server import MESSAGING_TOOL_CONTRACTS
  tools={tool['name']:tool for tool in connection['tools']}
  assert set(tools)=={'messaging_channels',*MESSAGING_TOOL_CONTRACTS}
  for name,(_,schema,_) in MESSAGING_TOOL_CONTRACTS.items():assert tools[name]['parameters']==schema
- if payload['install']:
+ if payload['install'] and qualified is None:
   chat_receipt=dict(schema='cluster-onboarding-chat-attachment/v1',plan_digest=payload['plan_digest'],
    origin=payload['origin'],being_ref=payload['being_ref'],installer_sha256=chat['installer_sha256'],
    binding_sha256=hashlib.sha256(protected_read(attachment/'binding.json')).hexdigest(),
    connection_sha256=hashlib.sha256(protected_read(attachment/'connection.json')).hexdigest())
   publish(attachment/'installation.json',json.dumps(chat_receipt,sort_keys=True).encode(),0o600)
- else:
+ elif qualified is None:
   saved=json.loads(protected_read(attachment/'installation.json'))
   assert saved==dict(schema='cluster-onboarding-chat-attachment/v1',plan_digest=payload['plan_digest'],
    origin=payload['origin'],being_ref=payload['being_ref'],installer_sha256=chat['installer_sha256'],
@@ -651,10 +862,27 @@ class OwnerClient:
         validate_plan(plan)
         if not self.host.authorize(plan, digest(plan)):
             raise OnboardingError("host_authorization_required")
-        _, code, _ = self.host._guest_paths(plan)
-        runtime_code, _, _ = self.host._runtime_paths(plan, code)
-        source = self.host.config.runtime_code or self.host.config.code
-        sdk = onboarding_sdk.verify(source, uid=0)
+        receiving = None
+        if getattr(self.host.config, 'group_admission', None) is not None:
+            from .onboarding_group_coordinator import GroupCoordinator
+            bound = GroupCoordinator(self.host)._binding(plan)
+            if bound is None or bound[1]['state'] != 'completed':
+                raise OnboardingError('onboarding_group_admission_pending')
+            receiving = bound[1], bound[2]['receivers'][plan['name']]
+        if receiving is None:
+            _, code, _ = self.host._guest_paths(plan)
+            runtime_code, _, _ = self.host._runtime_paths(plan, code)
+            source = self.host.config.runtime_code or self.host.config.code
+            sdk = onboarding_sdk.verify(source, uid=0)
+        else:
+            _row, approved = receiving
+            source = Path(approved['candidate']['code'])
+            from .onboarding_code_successor import sdk_parameters
+            sdk = onboarding_sdk.verify(source, uid=approved['candidate']['code_uid'],
+                **sdk_parameters(source, uid=approved['candidate']['code_uid']))
+            base = self.host._receiving_base(plan)
+            runtime_code, _, _ = self.host._runtime_paths(plan, base,
+                candidate=(source, approved['recipe']['prepared']['code_digest']))
         python = (
             "/home/agent/.local/share/daimon-matrix/sdk/"
             + digest(sdk)
@@ -704,23 +932,39 @@ class OwnerClient:
             runtime_code=str(runtime_code),
             install=install,
         )
-        if self.host.config.peer is not None:
-            from .onboarding_peer_host import PeerHost
-
-            selected = PeerHost(self.host).application(plan)
-            if selected is None:
-                raise OnboardingError("backend_unavailable")
-            application, _ = selected
-            group = application.endswith('/matrix/tribe/application')
+        if receiving is not None or self.host.config.peer is not None:
+            if receiving is not None:
+                row, approved = receiving
+                import uuid
+                selected_group = (row['runtime_observation'] or {}).get('group_publication', {}).get(
+                    'result', {}).get('snapshots', {}).get(plan['name'], {}).get('group', {}).get('selected')
+                if (not isinstance(selected_group, dict) or selected_group.get('channel_id') != 'tribe'
+                        or selected_group.get('socket') != approved['socket']
+                        or selected_group.get('tribe_ref') != row['expected_precondition']['tribe_ref']):
+                    raise OnboardingError('receiving_native_tooling_group_changed')
+                application, group = selected_group['application'], True
+            else:
+                from .onboarding_peer_host import PeerHost
+                selected = PeerHost(self.host).application(plan)
+                if selected is None:
+                    raise OnboardingError("backend_unavailable")
+                application, _ = selected
+                group = application.endswith('/matrix/tribe/application')
             installer = (
                 Path(__file__).resolve().parents[1]
                 / "support/matrix-agent-chat/install_agent_chat.py"
             )
-            raw = onboarding_release.regular(installer, uid=0)
-            expected_sha = INSTALLER_SHA256
+            if receiving is None:
+                raw = onboarding_release.regular(installer, uid=0)
+                expected_sha = INSTALLER_SHA256
+            else:
+                raw = onboarding_release.regular(source/'clusterctl'/TOOLING_INSTALLER_MODULE,
+                    uid=receiving[1]['candidate']['code_uid'])
+                expected_sha = TOOLING_INSTALLER_SHA256
             if hashlib.sha256(raw).hexdigest() != expected_sha:
                 raise OnboardingError("qualified_native_peer_tool_required")
-            attachment = application.removesuffix("/application") + "/owner-client"
+            attachment = (application.removesuffix("/application") + "/owner-client" if receiving is None
+                else receiving[1]['recipe']['tooling']['attachment'])
             payload["chat"] = dict(
                 application=application,
                 attachment=attachment,
@@ -732,6 +976,37 @@ class OwnerClient:
             )
             if group:
                 payload['chat'].update(incoming_channels=['tribe'], outgoing_channels=['tribe'])
+                if receiving is not None:
+                    payload['chat']['socket'] = selected_group['socket']
+            if receiving is not None:
+                row, approved = receiving
+                recipe = validate_tooling_recipe(approved['recipe']['tooling'])
+                accepted = (row['runtime_observation'] or {}).get('native_tooling', {}).get(plan['name'])
+                actual_origin = (row['runtime_observation'] or {}).get('initial_managed', {}).get(
+                    plan['name'], {}).get('intent', {}).get('owner', {}).get('origin')
+                prepared = approved['recipe']['prepared']
+                if (not group or recipe['profile'] != 'codex' or recipe['attachment'] != attachment
+                        or recipe.get('binding_filename', 'binding.json') != 'binding.json'
+                        or not isinstance(accepted, dict) or accepted.get('schema') != 'cluster-native-chat-tooling/v1'
+                        or accepted.get('status') != 'configured' or not isinstance(actual_origin, dict)
+                        or accepted.get('operation_id') != str(uuid.uuid5(uuid.NAMESPACE_URL,
+                            'native-tooling:'+row['operation_id']+':'+plan['name']))
+                        or any(actual_origin.get(key) != value for key,value in origin.items())
+                        or accepted.get('server') != actual_origin
+                        or any(accepted.get(key) != value for key,value in dict(
+                            code_digest=prepared['code_digest'], sdk_digest=digest(sdk),
+                            matrix_commit=sdk['matrix_commit'], matrix_wheel_sha256=prepared['matrix_wheel_sha256']).items())):
+                    raise OnboardingError('receiving_native_tooling_unobserved')
+                venv = Path(python).parent.parent
+                command = chat_command(venv, venv.parent/'runtime-imports', runtime_code,
+                    code_digest=prepared['code_digest'], binding=Path(attachment)/'binding.json',
+                    code_uid=approved['candidate']['code_uid'])
+                from daimon_matrix.canonical import canonical_bytes
+                if hashlib.sha256(canonical_bytes(command)).hexdigest() != accepted.get('command_sha256'):
+                    raise OnboardingError('receiving_native_tooling_changed')
+                payload['chat'].update(installer=raw.decode(), installer_sha256=TOOLING_INSTALLER_SHA256,
+                    qualified_tooling=dict(accepted=accepted, command=command, codex_home=recipe['codex_home']))
+                payload['qualified_candidate'] = dict(code=str(source), digest=prepared['code_digest'])
             payload["legacy_instructions"] = instructions
             payload["instructions"] += (
                 "\n# Native Matrix messaging\n\n"
@@ -751,7 +1026,9 @@ class OwnerClient:
     def _call(self, plan: dict, expected: dict, *, install: bool) -> bool:
         payload = self._payload(plan, expected, install=install)
         # Verify the existing installed SDK before executing its interpreter.
-        if self.host._target_call(plan, "sdk-observe").get("ready") is not True:
+        candidate = payload.get('qualified_candidate')
+        options = {} if candidate is None else {'candidate':(Path(candidate['code']), candidate['digest'])}
+        if self.host._target_call(plan, "sdk-observe", **options).get("ready") is not True:
             raise OnboardingError("verification_failed")
         raw = self.host._dispatch(
             plan,
@@ -871,6 +1148,23 @@ class OwnerClient:
             raise OnboardingError('verification_failed')
         if time.monotonic_ns() >= deadline:
             raise OnboardingError('receiving_owner_deadline_expired')
+        return result
+
+    def prepare_attachment(self, plan: dict, request: dict, *, candidate: tuple[Path, str],
+                           attachment: Path, codex_home: Path, timeout_seconds: float = 30,
+                           deadline_ns: int | None = None) -> dict:
+        """Prepare only the new group's messaging client through its owner."""
+        result, sdk, deadline = self._tooling_call(plan, candidate=candidate, timeout_seconds=timeout_seconds,
+            deadline_ns=deadline_ns, arguments=lambda remaining: [
+                '--binding', str(attachment/'binding.json'), '--prepare-group-attachment',
+                json.dumps(request, separators=(',', ':')), '--codex-home', str(codex_home),
+                '--observation-timeout-seconds', str(remaining)])
+        if (result.get('schema') != 'cluster-group-chat-attachment-prepared/v1'
+                or result.get('request_sha256') != digest(request) or result.get('operation_id') != request['operation_id']
+                or result.get('code_digest') != candidate[1] or result.get('sdk_digest') != digest(sdk)
+                or result.get('matrix_commit') != sdk['matrix_commit'] or result.get('receiving_readiness') != 'unobserved'
+                or time.monotonic_ns() >= deadline):
+            raise OnboardingError('verification_failed')
         return result
 
 

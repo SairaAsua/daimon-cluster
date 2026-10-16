@@ -451,6 +451,13 @@ class GuestGroupClient:
         return OwnerClient(self.backend).preflight_native(self.plan, candidate=self.candidate,
             endpoint=endpoint, timeout_seconds=self.timeout_seconds, deadline_ns=self.deadline_ns)
 
+    def prepare_attachment(self, request: dict, *, attachment: Path, codex_home: Path) -> dict:
+        from .onboarding_owner_client import OwnerClient
+        if request.get('runtime_root') != str(self.root):
+            raise OnboardingError('receiving_guest_owner_locator_required')
+        return OwnerClient(self.backend).prepare_attachment(self.plan, request, candidate=self.candidate,
+            attachment=attachment, codex_home=codex_home, timeout_seconds=self.timeout_seconds, deadline_ns=self.deadline_ns)
+
 
 def _run_owner(argv: list[str], **options):
     """Bound and reap one technical owner CLI and its probe descendants."""
