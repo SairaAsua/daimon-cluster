@@ -1492,3 +1492,14 @@ publications. Preserve its journal with the native receipts. These artifacts
 qualify native admission/communication against a synthetic external service;
 they do not qualify public Telegram, TLS or the uninstrumented launcher. Never
 select them in a real body or use a fake token with the ordinary baseline.
+
+When constructing the retained admission fixture, resolve route keys from the
+application root: selected generation metadata moves, transport keys do not.
+Preserve the existing visibility representation independently of bot/chat/topic
+qualification. Compose service arguments with the maintained command/entrypoint
+writers. Their JSON-quoted systemd arguments are not shell syntax: `shlex.split`
+does not decode embedded launcher newlines. A retained unit prepared by that
+writer can be decoded with JSON and checked by an exact writer round trip; compile
+its actual `-c` launcher before selecting an instrumented fixture unit. Keep
+static recipe validation separate from the protected receiving journal row:
+only fresh actual sender/load observations can freeze the operation and horizon.

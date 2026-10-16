@@ -63,7 +63,16 @@ workflow tests, bounded independent source review and scoped lint pass. Both API
 servers were closed after their probes. No Matrix service, authority, identity,
 production selector or model was started by these probes. This is external-service
 fixture readiness, not complete admission, public Telegram or TLS acceptance.
-The same protected admission/receiving/communication operation remains unbound.
+Native owner reads now authenticate both original public applications without
+returning key values. The retained three-owner admission has prepared transport/
+visibility inputs and an actually qualified synthetic entrant destination. Its
+static membership/publication/communication/tooling recipes pass the installed
+SDK's native validators. Both synthetic baseline unit files select the captured
+instrumented code, with exact predecessors retained; neither unit was started
+or reloaded. This is preparation, not membership or receiving acceptance. The
+protected journal operation still needs fresh sender/load pins and binding before
+the finite integrated run. A separately composed v2-capable fallback retains the
+previous helper and unchanged SDK; the old v1 baseline is not that fallback.
 
 Before another real operation that could interrupt communication, prepare its
 receiving/recovery boundary and obtain the scoped human authorization required
