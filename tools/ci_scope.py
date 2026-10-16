@@ -295,6 +295,12 @@ GROUP_TESTS = ('tests/test_onboarding_group.py', 'tests/test_onboarding_acceptan
 RECEIVING_RUNTIME_FILES = {'clusterctl/onboarding_peer.py', 'clusterctl/onboarding_runtime.py',
     'tests/test_onboarding_peer.py', 'tests/test_onboarding_runtime.py'}
 
+OWNER_CONTROL_FILES = {'clusterctl/onboarding_owner_control.py',
+    'tests/test_onboarding_owner_control.py', 'tools/check_rc_types.py'}
+OWNER_CONTROL_TESTS = ('tests/test_onboarding_owner_control.py',
+    'tests/test_receiving_cohort_control.py', 'tests/test_receiving_process_observation.py',
+    'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
+
 LOADED_STARTUP_FILES = {'RESUME.md', 'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_target.py',
     'clusterctl/onboarding_code_successor.py',
     'clusterctl/onboarding_service.py', 'tests/test_source_bootstrap.py',
@@ -449,6 +455,10 @@ def receiving_support_only(root: Path, base: str, names: set[str]) -> bool:
 
 
 def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
+    if (set(changed) & (OWNER_CONTROL_FILES - {'tools/check_rc_types.py'})
+            and set(changed) <= OWNER_CONTROL_FILES | CI_FILES | RUNBOOK_DOCS
+            and all((root / name).is_file() for name in OWNER_CONTROL_TESTS)):
+        return 'peer', list(OWNER_CONTROL_TESTS)
     pins = {'requirements-weave.txt', 'clusterctl/onboarding_sdk.py', 'clusterctl/matrix_host.py'}
     detached_pins = pins - {'clusterctl/onboarding_sdk.py'}
     metadata = {'support/matrix-onboarding/PROVENANCE.json'} & set(changed)

@@ -787,3 +787,12 @@ def test_existing_native_attachment_update_composes_complete_receiving_coverage(
     assert set(LOADED_STARTUP_TESTS) | set(OWNER_CLIENT_TESTS) <= set(tests)
     for extra in ('clusterctl/onboarding_custody.py', 'requirements-dev.txt', 'unknown.py'):
         assert select([*changed, extra], ROOT)[0] == 'full'
+
+
+def test_short_owner_control_keeps_affected_receiving_contracts_only(tmp_path):
+    from tools.ci_scope import OWNER_CONTROL_FILES, OWNER_CONTROL_TESTS
+    changed = sorted(OWNER_CONTROL_FILES | {'tools/ci_scope.py', 'tests/test_ci_scope.py',
+        'docs/runbooks/tribu-sdk-successor.md'})
+    assert select(changed,ROOT)==('peer',list(OWNER_CONTROL_TESTS))
+    assert select(changed,tmp_path)==('full',['tests'])
+    assert select([*changed,'clusterctl/admission.py'],ROOT)==('full',['tests'])

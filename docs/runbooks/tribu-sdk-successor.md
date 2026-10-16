@@ -124,11 +124,27 @@ Preparation's barrier also reuses the process/gate authenticated by that same
 all-required adoption round. Do not launch a second cold status helper for the
 same proof. The original freshness window, exact process/head checks and native
 roster CAS still apply; later invocations observe again.
-Positive controls use `prepare_apply_control`: one qualified owner invocation
-retains and applies the same exact request under the existing private lock.
-Expiry between those effects refuses application; a lost reply retains the exact
-request for reconciliation. Separate prepare/apply verbs remain for recovery.
-No proof-window or credential horizon is widened to compensate for setup cost.
+Positive controls keep the unchanged all-required `_current_activation` proof
+and its absolute deadline. When executing through the separately qualified
+`onboarding_owner_control` maintenance client, reuse the receiving owner's
+existing closed SDK and loaded code. This client takes one authenticated status,
+pins its actual process/server, complete selection and guest admission parent,
+retains the exact request and sends it immediately. It verifies the authenticated native
+control ACK, socket, observer and remaining deadline instead of repeating status
+for success. SDK0dc already reconciles that ACK under its physical write fence.
+The shared time namespace is verified before passing an absolute monotonic
+budget to another local body. No readiness is cached between invocations.
+
+This executor is a code-only maintenance component, not a replacement or new
+label for the loaded daemon. Stage its exact source/hash as protected public code;
+execute it as the receiving owner, never open private SDK/client material as host
+root. Existing body startup, lifecycle, SDK/authority and native catalogue evidence
+remain independent and valid. The regular Target route remains available. Do not
+repeat its full running/admission qualification inside a control when that same
+bounded all-reader round already authenticated the process and parent. On an
+uncertain result retain the exact request and native CAS; never mint another
+positive request or widen the observation budget. Empty-clear authorization
+recovery is a separately reviewed negative-only operation, not a renewal policy.
 
 Prepare expiring fixture controls immediately before their use. If an unrelated
 urgent repair intervenes, preserve the scenario and completed effects instead
