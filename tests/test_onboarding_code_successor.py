@@ -69,6 +69,41 @@ def test_owner_successor_captures_current_tooling_inside_runtime_boundary(tmp_pa
     assert provenance['captured_module'] == 'clusterctl/' + TOOLING_INSTALLER_MODULE
 
 
+def test_transfer_successor_adds_pinned_helper_without_replacing_context(tmp_path):
+    import hashlib
+    base, _, source, profile = fixture(tmp_path)
+    helper = 'support/being-seed-tools/tools/protected_being.py'
+    (base / helper).unlink()
+    (base / 'release.json').unlink()
+    original = onboarding_release.seal(base, profile)
+    (source / 'onboarding_transfer.py').write_text('Selected transfer runtime module.')
+    output = tmp_path / 'successor'
+    result = build(base, original, source, ('onboarding_transfer.py',), output)
+    assert verify(output, result['runtime_digest'], base, original, uid=os.geteuid())
+    assert hashlib.sha256((output / helper).read_bytes()).hexdigest() == being_seed.TOOL_HASHES['protected_being.py']
+    assert not (base / helper).exists()
+    assert (output / 'inheritance.md').read_bytes() == (base / 'inheritance.md').read_bytes()
+    # The software addition does not permit replacing frozen tools or adding
+    # arbitrary support assets, even after the candidate is resealed.
+    extra = output / 'support/being-seed-tools/tools/unapproved.py'
+    extra.write_text('Unapproved asset.')
+    extra.chmod(0o644)
+    (output / 'release.json').unlink()
+    changed = onboarding_release.seal(output, profile)
+    with pytest.raises(OnboardingError, match='original_onboarding_context_preserved'):
+        verify(output, changed, base, original, uid=os.geteuid())
+
+
+def test_transfer_successor_preserves_an_existing_frozen_helper(tmp_path):
+    base, original, source, _ = fixture(tmp_path)
+    (source / 'onboarding_transfer.py').write_text('Selected transfer runtime module.')
+    output = tmp_path / 'successor'
+    result = build(base, original, source, ('onboarding_transfer.py',), output)
+    helper = 'support/being-seed-tools/tools/protected_being.py'
+    assert (output / helper).read_bytes() == (base / helper).read_bytes()
+    assert verify(output, result['runtime_digest'], base, original, uid=os.geteuid())
+
+
 def telegram_fixture(tmp_path, monkeypatch):
     from clusterctl import onboarding_telegram as telegram
     import hashlib

@@ -1321,3 +1321,13 @@ Offline-wheel owner qualification uses the existing protected V4 selection and
 Its actual native effects must be observed separately from pure reader/install
 success. Owner-publication fixtures also require owner-only destination roots
 under ancestors without group/world write permission, as the SDK enforces.
+
+The public-code builder verifies files as its own UID. For a synthetic build
+from a retained root-owned public base, verify that original as root-owned and
+copy its public release bytes into the builder-owned workspace; verify the same
+digest there. Do not change the original's ownership or weaken the owner check.
+Introducing `onboarding_transfer.py` into an older base also captures its pinned
+`protected_being.py` code helper if absent. The successor permits that one new
+support file, preserves every existing support/context byte and rejects other
+asset additions. A missing helper is a package-closure defect, not a reason to
+rebuild an unchanged SDK or alter an independent production candidate.

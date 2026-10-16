@@ -20,6 +20,7 @@ SDK_SCHEMA = 'cluster-onboarding-runtime-successor/v2'
 TELEGRAM_SCHEMA = 'cluster-onboarding-runtime-successor/v3'
 QUALIFIED_SDK_SCHEMA = 'cluster-onboarding-runtime-successor/v4'
 MARKER = 'runtime-successor.json'
+TRANSFER_TOOL = 'support/being-seed-tools/tools/protected_being.py'
 
 
 def sdk_parameters(code: Path, *, uid: int = 0) -> dict:
@@ -150,10 +151,17 @@ def verify(code: Path, fingerprint: str, base: Path, base_fingerprint: str, *, u
             or re.fullmatch(r'sdk/wheels/[A-Za-z0-9_.+-]+\.whl', name) is not None)
     def telegram(name: str) -> bool:
         return telegram_change and name in {'telegram/telecodex', 'telegram/artifact.json'}
+    def added_transfer_tool(name: str) -> bool:
+        # Older public contexts predate protected transfer. Introducing its
+        # runtime module must capture its pinned code helper too. Existing
+        # helpers and all other context remain immutable below.
+        return (name == TRANSFER_TOOL and name not in before
+                and 'clusterctl/onboarding_transfer.py' in after)
     if (not {name for name in before if not sdk(name)} <= set(after)
             or any(after.get(name) != checksum for name, checksum in before.items()
                    if not module(name) and not sdk(name) and not telegram(name))
-            or any(name not in before and name != MARKER and not module(name) and not sdk(name) and not telegram(name) for name in after)):
+            or any(name not in before and name != MARKER and not module(name)
+                   and not sdk(name) and not telegram(name) and not added_transfer_tool(name) for name in after)):
         raise OnboardingError('original_onboarding_context_preserved')
     return successor
 
@@ -241,6 +249,10 @@ def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, .
         capture_peer_tool(output)
     if 'onboarding_owner_client.py' in modules:
         capture_chat_tool(output)
+    if ('onboarding_transfer.py' in modules
+            and TRANSFER_TOOL not in {row['path'] for row in original['files']}):
+        tools = being_seed.verified_tools()
+        copy_code(tools / 'tools/protected_being.py', output / TRANSFER_TOOL)
     if sdk is not None:
         for path in sorted(sdk.rglob('*')):
             if path.is_file():
