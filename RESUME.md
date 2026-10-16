@@ -28,9 +28,15 @@ source and its retained synthetic admission fixture remain separate from the
 selected2144 worker. The ordinary checkout is not the deployed worker. The
 isolated227 network and corrected signed baseline metadata are now installed;
 both old synthetic owners pass actual native group loading at the approved bridge
-addresses, preserving clients, stores and old generations. No fixture service,
-authority or model was started by this preparation. Complete admission, actual
-cross-namespace traffic and compatible rollback remain unqualified. Source
+addresses, preserving clients, stores and old generations. The original v1 selector is preserved for the old baseline loaders; normal
+admission still selects v2 only with its coordinated replacement. Three native
+endpoints pass zero-model preflight. A finite qualification run restored the same
+two-registrar authority and isolated native/Matrix processes. Source and old guest
+have authenticated running observations; cross-namespace HTTP reached both real
+listeners from the host and entrant. GET501 establishes reachability, not signed
+semantic delivery. Use the retained fixture running-window/checkpoint for process
+handles and cleanup deadlines; never treat this dated paragraph as fresh health.
+Complete admission, signed communication and compatible rollback are unfinished. Source
 I/O's merged Telecodex PR100 candidate is staged, not selected; the Matrix-only
 rollout permission does not authorize a Telegram restart. Follow the current
 [Matrix receiving frontier](https://github.com/AlterMundi/daimon-matrix/blob/main/CURRENT-STATE.md)
