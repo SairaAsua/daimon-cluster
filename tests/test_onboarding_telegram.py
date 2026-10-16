@@ -323,6 +323,44 @@ def test_native_manager_observation_is_read_only_and_preserves_foreign_units(tmp
     assert len(calls) == (0 if state == 'foreign' else 1)
 
 
+def test_native_observation_accepts_exact_incus_default_and_preserves_foreign_additions(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from clusterctl import onboarding_telegram as telegram
+    unit = tmp_path/telegram.NATIVE_UNIT
+    home, codex, code = Path('/home/agent'), Path('/usr/bin/codex'), Path('/opt/qualified')
+    unit.write_bytes(telegram.native_service(home, codex, code))
+    incus = Path('/run/systemd/system/service.d/zzz-lxc-service.conf')
+    raw = (b'[Service]\nProcSubset=all\nProtectProc=default\nProtectControlGroups=no\n'
+           b'ProtectKernelTunables=no\nNoNewPrivileges=no\nLoadCredential=\n'
+           b'PrivateNetwork=no\nImportCredential=\n')
+    files = {unit: unit.read_bytes(), incus: raw}
+    reads = []
+    def regular(path, *, uid):
+        assert uid == 0
+        reads.append(path)
+        return files[path]
+    monkeypatch.setattr(telegram.onboarding_release, 'regular', regular)
+    fields = dict(LoadState='loaded', FragmentPath=str(unit), DropInPaths=str(incus),
+        MainPID='41', ActiveState='active')
+    calls = []
+    def run(argv, **options):
+        assert argv[:2] == ['systemctl', 'show']
+        calls.append(argv)
+        return SimpleNamespace(returncode=0, stdout='\n'.join(k+'='+v for k,v in fields.items()))
+    assert telegram.native_observation(home,codex,code,unit_directory=tmp_path,run=run) == {'native_state':'active'}
+    assert reads == [unit, incus] and len(calls) == 1
+    for extra in (b'ExecStart=/foreign\n', b'User=root\n'):
+        files[incus] = raw+extra
+        with pytest.raises(OnboardingError,match='native_codex_daemon_observation_failed'):
+            telegram.native_observation(home,codex,code,unit_directory=tmp_path,run=run)
+    files[incus] = raw
+    for paths in (str(incus)+' '+str(incus), '/foreign/override.conf',
+            str(unit)+'.d/tribu-reference-cache.conf'):
+        fields['DropInPaths'] = paths
+        with pytest.raises(OnboardingError,match='native_codex_daemon_observation_failed'):
+            telegram.native_observation(home,codex,code,unit_directory=tmp_path,run=run)
+
+
 @pytest.mark.parametrize('expire', [None, 'before-publish', 'after-publish', 'after-reload'])
 def test_guest_native_install_keeps_one_budget_through_verification_and_each_effect(tmp_path, monkeypatch, expire):
     from types import SimpleNamespace

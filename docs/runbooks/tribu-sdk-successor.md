@@ -1503,3 +1503,9 @@ writer can be decoded with JSON and checked by an exact writer round trip; compi
 its actual `-c` launcher before selecting an instrumented fixture unit. Keep
 static recipe validation separate from the protected receiving journal row:
 only fresh actual sender/load observations can freeze the operation and horizon.
+
+Native Codex observation accepts the same exact root-owned Incus default service
+drop-in as the Matrix guest observer. An active unit with that standard addition
+is not a foreign service. Modified/duplicate/unknown additions still refuse;
+the Matrix-specific reference-cache addition is not allowed on Codex. Read the
+existing unit and manager output before diagnosing a native preparation refusal.

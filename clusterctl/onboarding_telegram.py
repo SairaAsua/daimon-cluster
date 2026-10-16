@@ -20,7 +20,7 @@ from pathlib import Path
 from . import being_seed, onboarding_release
 from .onboarding import OnboardingError, digest, validate_plan
 from .onboarding_guest import mkdir_chain, new_bytes
-from .onboarding_service import publish
+from .onboarding_service import guest_service_dropins, publish
 
 PREVIOUS_COMMIT = '5af79bdf0716dadf92ae982bfbeafdf2eb21f6a9'
 PREVIOUS_ARCHIVE = '6ab8a38ec08274eeb036c40632ffbeb6dc8b5d14d385d7d5de4a8428a3fcd9b5'
@@ -447,9 +447,13 @@ def native_observation(home: Path, codex: Path, code: Path, *,
         '--property=MainPID', '--property=FragmentPath', '--property=DropInPaths'],
         capture_output=True, text=True, timeout=timeout_seconds, check=False)
     fields = dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
-    if (not fields.get('MainPID', '').isdecimal() or fields.get('DropInPaths') != ''
+    if (not fields.get('MainPID', '').isdecimal() or not isinstance(fields.get('DropInPaths'), str)
             or fields.get('LoadState') not in {'loaded', 'not-found'}):
         raise OnboardingError('native_codex_daemon_observation_failed')
+    try:
+        guest_service_dropins(fields['DropInPaths'], uid=0)
+    except (OnboardingError, OSError):
+        raise OnboardingError('native_codex_daemon_observation_failed') from None
     pid = int(fields['MainPID'])
     if not exists:
         if (fields['LoadState'] != 'not-found' or fields.get('FragmentPath') != ''

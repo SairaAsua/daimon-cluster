@@ -433,7 +433,13 @@ RECEIVING_SUPPORT_HASHES = {
 }
 
 
-def receiving_support_only(root: Path, base: str, names: set[str]) -> bool:
+NATIVE_DROPIN_HASHES = {'clusterctl/onboarding_service.py': (
+    '9048ed4846f33d7f9138b1d9cb68dd44b9aac24ec6537f367fb5c678a6fd427f',
+    'ffb6dbe5c2ac189e425721bda61934e991e852e30f05d492fcf2289752351a0b')}
+
+
+def receiving_support_only(root: Path, base: str, names: set[str], *, hashes: dict | None = None) -> bool:
+    hashes = RECEIVING_SUPPORT_HASHES if hashes is None else hashes
     if not re.fullmatch(r'[0-9a-f]{40}', base):
         return False
     for name in names:
@@ -443,7 +449,7 @@ def receiving_support_only(root: Path, base: str, names: set[str]) -> bool:
                       hashlib.sha256((root/name).read_bytes()).hexdigest())
         except OSError:
             return False
-        if before.returncode or actual != RECEIVING_SUPPORT_HASHES[name]:
+        if before.returncode or actual != hashes[name]:
             return False
     return True
 
@@ -499,6 +505,17 @@ def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list
         return 'docs', []
     if set(changed) <= CI_FILES | RUNBOOK_DOCS:
         return 'ci', ['tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    native_dropins = {'clusterctl/onboarding_service.py', 'clusterctl/onboarding_telegram.py',
+                     'tests/test_onboarding_service.py', 'tests/test_onboarding_telegram.py'}
+    native_tests = ['tests/test_onboarding_service.py', 'tests/test_onboarding_telegram.py',
+                    'tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    if ('clusterctl/onboarding_service.py' in changed
+            and set(changed) <= native_dropins | CI_FILES | RUNBOOK_DOCS
+            and all((root / path).is_file() for path in native_tests)
+            and receiving_support_only(root, base, set(NATIVE_DROPIN_HASHES), hashes=NATIVE_DROPIN_HASHES)):
+        # Only the exact shared drop-in extraction is narrow. Arbitrary service
+        # bootstrap, execution or selection edits keep broader qualification.
+        return 'ci', native_tests
     echo_fixture = {'tests/integration/portal_admission_echo.py',
                     'tests/test_portal_admission_echo.py'}
     echo_tests = ['tests/test_portal_admission_echo.py',

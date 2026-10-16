@@ -24,6 +24,30 @@ UNIT = 'daimon-onboarding-matrix.service'
 _selection_owners = threading.local()
 
 
+def guest_service_dropins(paths: str, *, uid: int, reference_unit: Path | None = None) -> dict:
+    """Validate exact maintained additions shared by native guest services."""
+    expected = {
+        Path('/run/systemd/system/service.d/zzz-lxc-service.conf'): (
+            b'[Service]\nProcSubset=all\nProtectProc=default\nProtectControlGroups=no\n'
+            b'ProtectKernelTunables=no\nNoNewPrivileges=no\nLoadCredential=\n'
+            b'PrivateNetwork=no\nImportCredential=\n'),
+    }
+    if reference_unit is not None:
+        expected[reference_unit.with_name(reference_unit.name + '.d') / 'tribu-reference-cache.conf'] = (
+            b'[Service]\nEnvironment=DM_TRIBU_REFERENCE_DIRECTORY='
+            b'/home/agent/.local/state/tribu-reference-cache\n')
+    selected = [Path(path) for path in paths.split()]
+    if len(set(selected)) != len(selected) or any(path not in expected for path in selected):
+        raise OnboardingError('receiving_matrix_service_scope_required')
+    result = {}
+    for path in selected:
+        raw = onboarding_release.regular(path, uid=uid)
+        if raw != expected[path]:
+            raise OnboardingError('receiving_matrix_service_scope_required')
+        result[str(path)] = hashlib.sha256(raw).hexdigest()
+    return result
+
+
 @contextmanager
 def selection_lock(unit: Path):
     """Shared ownership for first installation and subsequent Matrix selection."""
@@ -118,25 +142,7 @@ class MatrixUserService:
 
     def _guest_dropins(self, paths: str) -> dict:
         """Freeze exact maintained guest additions, never executable overrides."""
-        expected = {
-            Path('/run/systemd/system/service.d/zzz-lxc-service.conf'): (
-                b'[Service]\nProcSubset=all\nProtectProc=default\nProtectControlGroups=no\n'
-                b'ProtectKernelTunables=no\nNoNewPrivileges=no\nLoadCredential=\n'
-                b'PrivateNetwork=no\nImportCredential=\n'),
-            self.unit.with_name(self.unit.name + '.d') / 'tribu-reference-cache.conf': (
-                b'[Service]\nEnvironment=DM_TRIBU_REFERENCE_DIRECTORY='
-                b'/home/agent/.local/state/tribu-reference-cache\n'),
-        }
-        selected = [Path(path) for path in paths.split()]
-        if len(set(selected)) != len(selected) or any(path not in expected for path in selected):
-            raise OnboardingError('receiving_matrix_service_scope_required')
-        result = {}
-        for path in selected:
-            raw = onboarding_release.regular(path, uid=self._unit_uid)
-            if raw != expected[path]:
-                raise OnboardingError('receiving_matrix_service_scope_required')
-            result[str(path)] = hashlib.sha256(raw).hexdigest()
-        return result
+        return guest_service_dropins(paths, uid=self._unit_uid, reference_unit=self.unit)
 
     def stop(self, *, deadline_ns: int | None = None) -> None:
         # Do not wait for the CLI to imply drain. The controller observes the

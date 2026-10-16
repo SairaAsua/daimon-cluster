@@ -6,6 +6,27 @@ from tools.ci_scope import ONBOARDING_CONTRACTS, select
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_native_incus_dropin_scope_requires_exact_service_delta(monkeypatch,tmp_path):
+    from tools.ci_scope import NATIVE_DROPIN_HASHES
+    name='clusterctl/onboarding_service.py'
+    # The existing shared-helper cases qualify the exact Git/byte comparison.
+    # This case qualifies its closed composition without requiring Git history
+    # in the ordinary shallow-checkout test job.
+    monkeypatch.setattr('tools.ci_scope.receiving_support_only',
+        lambda root,base,names,hashes=None:
+            root==ROOT and base=='a'*40 and names=={name} and hashes==NATIVE_DROPIN_HASHES)
+    changed=[name,'clusterctl/onboarding_telegram.py','tests/test_onboarding_telegram.py',
+        'tools/ci_scope.py','tests/test_ci_scope.py','RESUME.md']
+    expected=('ci',['tests/test_onboarding_service.py','tests/test_onboarding_telegram.py',
+        'tests/test_ci_scope.py','tests/test_ci_workflow.py'])
+    assert select(changed,ROOT,base='a'*40)==expected
+    assert select(changed,ROOT)==('full',['tests'])
+    assert select(changed,tmp_path,base='a'*40)==('full',['tests'])
+    assert select([*changed,'clusterctl/onboarding_custody.py'],ROOT,base='a'*40)==('full',['tests'])
+    monkeypatch.setattr('tools.ci_scope.receiving_support_only',lambda *_a,**_kw:False)
+    assert select(changed,ROOT,base='a'*40)==('full',['tests'])
+
+
 def test_synthetic_api_fixture_has_closed_test_only_scope(tmp_path):
     changed = ['tests/integration/portal_admission_echo.py',
                'tests/test_portal_admission_echo.py', 'tools/ci_scope.py',
