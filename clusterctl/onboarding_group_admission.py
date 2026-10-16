@@ -14,6 +14,7 @@ import re
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 
 from . import being_seed
@@ -33,6 +34,258 @@ PUBLICATIONS = {
 }
 
 
+def membership_recipe(value: dict, admission: dict, senders: list[dict]) -> dict:
+    """Validate the protected social intent with the native signed reducer.
+
+    Public signature consistency is not approval: the caller must obtain this
+    recipe from its immutable receiving operation, never from portal input.
+    """
+    from daimon_matrix.operator_messaging import public_authority_history
+    from daimon_matrix.relationship_store import RelationshipView
+    from daimon_matrix.relationships import relationship_event_subject, validate_relationship_event_payload
+    from daimon_matrix.weave import verify_event
+
+    try:
+        fields = {'schema', 'operation_id', 'founder_owner', 'entrant_owner', 'authority_closure',
+                  'governance', 'invitation', 'membership_sequence', 'previous_membership_terminal_ref',
+                  'acceptance_not_after_ms', 'owner_contexts'}
+        receivers = admission['receivers']
+        old = {row['name'] for row in senders}
+        if (not isinstance(value, dict) or set(value) != fields
+                or value['schema'] != 'cluster-membership-admission/v1'
+                or str(uuid.UUID(value['operation_id'])) != value['operation_id']
+                or value['founder_owner'] not in old or value['entrant_owner'] not in set(receivers) - old
+                or not isinstance(value['authority_closure'], dict)
+                or set(value['authority_closure']) != {row['being_ref'] for row in receivers.values()}
+                or not isinstance(value['governance'], list) or not 1 <= len(value['governance']) <= 256
+                or not isinstance(value['owner_contexts'], dict) or set(value['owner_contexts']) != set(receivers)
+                or any(not isinstance(pin, str) or re.fullmatch('[0-9a-f]{64}', pin) is None
+                       for pin in value['owner_contexts'].values())
+                or type(value['membership_sequence']) is not int or value['membership_sequence'] < 0
+                or type(value['acceptance_not_after_ms']) is not int
+                or not 0 < value['acceptance_not_after_ms'] <= admission['activation']['expires_at_ms']):
+            raise ValueError
+        authorities = {}
+        for ref, row in value['authority_closure'].items():
+            if not isinstance(row, dict) or set(row) != {'authority', 'history'}:
+                raise ValueError
+            authority = public_authority_history(row['authority'], row['history'])
+            if authority.active.manifest.being_ref != ref:
+                raise ValueError
+            authorities[ref] = authority
+        founder = receivers[value['founder_owner']]['being_ref']
+        entrant = receivers[value['entrant_owner']]['being_ref']
+        if entrant != admission['entrant']['being_ref']:
+            raise ValueError
+        invitation = validate_relationship_event_payload('matrix/tribe-invitation', value['invitation'],
+            author_being_ref=founder, causal_parents=[])
+        if (invitation != value['invitation'] or invitation['tribe_ref'] != admission['tribe_ref']
+                or invitation['founder_being_ref'] != founder or invitation['invitee_being_ref'] != entrant
+                or not invitation['issued_at_ms'] < value['acceptance_not_after_ms'] <= invitation['expires_at_ms']):
+            raise ValueError
+        events = []
+        for event in value['governance']:
+            checked = verify_event(event, authorities[event['being_ref']])
+            payload = validate_relationship_event_payload(checked['kind'], checked['payload'],
+                author_being_ref=checked['being_ref'], causal_parents=checked['causal_parents'])
+            if (not checked['kind'].startswith('matrix/tribe-') or payload.get('tribe_ref') != admission['tribe_ref']
+                    or checked['subject'] != relationship_event_subject(checked['kind'], payload)):
+                raise ValueError
+            events.append(checked)
+        view = RelationshipView(events, at_ms=invitation['issued_at_ms'], card_verifier=None)
+        tribe = view.tribes[admission['tribe_ref']]
+        if (len(view.complete) != len(events) or len({event['event_id'] for event in events}) != len(events)
+                or tribe['state'] != 'active' or tribe['founder_being_ref'] != founder
+                or tribe['founder_epoch'] != invitation['founder_epoch']
+                or {ref for ref, row in tribe['memberships'].items() if row['state'] == 'active'}
+                    != {row['being_ref'] for row in senders}):
+            raise ValueError
+        previous = tribe['memberships'].get(entrant)
+        episodes = [] if previous is None else previous['episodes']
+        terminal = None if not episodes else episodes[-1].get('terminal_event')
+        expected_terminal = None if terminal is None else dict(event_id=terminal['event_id'], event_hash=terminal['content_hash'])
+        if (previous is not None and previous['state'] not in {'left', 'expelled'}
+                or value['membership_sequence'] != len(episodes)
+                or value['previous_membership_terminal_ref'] != expected_terminal):
+            raise ValueError
+        digest(value)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise OnboardingError('onboarding_group_membership_recipe_required') from None
+    return copy.deepcopy(value)
+
+
+def admit_membership(cohort, *, deadline_ns: int) -> dict:
+    """Resume the fixed native social phase; never publish or enable a group.
+
+    The physical caller still owns preparing/binding every old lifecycle and
+    stopping its Matrix service. This phase requires their observed quiescence,
+    uses only the operation's protected recipe and retains commands before RPC.
+    """
+    from daimon_matrix.relationships import (
+        MEMBERSHIP_ACCEPTANCE_SCHEMA, relationship_event_subject, validate_relationship_event_payload,
+    )
+    from daimon_matrix.weave import verify_event
+    from daimon_matrix.operator_messaging import public_authority_history
+
+    def budget():
+        if type(deadline_ns) is not int or time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('onboarding_group_relationship_deadline_expired')
+
+    with cohort.journal.mutation_lock(cohort.operation_id), ExitStack() as scope:
+        row = cohort._row()
+        admission = cohort._admission(row)
+        portal = row['intended_transition'].get('portal_admission', {})
+        if admission is None or portal.get('schema') != 'cluster-portal-group-admission/v2':
+            raise OnboardingError('onboarding_group_membership_recipe_required')
+        recipe = membership_recipe(portal.get('social'), admission, row['expected_precondition']['senders'])
+        budget()
+        previous = (row['runtime_observation'] or {}).get('membership_admission')
+        if previous is not None:
+            if previous.get('recipe_sha256') != digest(recipe):
+                raise OnboardingError('onboarding_group_membership_intent_changed')
+            if previous.get('result') is not None:
+                result = previous['result']
+                if (previous.get('result_sha256') != digest(result)
+                        or result.get('schema') != 'cluster-native-membership-admission/v1'
+                        or result.get('operation_id') != recipe['operation_id']
+                        or result.get('receiving_readiness') != 'unobserved'):
+                    raise OnboardingError('onboarding_group_membership_intent_changed')
+                # A later lifecycle may already have loaded replacements. This
+                # retained social completion cannot re-quiesce or reissue them,
+                # and remains explicitly historical rather than fresh readiness.
+                return copy.deepcopy(result)
+        for owner in cohort.owners.values():
+            scope.enter_context(cohort._owner_deadline(owner, deadline_ns))
+
+        def barrier():
+            budget()
+            proof = cohort.require_revocation_barrier()
+            if (proof.get('schema') != 'cluster-receiving-admission-barrier/v1'
+                    or set(proof.get('current_senders', {})) != {s['name'] for s in row['expected_precondition']['senders']}
+                    or any(item.get('state') != 'stopped' for item in proof['current_senders'].values())):
+                raise OnboardingError('onboarding_group_membership_quiescence_required')
+            return proof
+
+        # A revoked live sender is insufficient for an offline native writer.
+        barrier()
+        receivers = admission['receivers']
+        authorities = {ref: public_authority_history(item['authority'], item['history'])
+                       for ref, item in recipe['authority_closure'].items()}
+
+        def retain(name: str, step: str, make: Callable[[], dict]) -> dict:
+            current = cohort._row()
+            observations = copy.deepcopy(current['runtime_observation'] or {})
+            social = observations.setdefault('membership_admission', dict(recipe_sha256=digest(recipe), requests={}))
+            if social.get('recipe_sha256') != digest(recipe):
+                raise OnboardingError('onboarding_group_membership_intent_changed')
+            entries = social['requests'].setdefault(name, {})
+            entry = entries.get(step)
+            if entry is None:
+                entries[step] = entry = dict(command=command(make()), result=None)
+                cohort.journal.advance(cohort.operation_id, current['state'], runtime_observation=observations,
+                    expected_runtime_observation=current['runtime_observation'])
+            elif entry['command']['operation_id'] != recipe['operation_id'] or entry['command']['step'] != step:
+                raise OnboardingError('onboarding_group_membership_intent_changed')
+            if entry['result'] is None:
+                barrier()
+                owner = cohort.owners[name]
+                options = dict(authority_closure={ref: item for ref, item in recipe['authority_closure'].items()
+                    if ref != receivers[name]['being_ref']}, expected_context_sha256=recipe['owner_contexts'][name])
+                if receivers[name]['recipe']['profile'] == 'source':
+                    options['offline'] = True
+                if entry['command']['method'] in {'tribe.invite', 'tribe.membership.accept'}:
+                    options['membership_precondition'] = dict(schema='cluster-membership-authoring-precondition/v1',
+                        tribe_ref=admission['tribe_ref'], founder_being_ref=recipe['invitation']['founder_being_ref'],
+                        founder_epoch=recipe['invitation']['founder_epoch'], invitee_being_ref=admission['entrant']['being_ref'],
+                        membership_sequence=recipe['membership_sequence'],
+                        previous_membership_terminal_ref=recipe['previous_membership_terminal_ref'],
+                        active_members=sorted({item['being_ref'] for item in row['expected_precondition']['senders']}),
+                        not_after_ms=recipe['acceptance_not_after_ms'])
+                result = owner.group_relationship(entry['command'], **options)
+                budget()
+                current = cohort._row()
+                observations = copy.deepcopy(current['runtime_observation'] or {})
+                saved = observations['membership_admission']['requests'][name][step]
+                if saved != entry:
+                    raise OnboardingError('onboarding_group_membership_intent_changed')
+                saved['result'] = result
+                cohort.journal.advance(cohort.operation_id, current['state'], runtime_observation=observations,
+                    expected_runtime_observation=current['runtime_observation'])
+            else:
+                result = entry['result']
+            if (result.get('schema') != 'cluster-group-relationship-result/v1'
+                    or result.get('status') != 'recorded' or result.get('native_error') is not None):
+                raise OnboardingError('onboarding_group_membership_native_rejected')
+            return result
+
+        def request(step: str, method: str, params: dict) -> dict:
+            return dict(operation_id=recipe['operation_id'], step=step, method=method, params=params)
+
+        founder, entrant = recipe['founder_owner'], recipe['entrant_owner']
+        invitation = retain(founder, 'membership-invite',
+            lambda: request('membership-invite', 'tribe.invite', dict(payload=recipe['invitation'])))
+
+        def event(result: dict, author: str, kind: str) -> dict:
+            try:
+                value = verify_event(result['result']['event'], authorities[receivers[author]['being_ref']])
+                payload = validate_relationship_event_payload(kind, value['payload'],
+                    author_being_ref=value['being_ref'], causal_parents=value['causal_parents'])
+                if (value['kind'] != kind or payload['tribe_ref'] != admission['tribe_ref']
+                        or value['subject'] != relationship_event_subject(kind, payload)):
+                    raise ValueError
+                return value
+            except (KeyError, TypeError, ValueError):
+                raise OnboardingError('onboarding_group_membership_native_event_changed') from None
+
+        invited = event(invitation, founder, 'matrix/tribe-invitation')
+        if invited['payload'] != recipe['invitation']:
+            raise OnboardingError('onboarding_group_membership_native_event_changed')
+        for name in sorted(receivers):
+            for index, value in enumerate([*recipe['governance'], invited]):
+                step = 'membership-governance-' + str(index)
+                retain(name, step, lambda:
+                    request(step, 'relationship.event.ingest', dict(event=value)))
+
+        def acceptance():
+            now = time.time_ns() // 1_000_000
+            if not recipe['invitation']['issued_at_ms'] <= now < recipe['acceptance_not_after_ms']:
+                raise OnboardingError('onboarding_group_membership_acceptance_expired')
+            payload = dict(schema=MEMBERSHIP_ACCEPTANCE_SCHEMA, tribe_ref=admission['tribe_ref'],
+                founder_epoch=recipe['invitation']['founder_epoch'],
+                invitation_ref=dict(event_id=invited['event_id'], event_hash=invited['content_hash']),
+                invitee_being_ref=admission['entrant']['being_ref'], membership_sequence=recipe['membership_sequence'],
+                previous_membership_terminal_ref=recipe['previous_membership_terminal_ref'], accepted_at_ms=now)
+            return request('membership-accept', 'tribe.membership.accept', dict(payload=payload))
+
+        accepted = event(retain(entrant, 'membership-accept', acceptance), entrant, 'matrix/tribe-membership-acceptance')
+        accepted_command = cohort._row()['runtime_observation']['membership_admission']['requests'][entrant]['membership-accept']['command']
+        if accepted['payload'] != accepted_command['params']['payload']:
+            raise OnboardingError('onboarding_group_membership_native_event_changed')
+        snapshots = {}
+        expected = {item['being_ref'] for item in receivers.values()}
+        for name in sorted(receivers):
+            retain(name, 'membership-acceptance', lambda:
+                request('membership-acceptance', 'relationship.event.ingest', dict(event=accepted)))
+            result = retain(name, 'membership-result', lambda:
+                request('membership-result', 'relationship.snapshot', dict(tribe_ref=admission['tribe_ref'], at_ms=None)))
+            snapshot = result['result']
+            if (snapshot.get('tribe_ref') != admission['tribe_ref']
+                    or {member['principal_id'] for member in snapshot.get('members', []) if member['state'] == 'active'} != expected
+                    or not any(member['principal_id'] == admission['entrant']['being_ref']
+                        and member['membership_ref'] == accepted['event_id'] for member in snapshot['members'])):
+                raise OnboardingError('onboarding_group_membership_unobserved')
+            snapshots[name] = snapshot
+        barrier()
+        result = dict(schema='cluster-native-membership-admission/v1', operation_id=recipe['operation_id'],
+            invitation=invited, acceptance=accepted, snapshots=snapshots, receiving_readiness='unobserved')
+        current = cohort._row()
+        observations = copy.deepcopy(current['runtime_observation'])
+        observations['membership_admission'].update(result=result, result_sha256=digest(result))
+        cohort.journal.advance(cohort.operation_id, current['state'], runtime_observation=observations,
+            expected_runtime_observation=current['runtime_observation'])
+        return result
+
+
 def command(value: dict) -> dict:
     try:
         if (not isinstance(value, dict) or set(value) != {'operation_id', 'step', 'method', 'params'}
@@ -47,9 +300,62 @@ def command(value: dict) -> dict:
     return copy.deepcopy(value)
 
 
+def validate_membership_precondition(value: dict, selected: dict) -> dict:
+    """Closed authoring constraints, checked again by the actual native owner."""
+    fields = {'schema', 'tribe_ref', 'founder_being_ref', 'founder_epoch', 'invitee_being_ref',
+              'membership_sequence', 'previous_membership_terminal_ref', 'active_members', 'not_after_ms'}
+    try:
+        if (not isinstance(value, dict) or set(value) != fields
+                or value['schema'] != 'cluster-membership-authoring-precondition/v1'
+                or selected['method'] not in {'tribe.invite', 'tribe.membership.accept'}
+                or any(not isinstance(value[key], str) or not value[key]
+                       for key in ('tribe_ref', 'founder_being_ref', 'invitee_being_ref'))
+                or any(type(value[key]) is not int or value[key] < 0
+                       for key in ('founder_epoch', 'membership_sequence'))
+                or type(value['not_after_ms']) is not int or not 0 < value['not_after_ms'] < 2**53
+                or not isinstance(value['active_members'], list)
+                or any(not isinstance(ref, str) or not ref for ref in value['active_members'])
+                or value['active_members'] != sorted(set(value['active_members']))):
+            raise ValueError
+        payload = selected['params']['payload']
+        if any(payload[key] != value[key] for key in ('tribe_ref', 'founder_epoch', 'invitee_being_ref')):
+            raise ValueError
+        if selected['method'] == 'tribe.invite':
+            if payload['founder_being_ref'] != value['founder_being_ref']:
+                raise ValueError
+        elif any(payload[key] != value[key] for key in ('membership_sequence', 'previous_membership_terminal_ref')):
+            raise ValueError
+        digest(value)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise OnboardingError('onboarding_group_membership_precondition_required') from None
+    return copy.deepcopy(value)
+
+
+def check_membership_precondition(hosted, value: dict, *, now_ms: int) -> None:
+    """Compare actual native state, not a stale recipe's supplied event subset."""
+    with hosted.service.relationships.store.authorization_view(at_ms=now_ms,
+            card_verifier=hosted.service.relationships.card_verifier, busy_timeout_ms=0) as view:
+        tribe = view.tribes.get(value['tribe_ref'])
+    if (tribe is None or tribe['state'] != 'active'
+            or tribe['founder_being_ref'] != value['founder_being_ref']
+            or tribe['founder_epoch'] != value['founder_epoch']
+            or any(row['state'] == 'forked' for row in tribe['memberships'].values())
+            or sorted(ref for ref, row in tribe['memberships'].items() if row['state'] == 'active') != value['active_members']):
+        raise OnboardingError('onboarding_group_membership_precondition_changed')
+    previous = tribe['memberships'].get(value['invitee_being_ref'])
+    episodes = [] if previous is None else previous['episodes']
+    terminal = None if not episodes else episodes[-1].get('terminal_event')
+    expected_terminal = None if terminal is None else dict(event_id=terminal['event_id'], event_hash=terminal['content_hash'])
+    if (previous is not None and previous['state'] not in {'left', 'expelled'}
+            or len(episodes) != value['membership_sequence']
+            or expected_terminal != value['previous_membership_terminal_ref']):
+        raise OnboardingError('onboarding_group_membership_precondition_changed')
+
+
 def request_packet(value: dict) -> dict:
     fields = {'command', 'offline', 'authority_closure'}
-    if (not isinstance(value, dict) or set(value) not in (fields, fields | {'expected_context_sha256'})
+    optional = {'expected_context_sha256', 'membership_precondition'}
+    if (not isinstance(value, dict) or not fields <= set(value) <= fields | optional
             or type(value['offline']) is not bool or not isinstance(value['authority_closure'], dict)
             or 'expected_context_sha256' in value and (not value['offline']
                 or not isinstance(value['expected_context_sha256'], str)
@@ -58,10 +364,15 @@ def request_packet(value: dict) -> dict:
     publication = isinstance(value['command'], dict) and 'action' in value['command']
     if publication and not value['offline']:
         raise OnboardingError('onboarding_group_relationship_writer_required')
+    precondition = {}
+    if 'membership_precondition' in value:
+        if publication or not value['offline']:
+            raise OnboardingError('onboarding_group_relationship_writer_required')
+        precondition = dict(membership_precondition=validate_membership_precondition(value['membership_precondition'], command(value['command'])))
     return dict(command=(publication_command if publication else command)(value['command']), offline=value['offline'],
                 authority_closure=copy.deepcopy(value['authority_closure']),
                 **({'expected_context_sha256': value['expected_context_sha256']}
-                   if 'expected_context_sha256' in value else {}))
+                   if 'expected_context_sha256' in value else {}), **precondition)
 
 
 def publication_command(value: dict) -> dict:
@@ -506,7 +817,8 @@ def publication_request(hosted, group_root: Path, journal: Path, value: dict, *,
 
 
 def relationship_request(runtime_root: Path, journal: Path, value: dict, *,
-                         offline=None, deadline_ns: int | None = None) -> dict:
+                         offline=None, deadline_ns: int | None = None,
+                         membership_precondition: dict | None = None) -> dict:
     """Record or retry one native request; never return local capability material.
 
     A relationship snapshot is the native reducer's observation at its retained
@@ -519,6 +831,11 @@ def relationship_request(runtime_root: Path, journal: Path, value: dict, *,
     from daimon_matrix.operator_capabilities import operator_capability_profile
 
     selected = command(value)
+    guard = None
+    if membership_precondition is not None:
+        if offline is None:
+            raise OnboardingError('onboarding_group_relationship_writer_required')
+        guard = validate_membership_precondition(membership_precondition, selected)
     private_directory(runtime_root)
     bundle = being_seed._read(runtime_root / 'runtime.json', limit=being_seed.MAX_SELECTION)
     role = 'observe' if selected['method'] == 'relationship.snapshot' else 'relationships'
@@ -529,6 +846,8 @@ def relationship_request(runtime_root: Path, journal: Path, value: dict, *,
     identity = dict(runtime_id=bundle['runtime_id'], runtime_label=bundle['runtime_label'],
                     server=bundle['local_origin'], capability_id=config.capability.capability_id,
                     ledger=check_retained_ledger(runtime_root, journal, selected))
+    if guard is not None:
+        identity['membership_precondition_sha256'] = digest(guard)
     if (config.runtime_id != identity['runtime_id'] or config.runtime_label != identity['runtime_label']
             or config.expected_server != identity['server']
             or config.capability.client_id != 'client:operator:' + config.runtime_label + ':' + role
@@ -561,6 +880,28 @@ def relationship_request(runtime_root: Path, journal: Path, value: dict, *,
         for item in offline.service.loaded_stores.values():
             item.verify()
 
+    def authoring_precondition(request: dict, request_hash: str):
+        if guard is None:
+            return
+        verify_loaded_stores()
+        rows = [row for row in offline.service.ledger.rpc_requests()
+                if row['client_id'] == request['client_id'] and row['request_id'] == request['request_id']]
+        verify_loaded_stores()
+        if rows:
+            if rows[0]['request_hash'] != request_hash or rows[0]['method'] != request['method']:
+                raise OnboardingError('onboarding_group_relationship_request_conflict')
+            if rows[0]['state'] != 'completed':
+                # Pending can contain an atomically appended event. It is not
+                # absence or permission to author/refresh after an unknown effect.
+                raise OnboardingError('onboarding_group_membership_native_uncertain')
+            return
+        now = clock()
+        if now >= guard['not_after_ms']:
+            raise OnboardingError('onboarding_group_membership_acceptance_expired')
+        check_membership_precondition(offline, guard, now_ms=now)
+        if clock() >= guard['not_after_ms']:
+            raise OnboardingError('onboarding_group_membership_acceptance_expired')
+
     check_deadline()
     private_directory(journal, create=True)
     with being_seed._locked(journal):
@@ -588,6 +929,7 @@ def relationship_request(runtime_root: Path, journal: Path, value: dict, *,
         request = retained['request']
         if retained['response'] is None:
             check_deadline()
+            authoring_precondition(request, request_hash)
             if offline is not None and clock() - request['issued_at_ms'] > MAX_CLOCK_SKEW_MS:
                 # Current capability validity is still required. Actual exclusive
                 # writer ownership makes native RPC absence a stable fact.
@@ -604,6 +946,8 @@ def relationship_request(runtime_root: Path, journal: Path, value: dict, *,
                     retained['request'] = request
                     being_seed._write(path, retained, limit=being_seed.MAX_SELECTION)
                     request_hash = authenticate(request)
+            check_deadline()
+            authoring_precondition(request, request_hash)
             check_deadline()
             response = client.send(request) if offline is None else offline.service.handle(request)
         else:

@@ -417,10 +417,12 @@ class GuestGroupClient:
         return self._call('receiving-control-prepare', control_file=path, control_value=command)
 
     def group_relationship(self, command: dict, *, authority_closure: dict,
-                           expected_context_sha256: str | None = None) -> dict:
+                           expected_context_sha256: str | None = None,
+                           membership_precondition: dict | None = None) -> dict:
         return self._call('group-relationship', group_request=dict(command=command,
             offline=True, authority_closure=authority_closure,
-            **({'expected_context_sha256': expected_context_sha256} if expected_context_sha256 is not None else {})))
+            **({'expected_context_sha256': expected_context_sha256} if expected_context_sha256 is not None else {}),
+            **({'membership_precondition': membership_precondition} if membership_precondition is not None else {})))
 
     def group_publication(self, command: dict, *, authority_closure: dict,
                           expected_context_sha256: str | None = None) -> dict:
@@ -589,10 +591,12 @@ class SourceGroupClient:
 
     def group_relationship(self, command: dict, *, offline: bool = False,
                            authority_closure: dict | None = None,
-                           expected_context_sha256: str | None = None) -> dict:
+                           expected_context_sha256: str | None = None,
+                           membership_precondition: dict | None = None) -> dict:
         return self._call(['--group-request', '-'], command=dict(command=command,
             offline=offline, authority_closure={} if authority_closure is None else authority_closure,
-            **({'expected_context_sha256': expected_context_sha256} if expected_context_sha256 is not None else {})))
+            **({'expected_context_sha256': expected_context_sha256} if expected_context_sha256 is not None else {}),
+            **({'membership_precondition': membership_precondition} if membership_precondition is not None else {})))
 
     def group_publication(self, command: dict, *, authority_closure: dict,
                           expected_context_sha256: str | None = None) -> dict:
@@ -2898,6 +2902,11 @@ class CohortController:
         with self.journal.mutation_lock(self.operation_id):
             return apply_host_selection(self.journal, self.operation_id, config_path,
                                         _cohort_control=self)
+
+    def admit_membership(self, *, deadline_ns: int) -> dict:
+        """Run the approved native social phase with all original bodies stopped."""
+        from .onboarding_group_admission import admit_membership
+        return admit_membership(self, deadline_ns=deadline_ns)
 
     def _activation(self, row: dict) -> tuple[dict, dict]:
         """Resolve fixed activation or the admission's retained late derivation."""

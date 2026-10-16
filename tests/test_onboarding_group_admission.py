@@ -38,6 +38,240 @@ def invitation(source, peer_bundle):
     return dict(operation_id=str(uuid.uuid4()), step='invite', method='tribe.invite', params=dict(payload=payload))
 
 
+def test_protected_social_phase_resumes_partial_native_distribution(group_source, tmp_path, monkeypatch):
+    """Real native Roots/RPC/journal; physical quiescence is an explicit seam."""
+    from types import SimpleNamespace
+    from clusterctl import onboarding_group_admission as social
+    from clusterctl.onboarding_code_successor import plan_update
+    from clusterctl.onboarding_group_admission import membership_recipe
+    from clusterctl.onboarding_receiving_update import CohortController
+    from clusterctl.operation_journal import OperationJournal
+
+    source, first, _peer, peer_bundle, _old = group_source
+    target = Target(tmp_path / 'candidate/guest', first.plan,
+        document(tmp_path / 'candidate/custody' / digest(first.plan) / 'genesis.json'))
+    founder_bundle = first.document_bundle()
+    native = source._load(signed=False)
+    declaration = next(row for row in native.service.relationships.store.events() if row['kind'] == 'matrix/tribe-declaration')
+    invitation_payload = invitation(source, peer_bundle)['params']['payload']
+    operation = str(uuid.uuid4())
+    roots = {'founder': source.root, 'entrant': target.package / 'runtime'}
+    original_identity = {name: {file: (root/file).read_bytes() for file in ('runtime.json', 'custody.json')}
+                         for name, root in roots.items()}
+    bundles = {'founder': founder_bundle, 'entrant': peer_bundle}
+    closure_all = {**closure(founder_bundle), **closure(peer_bundle)}
+    pins = {}
+    for name, owner in (('founder', source), ('entrant', target)):
+        pins[name] = owner.group_publication(dict(operation_id=operation, step='context',
+            action='context-preview', params={}), authority_closure={ref: item for ref, item in closure_all.items()
+                if ref != bundles[name]['manifest']['being_ref']})['owner_context_sha256']
+    receivers = {name: dict(being_ref=bundles[name]['manifest']['being_ref'],
+        embodiment_id=bundles[name]['local_origin']['embodiment_id'], root=str(root), socket=str(root/'tribe.sock'),
+        candidate=dict(code=str(tmp_path/'qualified-code'), code_uid=0),
+        recipe=dict(profile='source' if name == 'founder' else 'guest',
+            prepared=dict(being_ref=bundles[name]['manifest']['being_ref'],
+                embodiment_id=bundles[name]['local_origin']['embodiment_id'], code_digest='a'*64,
+                matrix_wheel_sha256='b'*64), tooling={'profile': 'matrix-only'})) for name, root in roots.items()}
+    sender = dict(name='founder', root=str(source.root), socket=str(source.root/'tribe.sock'),
+        being_ref=founder_bundle['manifest']['being_ref'], server=founder_bundle['local_origin'], process={}, gate={})
+    admission = dict(schema='cluster-receiving-admission/v1', tribe_ref=invitation_payload['tribe_ref'],
+        entrant=dict(being_ref=peer_bundle['manifest']['being_ref'],
+            embodiment_ids=[peer_bundle['local_origin']['embodiment_id']]), receivers=receivers,
+        activation=dict(manifest_path=str(tmp_path/'manifest.json'), manifest_uid=0,
+            expires_at_ms=invitation_payload['expires_at_ms'], observation_window_ms=1000))
+    recipe = dict(schema='cluster-membership-admission/v1', operation_id=operation,
+        founder_owner='founder', entrant_owner='entrant', authority_closure=closure_all,
+        governance=[declaration], invitation=invitation_payload, membership_sequence=0,
+        previous_membership_terminal_ref=None, acceptance_not_after_ms=invitation_payload['expires_at_ms'], owner_contexts=pins)
+    assert membership_recipe(recipe, admission, [sender]) == recipe
+    for changed in ({**recipe, 'founder_owner': 'entrant'}, {**recipe, 'authority_closure': closure(peer_bundle)},
+                    {**recipe, 'membership_sequence': 1}, {**recipe, 'governance': [declaration, declaration]},
+                    {**recipe, 'invitation': {**invitation_payload, 'nonce': 'invalid'}},
+                    {**recipe, 'extra': 'unapproved'}):
+        with pytest.raises(OnboardingError, match='membership_recipe_required'):
+            membership_recipe(changed, admission, [sender])
+    calls, fault = [], {'accept': False, 'ingest': False, 'barrier': 'revoked-original'}
+    from daimon_matrix.service import HostedWeave
+    handle = HostedWeave.handle
+
+    def native_response_loss(self, value):
+        result = handle(self, value)
+        if value['method'] == 'tribe.membership.accept' and fault['accept']:
+            fault['accept'] = False
+            raise OSError('synthetic lost membership acceptance response')
+        return result
+
+    monkeypatch.setattr(HostedWeave, 'handle', native_response_loss)
+
+    class Owner:
+        deadline_ns = None
+        def __init__(self, name, local):
+            self.name, self.local, self.root, self.socket = name, local, roots[name], roots[name]/'tribe.sock'
+        def group_relationship(self, value, **options):
+            calls.append((self.name, copy.deepcopy(value)))
+            assert self.deadline_ns > time.monotonic_ns()
+            result = self.local.group_relationship(value, **options)
+            if self.name == 'founder' and value['step'] == 'membership-acceptance' and fault['ingest']:
+                fault['ingest'] = False
+                raise OSError('synthetic lost acceptance intake response')
+            return result
+
+    owners = {'founder': Owner('founder', source), 'entrant': Owner('entrant', target)}
+    journal = OperationJournal(tmp_path/'social-phase')
+    row = plan_update(journal, manifest_digest='f'*64, target='receiving:'+admission['tribe_ref'],
+        expected_precondition=dict(tribe_ref=admission['tribe_ref'], senders=[sender],
+            receiver_selections={name: None for name in owners}),
+        intended_transition=dict(cohort_admission=admission,
+            portal_admission=dict(schema='cluster-portal-group-admission/v2', social=recipe)),
+        audit_identity={'actor': 'synthetic-host'})
+    cohort = CohortController(journal, row['operation_id'], owners)
+    monkeypatch.setattr(cohort, 'require_revocation_barrier', lambda: dict(
+        schema='cluster-receiving-admission-barrier/v1', current_senders={'founder': {'state': fault['barrier']}}))
+    with pytest.raises(OnboardingError, match='quiescence_required'):
+        cohort.admit_membership(deadline_ns=time.monotonic_ns()+30_000_000_000)
+    assert calls == [] and journal.get(row['operation_id'])['runtime_observation'] is None
+    fault.update(barrier='stopped', accept=True)
+    with pytest.raises(OSError, match='lost membership acceptance response'):
+        cohort.admit_membership(deadline_ns=time.monotonic_ns()+30_000_000_000)
+    commands = journal.get(row['operation_id'])['runtime_observation']['membership_admission']['requests']
+    frozen_accept = copy.deepcopy(commands['entrant']['membership-accept']['command'])
+    assert commands['entrant']['membership-accept']['result'] is None
+    # Expiry must not generate a different accepted_at_ms or invitation. Native
+    # owner retries still use their actual retained authenticated response.
+    monkeypatch.setattr(social, 'time', SimpleNamespace(monotonic_ns=time.monotonic_ns,
+        time_ns=lambda: (recipe['acceptance_not_after_ms']+1)*1_000_000))
+    load = social.load_owner_runtime
+
+    def late_owner_load(root, *args, **options):
+        hosted = load(root, *args, **options)
+        if root == roots['entrant']:
+            return replace(hosted, service=replace(hosted.service,
+                clock=lambda: recipe['acceptance_not_after_ms']+1))
+        return hosted
+
+    monkeypatch.setattr(social, 'load_owner_runtime', late_owner_load)
+    fault['ingest'] = True
+    with pytest.raises(OSError, match='lost acceptance intake response'):
+        cohort.admit_membership(deadline_ns=time.monotonic_ns()+30_000_000_000)
+    retained = journal.get(row['operation_id'])
+    assert retained['state'] == 'planned'
+    commands = retained['runtime_observation']['membership_admission']['requests']
+    accepted = commands['entrant']['membership-accept']['result']['result']['event']
+    assert commands['entrant']['membership-accept']['command'] == frozen_accept
+    assert commands['founder']['membership-acceptance']['result'] is None
+    count_before = len(calls)
+    result = cohort.admit_membership(deadline_ns=time.monotonic_ns()+30_000_000_000)
+    assert result['schema'] == 'cluster-native-membership-admission/v1'
+    assert result['receiving_readiness'] == 'unobserved' and result['acceptance'] == accepted
+    assert all(value['step'] not in {'membership-invite', 'membership-accept'} for _, value in calls[count_before:])
+    row = journal.get(row['operation_id'])
+    assert row['runtime_observation']['membership_admission']['requests']['entrant']['membership-accept']['command'] == frozen_accept
+    count_before = len(calls)
+    monkeypatch.setattr(cohort, 'require_revocation_barrier', lambda: pytest.fail('completed social phase repeated a physical barrier'))
+    assert cohort.admit_membership(deadline_ns=time.monotonic_ns()+30_000_000_000) == result
+    assert len(calls) == count_before and row['state'] == 'planned'
+    assert not (roots['entrant']/'matrix.sock').exists()
+    assert all(owner.deadline_ns is None for owner in owners.values())
+    assert {name: {file: (root/file).read_bytes() for file in ('runtime.json', 'custody.json')}
+            for name, root in roots.items()} == original_identity
+    # A stale supplied lineage cannot authorize a second sequence-0 acceptance
+    # (or another invite) against the actual already-joined native stores.
+    guard = dict(schema='cluster-membership-authoring-precondition/v1',
+        **{key: recipe['invitation'][key] for key in ('tribe_ref', 'founder_being_ref', 'founder_epoch', 'invitee_being_ref')},
+        membership_sequence=0, previous_membership_terminal_ref=None,
+        active_members=[founder_bundle['manifest']['being_ref']],
+        not_after_ms=recipe['acceptance_not_after_ms']+60_000)
+    ledger_events = {name: load(root, (source if name == 'founder' else target)._reader,
+        authorities=social.public_authorities(bundles[name], {ref: item for ref, item in closure_all.items()
+            if ref != bundles[name]['manifest']['being_ref']})).service.ledger.events() for name, root in roots.items()}
+    fresh_invite = invitation(source, peer_bundle)
+    for local, value, authority, extra in (
+        (source, fresh_invite, closure(peer_bundle), {'offline': True}),
+        (target, {**frozen_accept, 'operation_id': str(uuid.uuid4())}, closure(founder_bundle), {}),
+    ):
+        with pytest.raises(OnboardingError, match='membership_precondition_changed'):
+            local.group_relationship(value, authority_closure=authority, membership_precondition=guard, **extra)
+    # Authorization must retain a known acceptance if the clock goes back;
+    # a historical display view would hide it and allow a conflicting event.
+    with monkeypatch.context() as patch:
+        def rollback_load(*args, **options):
+            hosted = load(*args, **options)
+            return replace(hosted, service=replace(hosted.service,
+                clock=lambda: recipe['invitation']['issued_at_ms']))
+        patch.setattr(social, 'load_owner_runtime', rollback_load)
+        with pytest.raises(OnboardingError, match='membership_precondition_changed'):
+            target.group_relationship({**frozen_accept, 'operation_id': str(uuid.uuid4())},
+                authority_closure=closure(founder_bundle), membership_precondition=guard)
+    # Expensive owner preparation must not allow absent first execution after
+    # the fixed bound. The actual native writer observes its own late clock.
+    expired = {**guard, 'not_after_ms': recipe['acceptance_not_after_ms']}
+    with pytest.raises(OnboardingError, match='acceptance_expired'):
+        target.group_relationship({**frozen_accept, 'operation_id': str(uuid.uuid4())},
+            authority_closure=closure(founder_bundle), membership_precondition=expired)
+    assert {name: load(root, (source if name == 'founder' else target)._reader,
+        authorities=social.public_authorities(bundles[name], {ref: item for ref, item in closure_all.items()
+            if ref != bundles[name]['manifest']['being_ref']})).service.ledger.events() for name, root in roots.items()} == ledger_events
+
+
+def test_owner_refuses_expired_unsubmitted_membership_without_refreshing_frame(group_source, monkeypatch):
+    from clusterctl import onboarding_group_admission as social
+    from daimon_matrix.local_api import request_hash
+    from daimon_matrix.service import HostedWeave
+    source, _first, _peer, peer_bundle, _old = group_source
+    base = source._load(signed=False)
+    value = invitation(source, peer_bundle)
+    guard = dict(schema='cluster-membership-authoring-precondition/v1',
+        **{key: value['params']['payload'][key] for key in ('tribe_ref', 'founder_being_ref', 'founder_epoch', 'invitee_being_ref')},
+        membership_sequence=0, previous_membership_terminal_ref=None,
+        active_members=[value['params']['payload']['founder_being_ref']],
+        not_after_ms=time.time_ns()//1_000_000+60_000)
+    journal = source.outputs/'group-admission'
+    events = base.service.ledger.events()
+    with monkeypatch.context() as patch:
+        def absent(self, request):
+            raise OSError('synthetic stop before native dispatch')
+        patch.setattr(HostedWeave, 'handle', absent)
+        with source.writer(), pytest.raises(OSError, match='stop before native dispatch'):
+            relationship_request(source.root, journal, value, offline=base, membership_precondition=guard)
+    path = journal/value['operation_id']/'invite.json'
+    frame = being_seed._read(path)['request']
+    assert not any(row['request_id'] == frame['request_id'] for row in base.service.ledger.rpc_requests())
+    load = social.load_owner_runtime
+    def late_load(*args, **options):
+        hosted = load(*args, **options)
+        return replace(hosted, service=replace(hosted.service, clock=lambda: guard['not_after_ms']+1))
+    monkeypatch.setattr(social, 'load_owner_runtime', late_load)
+    with pytest.raises(OnboardingError, match='acceptance_expired'):
+        source.group_relationship(value, offline=True, authority_closure=closure(peer_bundle), membership_precondition=guard)
+    retained = being_seed._read(path)
+    assert retained['request'] == frame and retained['retired_requests'] == [] and retained['response'] is None
+    assert base.service.ledger.events() == events
+    # Pending is uncertain, including a possible committed local event; it is
+    # never treated as permission to refresh or perform a new expired action.
+    with source.writer():
+        base.service.ledger.begin_rpc(client_id=frame['client_id'], request_id=frame['request_id'],
+            request_hash=request_hash(frame), method=frame['method'])
+    with pytest.raises(OnboardingError, match='native_uncertain'):
+        source.group_relationship(value, offline=True, authority_closure=closure(peer_bundle), membership_precondition=guard)
+    assert being_seed._read(path) == retained and base.service.ledger.events() == events
+    # The second current-state reduction may consume the remaining monotonic
+    # budget. It must not fall through to the native effect afterwards.
+    from types import SimpleNamespace
+    clock, checks = [0], [0]
+    check = social.check_membership_precondition
+    def exhausted(hosted, value, **options):
+        check(hosted, value, **options)
+        checks[0] += 1
+        if checks[0] == 2:
+            clock[0] = 2_000_000
+    monkeypatch.setattr(social, 'time', SimpleNamespace(time_ns=time.time_ns, monotonic_ns=lambda: clock[0]))
+    monkeypatch.setattr(social, 'check_membership_precondition', exhausted)
+    with source.writer(), pytest.raises(OnboardingError, match='relationship_deadline_expired'):
+        relationship_request(source.root, journal, invitation(source, peer_bundle), offline=base,
+            membership_precondition=guard, deadline_ns=1_000_000)
+    assert checks[0] == 2 and base.service.ledger.events() == events
+
+
 @pytest.mark.parametrize('profile', ['source', 'target'])
 def test_retained_owner_context_recovers_lagging_selector_without_relaxing_serving(group_source, profile):
     from daimon_matrix.canonical import canonical_bytes

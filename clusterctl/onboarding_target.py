@@ -137,6 +137,7 @@ class Target:
 
     def group_relationship(self, value: dict, *, authority_closure: dict,
                            expected_context_sha256: str | None = None,
+                           membership_precondition: dict | None = None,
                            deadline_ns: int | None = None) -> dict:
         """Accept/ingest through native authentication before first managed start."""
         from .onboarding_group_admission import (
@@ -153,7 +154,7 @@ class Target:
             hosted = load_owner_runtime(root, self._reader, authorities=authorities,
                                         qualified_startup=self.qualified_startup)
             return relationship_request(root, self.root / 'group-admission', value,
-                                        offline=hosted, deadline_ns=deadline_ns)
+                offline=hosted, deadline_ns=deadline_ns, membership_precondition=membership_precondition)
 
     def group_publication(self, value: dict, *, authority_closure: dict,
                           expected_context_sha256: str | None = None,
@@ -1009,7 +1010,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(method(packet['command'],
                 authority_closure=packet['authority_closure'], deadline_ns=observation_deadline_ns,
                 **({'expected_context_sha256': packet['expected_context_sha256']}
-                   if 'expected_context_sha256' in packet else {}))))
+                   if 'expected_context_sha256' in packet else {}),
+                **({'membership_precondition': packet['membership_precondition']}
+                   if 'membership_precondition' in packet else {}))))
             return 0
         if args.action == 'peer-identity':
             from .onboarding_peer import identity

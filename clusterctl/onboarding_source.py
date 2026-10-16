@@ -91,6 +91,7 @@ class Source:
     def group_relationship(self, value: dict, *, offline: bool = False,
                            authority_closure: dict | None = None,
                            expected_context_sha256: str | None = None,
+                           membership_precondition: dict | None = None,
                            deadline_ns: int | None = None) -> dict:
         """The qualified owner route supplies approval; no peer text grants it."""
         from .onboarding_group_admission import (
@@ -99,7 +100,7 @@ class Source:
         value = command(value)
         journal = self.outputs / 'group-admission'
         if not offline:
-            if authority_closure or expected_context_sha256 is not None:
+            if authority_closure or expected_context_sha256 is not None or membership_precondition is not None:
                 raise OnboardingError('onboarding_group_relationship_writer_required')
             return relationship_request(self.root, journal, value, deadline_ns=deadline_ns)
         with self.writer():
@@ -108,7 +109,8 @@ class Source:
                 value['operation_id'], authority_closure or {}, expected_context_sha256=expected_context_sha256)
             hosted = load_owner_runtime(self.root, self._reader, authorities=authorities,
                                         qualified_startup=self.qualified_startup)
-            return relationship_request(self.root, journal, value, offline=hosted, deadline_ns=deadline_ns)
+            return relationship_request(self.root, journal, value, offline=hosted, deadline_ns=deadline_ns,
+                membership_precondition=membership_precondition)
 
     def group_publication(self, value: dict, *, authority_closure: dict,
                           expected_context_sha256: str | None = None,
@@ -605,7 +607,9 @@ def main(argv=None) -> int:
                     deadline_ns=args.observation_deadline_ns, **context)
             else:
                 result = source.group_relationship(packet['command'], offline=packet['offline'],
-                    authority_closure=packet['authority_closure'], deadline_ns=args.observation_deadline_ns, **context)
+                    authority_closure=packet['authority_closure'], deadline_ns=args.observation_deadline_ns,
+                    **({'membership_precondition': packet['membership_precondition']}
+                       if 'membership_precondition' in packet else {}), **context)
             print(json.dumps(result))
             return 0
         if lifecycle:

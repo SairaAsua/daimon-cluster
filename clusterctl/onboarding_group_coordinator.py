@@ -20,6 +20,7 @@ from .operation_journal import JournalConflict, OperationJournal
 
 SCHEMA = 'cluster-onboarding-group-coordinator/v1'
 CALLER_SCHEMA = 'cluster-portal-group-admission/v1'
+SOCIAL_CALLER_SCHEMA = 'cluster-portal-group-admission/v2'
 SOURCE_FIELDS = frozenset({'config', 'config_sha256', 'owner_uid', 'owner_gid', 'code',
     'code_digest', 'code_uid', 'venv', 'imports', 'root', 'socket_path', 'lifecycle_journal'})
 SOURCE_PATHS = frozenset({'config', 'code', 'venv', 'imports', 'root', 'socket_path', 'lifecycle_journal'})
@@ -101,11 +102,16 @@ class GroupCoordinator:
                 or not isinstance(admission.get('receivers'), dict) or plan['name'] not in admission['receivers']
                 or any(plan['name'] == item.get('name') for item in before.get('senders', []))
                 or not set(admission['receivers']) <= set(self.settings['owners'])
-                or not isinstance(caller, dict) or set(caller) != {
-                    'schema', 'plan_digest', 'matrix_operation_id', 'owners_sha256'}
-                or caller != dict(schema=CALLER_SCHEMA, plan_digest=digest(plan),
-                    matrix_operation_id=JobStore.operation_id(digest(plan), 'matrix'),
-                    owners_sha256=digest({name: self.settings['owners'][name] for name in admission['receivers']}))):
+                or not isinstance(caller, dict)):
+            raise OnboardingError('onboarding_group_admission_binding_changed')
+        expected: dict = dict(schema=CALLER_SCHEMA, plan_digest=digest(plan),
+            matrix_operation_id=JobStore.operation_id(digest(plan), 'matrix'),
+            owners_sha256=digest({name: self.settings['owners'][name] for name in admission['receivers']}))
+        if caller.get('schema') == SOCIAL_CALLER_SCHEMA:
+            from .onboarding_group_admission import membership_recipe
+            expected.update(schema=SOCIAL_CALLER_SCHEMA, social=membership_recipe(
+                caller.get('social', {}), admission, before.get('senders', [])))
+        if caller != expected:
             raise OnboardingError('onboarding_group_admission_binding_changed')
         entrant = admission['receivers'][plan['name']]
         selected = self.settings['owners'][plan['name']]
