@@ -1409,3 +1409,12 @@ Private custody and inputs stay with their original owners. After importing that
 approval, run `Worker` with only the entrant plan; the approval is not permission
 to enqueue the old member or repeat its onboarding. This prepares owner controls,
 not group membership, first load or communication acceptance.
+
+The retained synthetic TCP authority can use
+`tests.integration.portal_admission_authority` under its existing key owner and
+a finite outer timeout. It reads the registrar high-water, preserves all active
+registrars and uses the existing atomic transition to add the portal registrar.
+Restart with that same recorded map; never replace the old registrar, copy its
+private key or reconstruct holder enrollments. SDK/import-tree construction is
+ordinary preparation; use its supported preparation window before freezing the
+short owner-observation deadline. A read timeout is not an installation failure.
