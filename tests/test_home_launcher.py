@@ -217,3 +217,22 @@ def test_first_response_contains_local_cards_style_and_versioned_public_assets(s
         app.sessions.revoke(home='one',token=token)
         with urlopen(Request(base+'/apps/',headers=headers)) as response:
             assert b'PrivateOwn' not in response.read()
+
+
+def test_operator_launch_routes_are_bounded_same_origin_paths(system):
+    import subprocess
+    from pathlib import Path
+    from clusterctl.homes.launcher import validate_launch_routes, page
+    valid={'schema':'dm.miniapp-routes/v1','origins':{'https://apps.example':[
+        {'prefix':'nexus-','path':'/nexus/'}]}}
+    assert validate_launch_routes(valid)==valid
+    for origins in ({'http://apps.example':valid['origins']['https://apps.example']},
+                    {'https://apps.example/path':valid['origins']['https://apps.example']},
+                    {'https://apps.example':[{'prefix':'nexus-','path':'//foreign/'}]},
+                    {'https://apps.example':[{'prefix':'nexus-','path':'/apps/'}]},
+                    {'https://apps.example':[{'prefix':'nexus-','path':'/nexus/'},{'prefix':'nexus-else','path':'/other/'}]}):
+        with pytest.raises(ValueError):validate_launch_routes({**valid,'origins':origins})
+    app,_=system;app.miniapp_routes=valid;populated(app)
+    html=page(app,'one',None,False).decode()
+    assert 'id="miniapp-routes"' in html and '/apps/launch.js?v=' in html
+    subprocess.run(['node','--test','tests/js/miniapp-launch.cjs'],cwd=Path(__file__).resolve().parents[1],check=True)

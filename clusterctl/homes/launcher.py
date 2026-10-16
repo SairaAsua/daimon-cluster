@@ -17,6 +17,31 @@ ASSETS = Path(__file__).parent / 'launcher'
 CAPACITY = threading.BoundedSemaphore(4)
 
 
+def validate_launch_routes(value):
+    """Operator-selected same-origin paths; selectors are never access grants."""
+    if value is None:
+        return {'schema':'dm.miniapp-routes/v1','origins':{}}
+    if (not isinstance(value,dict) or set(value)!={'schema','origins'} or
+            value['schema']!='dm.miniapp-routes/v1' or not isinstance(value['origins'],dict) or
+            len(value['origins'])>16):
+        raise ValueError('invalid_miniapp_routes')
+    for origin, routes in value['origins'].items():
+        u=urlsplit(origin)
+        if (u.scheme!='https' or not u.netloc or u.path or u.query or u.fragment or
+                u.username or u.password or any(c.isspace() or c in '\\"\'<> ' for c in origin) or
+                not isinstance(routes,list) or not 1<=len(routes)<=16):
+            raise ValueError('invalid_miniapp_route_origin')
+        prefixes=[]
+        for route in routes:
+            if (not isinstance(route,dict) or set(route)!={'prefix','path'} or
+                    not isinstance(route['prefix'],str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',route['prefix']) or
+                    not isinstance(route['path'],str) or not re.fullmatch(r'/[a-zA-Z0-9_-]+/',route['path']) or
+                    route['path']=='/apps/' or any(route['prefix'].startswith(p) or p.startswith(route['prefix']) for p in prefixes)):
+                raise ValueError('invalid_miniapp_route')
+            prefixes.append(route['prefix'])
+    return value
+
+
 def app_url(value):
     if not isinstance(value, str) or len(value) > 2048 or any(ord(c) < 33 for c in value):
         return False
@@ -99,6 +124,8 @@ def catalog(app, home, subject, vpn, *, local_only=False):
 def page(app, home, subject, vpn):
     from .styles import appearance_css
     source = (ASSETS / 'index.html').read_text()
+    routes=json.dumps(getattr(app,'miniapp_routes',validate_launch_routes(None))).replace('&','\\u0026').replace('<','\\u003c').replace('>','\\u003e')
+    source=source.replace('</body>','<script id="miniapp-routes" type="application/json">'+routes+'</script></body>')
     value = app.styles.resolved(home, 'apps', subject) if app.styles else {}
     css = appearance_css(value)
     fonts = '<link id="homemaker-font-assets" rel="stylesheet" href="/design-assets/styles/fonts.css">' if css and value.get('font_assets') is True else ''
@@ -122,6 +149,7 @@ def page(app, home, subject, vpn):
     source = source.replace('</body>', '<script id="initial-apps" type="application/json">'+initial_json+'</script></body>')
     for url, path in (('/apps/launcher.css',ASSETS/'launcher.css'),
                       ('/apps/launcher.js',ASSETS/'launcher.js'),
+                      ('/apps/launch.js',ASSETS/'launch.js'),
                       ('/home-style.js',ASSETS.parent/'assets/home-style.js')):
         source = source.replace('"'+url+'"', '"'+url+'?v='+hashlib.sha256(path.read_bytes()).hexdigest()[:16]+'"')
     return source.encode()
@@ -149,6 +177,7 @@ def routes(handler, app, path, home, subject, vpn):
         return True
     files = {'/apps/': ('index.html', 'text/html; charset=utf-8'),
              '/apps/launcher.js': ('launcher.js', 'text/javascript; charset=utf-8'),
+             '/apps/launch.js': ('launch.js','text/javascript; charset=utf-8'),
              '/apps/launcher.css': ('launcher.css', 'text/css; charset=utf-8')}
     if path not in files:
         return False
