@@ -42,6 +42,59 @@ def retain(path: Path, value: dict) -> None:
         being_seed._write(path, value)
 
 
+def prepare_existing_member(root: Path, *, existing_host: Path, name: str) -> dict:
+    """Reuse an existing synthetic member's exact public host approvals.
+
+    Private custody, inputs and identity stay in their original owners. Run the
+    subsequent Worker with only the entrant plan: importing an old approval is
+    not a request to enqueue or repeat that member's onboarding.
+    """
+    if os.geteuid() != 0 or name == NAME or not being_seed.NAME.fullmatch(name):
+        raise ValueError('an existing synthetic member and root controller are required')
+    scope = being_seed._read(root/'scope.json')
+    original = HostConfig.load(existing_host)
+    current = HostConfig.load(root/'host.json')
+    if (not original.qualification or not current.qualification
+            or scope['name'] != NAME or not scope['synthetic']
+            or scope['original_host_sha256'] != digest(being_seed._read(existing_host))
+            or original.consent_uid != 0 or current.consent_uid != 0
+            or original.custody_policy is not None or current.custody_policy is not None
+            or original.code != current.code):
+        raise ValueError('only the retained synthetic host approval can be reused')
+    grant = being_seed._read(original.grants/(name+'.json'))
+    plan = grant['plan']
+    prior = HostBackend(original)
+    if (plan['name'] != name or not prior.authorize(plan, digest(plan))
+            or not prior._ceremony(plan).authorize(plan)):
+        raise ValueError('the original exact member approval is required')
+    decision = prior._decision(plan)
+    if decision is None:
+        raise ValueError('the original member consent is required')
+    proposal = onboarding_consent.Reviews(original.progress, worker_uid=0).read(name, owner=plan['owner'])
+    retain(current.grants/(name+'.json'), grant)
+    retain(current.custody_grants/(name+'.json'),
+        being_seed._read(original.custody_grants/(name+'.json')))
+    onboarding_consent.Reviews(current.progress, worker_uid=0).publish(proposal)
+    parent = private_directory(current.consent_state/'being-seeds', create=True)
+    directory = private_directory(parent/name, create=True)
+    retain(directory/('consent-'+proposal['review_digest']+'.json'), decision)
+    backend = HostBackend(current)
+    if (not backend.authorize(plan, digest(plan))
+            or not backend._ceremony(plan).authorize(plan)
+            or backend._decision(plan) != decision):
+        raise ValueError('the retained public controls did not validate')
+    group = being_seed._read(current.group_admission)
+    entrant = group['owners'][NAME]
+    owner = dict(profile='guest', plan=plan, candidate=entrant['candidate'],
+        root='/home/agent/.local/state/daimon-onboarding/'+name+'/matrix/package/runtime')
+    if name in group['owners'] and group['owners'][name] != owner:
+        raise ValueError('preserve the existing owner binding')
+    group['owners'][name] = owner
+    being_seed._write(current.group_admission, group)
+    return dict(prepared=True, name=name, approvals_reused=True, private_custody_copied=False,
+        model_turns_started=0, enqueue_only=NAME, group_admitted=False)
+
+
 def prepare(root: Path, *, existing_host: Path, artifact: Path, source_observation: Path,
             admission_config: Path) -> dict:
     if os.geteuid() != 0:

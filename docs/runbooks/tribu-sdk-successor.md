@@ -1402,3 +1402,10 @@ plan to repair its input digest. Cleanup targets only the recorded synthetic
 instance/profile/volume after matching its `user.dm.onboarding-plan`; keep custody,
 history and journals while qualification is unfinished. No administrative access,
 real account, bot, model turn or production instance is part of this fixture.
+
+For its existing synthetic guest, `prepare_existing_member` reuses the original
+exact host/custody grants and validated consent in the isolated coordinator.
+Private custody and inputs stay with their original owners. After importing that
+approval, run `Worker` with only the entrant plan; the approval is not permission
+to enqueue the old member or repeat its onboarding. This prepares owner controls,
+not group membership, first load or communication acceptance.
