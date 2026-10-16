@@ -23,6 +23,101 @@ from tests.test_admission import _key
 from tests.test_onboarding_target import receiving
 
 
+def test_qualified_offline_child_uses_selected_code_and_preserves_identity(tmp_path, monkeypatch):
+    """Opt-in installed artifact qualification; no production binding is read."""
+    artifact_path = os.environ.get('CLUSTER_QUALIFIED_ADMISSION_ARTIFACT')
+    if artifact_path is None:
+        pytest.skip('requires a prepared synthetic public-code/SDK artifact')
+    from clusterctl import onboarding_code_successor, onboarding_sdk
+    from clusterctl.onboarding import digest
+    artifact = Path(artifact_path)
+    selected = json.loads((artifact / 'artifact.json').read_bytes())
+    code = artifact / 'receiving-code'
+    onboarding_code_successor.verify(code, selected['runtime_digest'], artifact / 'base',
+        selected['base_release_digest'], uid=os.geteuid())
+    parameters = onboarding_code_successor.sdk_parameters(code, uid=os.geteuid())
+    assert parameters == {key:selected[key] for key in ('matrix_commit', 'matrix_wheel_sha256')}
+    venv = onboarding_sdk.observe(artifact / 'qualification-home', code,
+        code_uid=os.geteuid(), **parameters)
+    imports = onboarding_sdk.runtime_imports(venv, code, code_uid=os.geteuid(), **parameters)
+    ceremony, plan, blank = receiving(tmp_path)
+    # Keep the genuine child failure diagnostic in this synthetic fixture.
+    # The production launcher intentionally does not publish arbitrary stderr.
+    from clusterctl import onboarding_runtime
+    popen = onboarding_runtime.subprocess.Popen
+    stderr_path = tmp_path/'qualified-child.stderr'
+    def launch(*args, **kwargs):
+        command = list(args[0])
+        if '-c' in command:
+            script = command.index('-c') + 1
+            if 'child_main' in command[script]:
+                command[script] = ('import faulthandler; '
+                    'faulthandler.dump_traceback_later(15, repeat=True);\n' + command[script])
+        with stderr_path.open('ab') as diagnostic:
+            return popen(command, *args[1:], **{**kwargs, 'stderr':diagnostic})
+    # The native Unix socket needs a short home. Dependencies remain on the
+    # prepared artifact volume; no second install or real-body state is used.
+    with tempfile.TemporaryDirectory(prefix='dm-', dir='/tmp') as short:
+        target = Target(Path(short), plan, blank.genesis, code=code,
+            code_uid=os.geteuid(), code_digest=selected['runtime_digest'])
+        target.activate(ceremony.authorize_target(plan, target.prepare()))
+        target.apply_credential(ceremony.authorize_credential(plan, target.credential_request()))
+        holder = ReceivingHolder(target)
+        registrar = _key(tmp_path/'registrar.pem', 'registrar')
+        signer = _key(tmp_path/'authority.pem', 'authority')
+        # Only the large dependency artifact needs the extra disk. The actual
+        # admission authority uses the short local state volume, like this host's
+        # service; a slow archive volume must not dominate its two-second RPC.
+        authority = AdmissionAuthority(Path(short)/'admission-authority', signer=signer,
+            holder_registrars={registrar.key_id:registrar.public_key})
+        server = AdmissionTCPServer(('127.0.0.1', 0), authority)
+        thread = serve_in_thread(server)
+        endpoint = AdmissionEndpoint.network('127.0.0.1', server.server_address[1])
+        client = holder.client(endpoint, authority_key_id=signer.key_id, authority_public_key=signer.public_key)
+        owned = None
+        try:
+            client.enroll(enrollment(plan, holder.request(), ceremony.admission_coordinates(plan), registrar))
+            root = target.package/'runtime'
+            original = {name:(root/name).read_bytes() for name in ('runtime.json', 'custody.json')}
+            origin = target.observe()['receipt']['origin']
+            observer = LocalClient(root/'matrix.sock', ClientConfig.load(root/'client.json',
+                bytearray((root/'client.key').read_bytes())))
+            # Only the parent launch selection is supplied. The actual exec'd
+            # child must independently verify the closed code/import context.
+            with monkeypatch.context() as context:
+                context.setattr(sys, 'prefix', str(venv))
+                context.setattr(onboarding_runtime.subprocess, 'Popen', launch)
+                owned = AdmittedDaemon(target, client)
+                presence = owned.start(receive_only=True)
+            assert presence['origin'] == origin
+            assert owned.supervisor.verify_current(minimum_remaining_s=1) is not None
+            response = observer.scope_me()[1]
+            assert response['ok'] and response['result']['body']['state'] == 'running'
+            assert response['result']['origin'] == origin
+            loaded = target.running(admitted=True)['runtime_status']['loaded_runtime']
+            assert loaded['qualified_startup']['code_digest'] == selected['runtime_digest']
+            assert loaded['qualified_startup']['matrix_wheel_sha256'] == selected['matrix_wheel_sha256']
+            command = (Path('/proc')/str(owned.process.pid)/'cmdline').read_bytes().split(b'\0')
+            assert command[1:4] == [b'-B', b'-I', b'-S'] and str(imports).encode() in command
+            assert digest(target.document_bundle()) == loaded['runtime_bundle_sha256']
+            assert all((root/name).read_bytes() == raw for name,raw in original.items())
+        finally:
+            try:
+                if owned is not None:
+                    owned.close()
+                if owned is None or owned.supervisor is None:
+                    # An uncertain acquire can retain a lease without a child.
+                    # Cleanup observes/releases that same session, not a replay.
+                    client.release()
+                assert client.current() is None
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(5)
+        assert not thread.is_alive()
+        assert all((root/name).read_bytes() == raw for name,raw in original.items())
+
+
 def test_actual_receiving_scope_reports_running_only_under_current_shared_lease(tmp_path):
     ceremony, plan, blank = receiving(tmp_path)
     ceremony.prepare(plan, identity_mode='first')

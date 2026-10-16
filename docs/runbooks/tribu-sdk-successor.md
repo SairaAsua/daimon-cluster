@@ -1331,3 +1331,17 @@ Introducing `onboarding_transfer.py` into an older base also captures its pinned
 support file, preserves every existing support/context byte and rejects other
 asset additions. A missing helper is a package-closure defect, not a reason to
 rebuild an unchanged SDK or alter an independent production candidate.
+
+The opt-in installed child case is
+`tests/test_onboarding_runtime.py::test_qualified_offline_child_uses_selected_code_and_preserves_identity`.
+`CLUSTER_QUALIFIED_ADMISSION_ARTIFACT` selects its prepared synthetic artifact;
+the ordinary exact-VCS environment owns fixture custody preparation, while the
+actual child executes the selected offline interpreter/code/imports. It checks
+loaded code/wheel pins, signed current admission, native scope, preserved identity
+and custody, and cleanup. This is a receive-only child qualification, not the
+full publication/cohort/worker/delivery journey or a live deployment.
+Keep its short native home explicitly under `/tmp`: a process-wide `TMPDIR`
+pointing at the artifact disk otherwise lengthens the Unix socket beyond its
+limit. The large SDK stays on that disk; only small native/authority state needs
+the short local home. Retain synthetic child diagnostics on failure rather than
+changing production APIs, rebuilding dependencies or increasing readiness limits.
