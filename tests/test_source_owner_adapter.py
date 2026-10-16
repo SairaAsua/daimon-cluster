@@ -108,6 +108,25 @@ def test_owner_private_control_paths_and_public_stdin_stay_in_owner_cli(adapter)
     )
 
 
+def test_technical_messaging_uses_only_the_qualified_owner_and_public_stdin(adapter):
+    client, result, calls = adapter
+    result.clear()
+    result.update(schema='dm.local.response/v1', ok=True, error=None, result={'retained': True})
+    binding = client.root/'attachment/binding.json'
+    request = dict(channel_id='tribe', send_id=str(uuid.uuid4()))
+    assert client.messaging('messaging_delivery', request, binding=binding) == result
+    argv, options = calls[-1]
+    assert 'clusterctl.onboarding_owner_client' in argv
+    assert json.loads(options['input']) == request
+    assert options['user'] == client.owner_uid and options['extra_groups'] == ()
+    with pytest.raises(OnboardingError, match='qualified_native_peer_tool_required'):
+        client.messaging('messaging_send', request, binding=binding)
+    result['ok'] = False
+    with pytest.raises(OnboardingError, match='owner_unavailable'):
+        client.messaging('messaging_delivery', request, binding=binding)
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize('publication', [False, True])
 @pytest.mark.parametrize('expected_context', [None, 'a'*64])
 def test_group_relationship_uses_qualified_owner_and_only_public_stdin(adapter, publication, expected_context):

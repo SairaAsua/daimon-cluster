@@ -1225,6 +1225,25 @@ those fields against the authenticated native origin without discarding its
 principal. Retain the full origin in the original load intent and preservation
 proof; the loaded-process observer still requires that exact full origin.
 
+Technical communication uses the existing qualified owner CLI for both Source
+and guests, with public parameters on stdin and no host access to private client
+material. Fresh send/reply requires a fixed authoring expiry. The original
+absolute observation deadline survives SDK startup and durable request
+preparation; expiry is checked immediately before dispatch. The frozen native
+client is replaced with that deadline while retaining its configuration and
+factories. Inspection can use a later finite observation budget without
+authorizing another send or extending the original authoring horizon.
+
+The protected technical-speech contract selects the exact group author, entrant
+direct/reply author, direct destination, bounded text and signed group parent.
+Delivery evidence distinguishes author retention from each actual receiving
+body's signed receipt, full confirmed human echo and exact reply parent. Expired
+transport does not erase later authenticated intake proof. These contracts and
+the owner route are components of the unfinished finisher; their presence does
+not enable interruption, automatic completion or the worker's full admission.
+The additive SDK evidence projection also needs its qualified future SDK pin;
+it does not replace the independent prepared2144 production candidate.
+
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry
 rechecks the real SDK publication/CAS for application/visibility changes even if

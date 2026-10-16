@@ -24,10 +24,106 @@ SOCIAL_CALLER_SCHEMA = 'cluster-portal-group-admission/v2'
 SOURCE_FIELDS = frozenset({'config', 'config_sha256', 'owner_uid', 'owner_gid', 'code',
     'code_digest', 'code_uid', 'venv', 'imports', 'root', 'socket_path', 'lifecycle_journal'})
 SOURCE_PATHS = frozenset({'config', 'code', 'venv', 'imports', 'root', 'socket_path', 'lifecycle_journal'})
+COMMUNICATION_SCHEMA = 'cluster-admission-communication/v1'
 
 
 def _path(value) -> bool:
     return isinstance(value, str) and Path(value).is_absolute() and '..' not in Path(value).parts
+
+
+def communication_recipe(value: dict, row: dict, admission: dict) -> dict:
+    """The protected operation explicitly selects its finite technical speech.
+
+    This is an execution opt-in, not interruption consent. Old preparation-only
+    operations cannot acquire effects by observing a later SDK or worker.
+    """
+    from daimon_matrix.tribe_conversation import direct_destination
+    try:
+        social = row['intended_transition']['portal_admission']['social']
+        founder, entrant = social['founder_owner'], social['entrant_owner']
+        if (set(value) != {'schema', 'expires_at_ms', 'group', 'direct', 'reply'}
+                or value['schema'] != COMMUNICATION_SCHEMA
+                or type(value['expires_at_ms']) is not int
+                or not 0 < value['expires_at_ms'] <= admission['activation']['expires_at_ms']):
+            raise ValueError
+        for step, name in (('group', founder), ('direct', entrant), ('reply', entrant)):
+            item = value[step]
+            if (set(item) != {'sender', 'text'} | ({'destination'} if step == 'direct' else {'parent'} if step == 'reply' else set())
+                    or item['sender'] != dict(owner=name, **{key:admission['receivers'][name][key]
+                        for key in ('being_ref', 'embodiment_id')})
+                    or not isinstance(item['text'], str) or not 1 <= len(item['text']) <= 2048):
+                raise ValueError
+        destination = direct_destination(value['direct']['destination'])
+        if (destination != value['direct']['destination']
+                or destination['being_ref'] != admission['receivers'][founder]['being_ref']
+                or destination['kind'] == 'body' and destination['embodiment_id'] != admission['receivers'][founder]['embodiment_id']
+                or value['reply']['parent'] != 'group'):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise OnboardingError('onboarding_group_communication_scope_required') from None
+    return copy.deepcopy(value)
+
+
+def communication_result(response: dict, intent: dict, *, tribe_ref: str, parent: dict | None = None) -> dict:
+    """Qualify authenticated projections; author retention is never uptake."""
+    try:
+        result = response['result']
+        parameters = intent['parameters']
+        direct = intent['step'] == 'direct'
+        if (intent['step'] not in {'group', 'direct', 'reply'}
+                or (intent['step'] == 'reply') != (parent is not None)
+                or parameters.get('channel_id') != 'tribe'
+                or response.get('schema') != 'dm.local.response/v1' or response.get('ok') is not True
+                or response.get('error') is not None or not isinstance(result, dict)
+                or result.get('schema') != ('dm.tribe.direct-delivery/v1' if direct else 'dm.tribe.delivery/v1')
+                or result['send_id'] != parameters['send_id'] or result['tribe_ref'] != tribe_ref
+                or result['author'] != {key:intent['sender'][key] for key in ('being_ref', 'embodiment_id')}
+                or str(uuid.UUID(result['message_id'])) != result['message_id']
+                or re.fullmatch('[0-9a-f]{64}', result['message_hash']) is None):
+            raise ValueError
+        if parent is None:
+            if result['thread_id'] != parameters['thread_id'] or result['response_context'] is not None:
+                raise ValueError
+        elif (parameters.get('message_id') != parent['message_id']
+                or parameters.get('received_channel_id') != 'tribe'
+                or result['thread_id'] != parent['thread_id'] or result['response_context'] != dict(
+                message_id=parent['message_id'], message_hash=parent['message_hash'],
+                sender_being_ref=parent['author']['being_ref'], sender_embodiment_id=parent['author']['embodiment_id'])):
+            raise ValueError
+        visibility = result['visibility']
+        if (not isinstance(visibility, dict) or visibility.get('echo_state') != 'confirmed'
+                or type(visibility.get('part_count')) is not int or visibility['part_count'] <= 0
+                or visibility.get('confirmed_parts') != visibility['part_count']):
+            raise ValueError
+        if direct:
+            target = parameters['destination']
+            if (any(result.get('destination', {}).get(key) != value for key,value in target.items())
+                    or any(item['being_ref'] != target['being_ref']
+                        or target['kind'] == 'body' and item['embodiment_id'] != target['embodiment_id']
+                        for item in result['audience'])):
+                raise ValueError
+        elif 'destination' in result:
+            raise ValueError
+        audience = {(item['membership_ref'], item['embodiment_id']):item for item in result['audience']}
+        if len(audience) != len(result['audience']):
+            raise ValueError
+        inbound = []
+        for leg in result['semantic']['legs']:
+            item = audience.get((leg['recipient_id'], leg['receipt_origin_embodiment_id']))
+            if item is None or leg['message_id'] != result['message_id'] or leg['thread_id'] != result['thread_id']:
+                raise ValueError
+            if (leg['state'] == 'delivered' and (item['being_ref'], item['embodiment_id']) !=
+                    (result['author']['being_ref'], result['author']['embodiment_id'])):
+                if (str(uuid.UUID(leg['terminal_receipt_event_id'])) != leg['terminal_receipt_event_id']
+                        or re.fullmatch('[0-9a-f]{64}', leg['terminal_receipt_hash']) is None):
+                    raise ValueError
+                inbound.append(dict(being_ref=item['being_ref'], embodiment_id=item['embodiment_id'],
+                    receipt_id=leg['terminal_receipt_event_id'], receipt_sha256=leg['terminal_receipt_hash']))
+        return dict(message_id=result['message_id'], message_hash=result['message_hash'],
+            thread_id=result['thread_id'], author=result['author'], response_context=result['response_context'],
+            visibility=visibility, inbound=inbound, response_sha256=digest(response))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise OnboardingError('receiving_communication_unobserved') from None
 
 
 def configuration(path: Path) -> dict:

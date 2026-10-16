@@ -51,6 +51,104 @@ def test_chat_successor_uses_closed_startup_and_qualifies_before_adapter(tmp_pat
     assert len(calls) == 2, 'failed qualification must never start the adapter'
 
 
+def technical_adapter(monkeypatch, parameters, calls, *, prepare=lambda: None, send=lambda: None):
+    """Keep native argument validation; replace only private binding and I/O."""
+    import io
+    from daimon_matrix import agent_chat
+    from daimon_matrix.client import LocalClient
+    selected = dict(schema='dm.agent-chat/v1', incoming_channels=['tribe'], outgoing_channels=['tribe'])
+    monkeypatch.setattr(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(json.dumps(parameters).encode())))
+    monkeypatch.setattr(agent_chat, 'load_binding', lambda path: selected)
+    private_config = SimpleNamespace()
+    def emit(client, request):
+        assert client.config is private_config
+        calls.append(('sent', request, client.deadline_ns))
+        send()
+        return dict(schema='dm.local.response/v1', ok=True, error=None, result={'retained':True},
+            auth={'private':'must-not-cross-owner-boundary'})
+    monkeypatch.setattr(LocalClient, 'send', emit)
+    def request(method, value, operation_id):
+        prepared = dict(method=method, params=value, operation_id=operation_id)
+        calls.append(('prepared', prepared))
+        prepare()
+        return prepared
+    adapter = SimpleNamespace(_prepare_operation=request)
+    def bridge(value, *, timeout):
+        adapter.client = LocalClient(Path('/synthetic/tribe.sock'), private_config, timeout)
+        return adapter
+    monkeypatch.setattr(agent_chat, 'bridge', bridge)
+    return adapter
+
+
+@pytest.mark.parametrize('expired_at', [None, 'startup', 'durability'])
+@pytest.mark.parametrize('method', ['messaging_send', 'messaging_reply'])
+def test_technical_authoring_expiry_is_checked_at_emission(tmp_path, monkeypatch, capsys, expired_at, method):
+    from clusterctl import onboarding_owner_client as owner, onboarding_code_successor
+    calls = []
+    clock = [1_000_000_000]
+    monkeypatch.setattr(owner, 'time', SimpleNamespace(time_ns=lambda: clock[0], monotonic_ns=lambda: 0))
+    monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda *a, **k: {'matrix_commit':'b'*40})
+    def startup(*args, **kwargs):
+        calls.append('qualified')
+        if expired_at == 'startup':
+            clock[0] = 3_000_000_000
+        return {}
+    def prepare():
+        if expired_at == 'durability':
+            clock[0] = 3_000_000_000
+    monkeypatch.setattr(owner.onboarding_sdk, 'qualified_startup', startup)
+    parameters = dict(channel_id='tribe', send_id='f396883c-66eb-4f96-a49a-d2c0469b0b80', text='Technical check')
+    if method == 'messaging_reply':
+        parameters.update(received_channel_id='tribe', message_id='ae98c945-5440-44b1-bc91-74b2b5e18e8a')
+    else:
+        parameters['thread_id'] = 'ae98c945-5440-44b1-bc91-74b2b5e18e8a'
+    technical_adapter(monkeypatch, parameters, calls, prepare=prepare)
+    arguments = ['--code-digest', 'a'*64, '--binding', str(tmp_path/'binding.json'),
+        '--authoring-expires-at-ms', '2000', 'call', method]
+    if expired_at:
+        with pytest.raises(OnboardingError, match='communication_authorization_expired'):
+            owner.main(arguments)
+        assert not any(isinstance(call, tuple) and call[0] == 'sent' for call in calls)
+        assert len(calls) == (1 if expired_at == 'startup' else 2)
+    else:
+        assert owner.main(arguments) == 0
+        prepared, sent = calls[1:]
+        assert sent[1] is prepared[1]
+        assert sent[1]['operation_id'] == parameters['send_id']
+        assert sent[2] == 1_000_000_000
+        public = json.loads(capsys.readouterr().out)
+        assert public['ok'] and 'auth' not in public
+
+
+@pytest.mark.parametrize('expired_at', [None, 'durability', 'response', 'tiny-budget'])
+def test_qualified_technical_tool_preserves_original_owner_deadline(tmp_path, monkeypatch, expired_at):
+    from clusterctl import onboarding_owner_client as owner
+    calls = []
+    clock = [1_000_000_000]
+    monkeypatch.setattr(owner, 'time', SimpleNamespace(monotonic_ns=lambda: clock[0]))
+    def prepare():
+        clock[0] = (3_000_000_000 if expired_at == 'durability' else
+            1_005_000_000 if expired_at == 'tiny-budget' else 2_000_000_000)
+    def send():
+        if expired_at == 'response':
+            clock[0] = 3_000_000_000
+    parameters = dict(channel_id='tribe', send_id='f396883c-66eb-4f96-a49a-d2c0469b0b80')
+    adapter = technical_adapter(monkeypatch, parameters, calls, prepare=prepare, send=send)
+    options = dict(startup={}, binding=tmp_path/'binding.json', code=tmp_path, code_uid=0)
+    if expired_at in {'durability', 'response'}:
+        with pytest.raises(OnboardingError, match='owner_deadline_expired'):
+            owner._serve_chat(['call','messaging_delivery','--timeout','45'], deadline_ns=3_000_000_000, **options)
+        assert len(calls) == (1 if expired_at == 'durability' else 2)
+    else:
+        deadline = 1_010_000_000 if expired_at == 'tiny-budget' else 3_000_000_000
+        assert owner._serve_chat(['call','messaging_delivery','--timeout','45'], deadline_ns=deadline, **options) == 0
+        assert calls[-1][2] == adapter.client.deadline_ns == deadline
+    count = len(calls)
+    with pytest.raises(OnboardingError, match='owner_deadline_expired'):
+        owner._serve_chat(['call','messaging_delivery'], deadline_ns=1_000_000_000, **options)
+    assert len(calls) == count
+
+
 def test_tooling_owner_entry_requires_explicit_native_home_after_qualification(tmp_path, monkeypatch, capsys):
     from clusterctl import onboarding_owner_client as owner, onboarding_code_successor
     monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda *a, **k: {'matrix_commit': 'b'*40})
@@ -229,6 +327,43 @@ def test_host_tooling_reconciliation_uses_owner_cli_without_private_sdk_reads(tm
     result['code_digest'] = 'c'*64
     with pytest.raises(OnboardingError, match='verification_failed'):
         client.reconcile(plan(), operation_id, **arguments)
+
+
+@pytest.mark.parametrize('method', ['messaging_delivery', 'messaging_send'])
+def test_guest_technical_messaging_preserves_qualified_uid_and_public_stdin(tmp_path, monkeypatch, method):
+    from clusterctl import onboarding_owner_client as owner, onboarding_code_successor
+    from tests.test_onboarding import plan
+    sdk = {'matrix_commit':'b'*40, 'wheels':[]}
+    result = dict(schema='dm.local.response/v1', ok=True, error=None, result={'retained':True})
+    parameters = dict(channel_id='tribe', send_id='f396883c-66eb-4f96-a49a-d2c0469b0b80')
+    calls = []
+    def dispatch(value, command, **options):
+        assert json.loads(options['input_data']) == parameters
+        assert command[:8] == ['exec','dm-fixture','--user','1000','--group','1000','--env','HOME=/home/agent']
+        assert 'clusterctl.onboarding_owner_client' in command
+        assert command[-4:-2] == ['call', method]
+        assert options['timeout_seconds'] > 0 and options['deadline_ns'] > 0
+        if method == 'messaging_send':
+            assert command[command.index('--authoring-expires-at-ms')+1] == '2000'
+        else:
+            assert '--authoring-expires-at-ms' not in command
+        calls.append(command)
+        return json.dumps(result)
+    def paths(value, base, *, candidate):
+        assert candidate == (tmp_path/'candidate','a'*64)
+        return Path('/public/selected'), [], {}
+    host = SimpleNamespace(authorize=lambda *a: True, _receiving_base=lambda p: Path('/public/base'),
+        _runtime_paths=paths, _mounted=lambda *a, **k: True, instance=lambda p:'dm-fixture', _dispatch=dispatch)
+    monkeypatch.setattr(owner.onboarding_sdk, 'verify', lambda *a, **k:sdk)
+    monkeypatch.setattr(onboarding_code_successor, 'sdk_parameters', lambda *a, **k:{})
+    client = OwnerClient(host)
+    options = dict(candidate=(tmp_path/'candidate','a'*64), binding=Path('/home/agent/group/binding.json'),
+        **({'authoring_expires_at_ms':2000} if method == 'messaging_send' else {}))
+    assert client.messaging(plan(), method, parameters, **options) == result
+    result['schema'] = 'not-native'
+    with pytest.raises(OnboardingError, match='communication_unobserved'):
+        client.messaging(plan(), method, parameters, **options)
+    assert len(calls) == 2
 
 
 @pytest.fixture

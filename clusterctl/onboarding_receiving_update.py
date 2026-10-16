@@ -458,6 +458,13 @@ class GuestGroupClient:
         return OwnerClient(self.backend).prepare_attachment(self.plan, request, candidate=self.candidate,
             attachment=attachment, codex_home=codex_home, timeout_seconds=self.timeout_seconds, deadline_ns=self.deadline_ns)
 
+    def messaging(self, method: str, parameters: dict, *, binding: Path,
+                    authoring_expires_at_ms: int | None = None) -> dict:
+        from .onboarding_owner_client import OwnerClient
+        return OwnerClient(self.backend).messaging(self.plan, method, parameters,
+            candidate=self.candidate, binding=binding, timeout_seconds=self.timeout_seconds,
+            deadline_ns=self.deadline_ns, authoring_expires_at_ms=authoring_expires_at_ms)
+
 
 def _run_owner(argv: list[str], **options):
     """Bound and reap one technical owner CLI and its probe descendants."""
@@ -510,7 +517,7 @@ class SourceGroupClient:
         self.deadline_ns: int | None = None
 
     def _call(self, arguments: list[str], *, command: dict | None = None,
-              module: str = 'clusterctl.onboarding_source') -> dict:
+              module: str = 'clusterctl.onboarding_source', native_response: bool = False) -> dict:
         deadline = time.monotonic_ns() + int(self.timeout_seconds * 1_000_000_000)
         if self.deadline_ns is not None:
             deadline = min(deadline, self.deadline_ns)
@@ -544,7 +551,11 @@ class SourceGroupClient:
             if result.returncode or len(result.stdout.encode()) > being_seed.MAX_SELECTION:
                 raise OnboardingError('receiving_source_owner_unavailable')
             value = json.loads(result.stdout)
-            if not isinstance(value, dict) or 'error' in value:
+            if (not isinstance(value, dict)
+                    or (not native_response and 'error' in value)
+                    or native_response and (module != 'clusterctl.onboarding_owner_client'
+                        or value.get('schema') != 'dm.local.response/v1'
+                        or value.get('ok') is not True or value.get('error') is not None)):
                 raise OnboardingError('receiving_source_owner_unavailable')
             after = self.config.lstat()
             if (after.st_dev, after.st_ino, after.st_uid, after.st_gid, after.st_mode) != (
@@ -642,6 +653,17 @@ class SourceGroupClient:
                 or result.get('qualification', {}).get('code_digest') != self.code_digest):
             raise OnboardingError('receiving_source_owner_observation_conflict')
         return result
+
+    def messaging(self, method: str, parameters: dict, *, binding: Path,
+                    authoring_expires_at_ms: int | None = None) -> dict:
+        """Run the same configured messaging-only tools under the actual owner."""
+        if (method not in {'messaging_send', 'messaging_reply', 'messaging_delivery'}
+                or method != 'messaging_delivery' and authoring_expires_at_ms is None):
+            raise OnboardingError('qualified_native_peer_tool_required')
+        return self._call(['--binding', str(binding),
+            *([] if authoring_expires_at_ms is None else ['--authoring-expires-at-ms', str(authoring_expires_at_ms)]),
+            'call', method, '--timeout', str(self.timeout_seconds)], command=parameters,
+            module='clusterctl.onboarding_owner_client', native_response=True)
 
     def lifecycle_operation(self, operation_id: str) -> dict:
         """Read the retained owner journal under that owner, never as root."""

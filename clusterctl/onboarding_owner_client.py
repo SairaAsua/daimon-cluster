@@ -37,6 +37,7 @@ _PUBLIC_STARTUP_ERRORS = frozenset({
     'receiving_native_tooling_changed', 'receiving_native_tooling_group_changed',
     'receiving_native_tooling_identity_changed', 'receiving_native_tooling_unobserved',
     'receiving_owner_deadline_expired',
+    'receiving_communication_authorization_expired', 'receiving_communication_unobserved',
 })
 
 
@@ -147,9 +148,15 @@ def observe_selected_tooling(payload: dict, *, code: Path, startup: dict,
         'tribe_channel': recipe['tribe_channel'], 'group_socket_sha256': digest({'socket': group['socket']})}
 
 
-def _serve_chat(arguments: list[str], *, startup: dict, binding: Path, code: Path, code_uid: int) -> int:
+def _serve_chat(arguments: list[str], *, startup: dict, binding: Path, code: Path, code_uid: int,
+                deadline_ns: int | None = None, authoring_expires_at_ms: int | None = None) -> int:
     from daimon_matrix import agent_chat
     if arguments != ['mcp']:
+        if (deadline_ns is not None or authoring_expires_at_ms is not None) and arguments[:1] == ['call']:
+            return _bounded_chat_call(arguments, binding=binding, deadline_ns=deadline_ns,
+                authoring_expires_at_ms=authoring_expires_at_ms)
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('receiving_owner_deadline_expired')
         return agent_chat.main(['--binding', str(binding), *arguments])
     import asyncio
     installed = _installer(code, code_uid)
@@ -160,6 +167,56 @@ def _serve_chat(arguments: list[str], *, startup: dict, binding: Path, code: Pat
     server.version = tooling_version(startup, fingerprint)
     asyncio.run(agent_chat._run_stdio(server))
     return 0
+
+
+def _bounded_chat_call(arguments: list[str], *, binding: Path, deadline_ns: int | None,
+                        authoring_expires_at_ms: int | None) -> int:
+    """Reuse the native request journal with one budget through preparation/send."""
+    import sys
+    from dataclasses import replace
+    from daimon_matrix import agent_chat
+    from daimon_matrix.mcp_server import MESSAGING_TOOL_CONTRACTS, _messaging_tool_params, _public_response
+    if (len(arguments) not in {2, 4} or arguments[1] not in MESSAGING_TOOL_CONTRACTS
+            or len(arguments) == 4 and arguments[2] != '--timeout'):
+        raise OnboardingError('qualified_native_peer_tool_required')
+    timeout = 45.0 if len(arguments) == 2 else float(arguments[3])
+    if not 0 < timeout <= 60:
+        raise OnboardingError('receiving_owner_deadline_expired')
+    original_deadline = time.monotonic_ns() + int(timeout * 1_000_000_000)
+    if deadline_ns is not None:
+        original_deadline = min(original_deadline, deadline_ns)
+    if authoring_expires_at_ms is not None:
+        if arguments[1] not in {'messaging_send', 'messaging_reply'}:
+            raise OnboardingError('qualified_native_peer_tool_required')
+        original_deadline = min(original_deadline, time.monotonic_ns() +
+            (authoring_expires_at_ms - time.time_ns() // 1_000_000) * 1_000_000)
+    def budget():
+        if authoring_expires_at_ms is not None and time.time_ns() // 1_000_000 >= authoring_expires_at_ms:
+            raise OnboardingError('receiving_communication_authorization_expired')
+        remaining = (original_deadline - time.monotonic_ns()) / 1_000_000_000
+        if remaining <= 0:
+            raise OnboardingError('receiving_owner_deadline_expired')
+        return remaining
+    budget()
+    raw = agent_chat.load_json_document(sys.stdin.buffer.read(1_048_577))
+    selected = agent_chat.load_binding(binding)
+    parameters = agent_chat.checked_arguments(selected, arguments[1], raw)
+    budget()
+    adapter = agent_chat.bridge(selected, timeout=timeout)
+    if isinstance(adapter, agent_chat.MultiAgentChatMcp):
+        alias, parameters = agent_chat._link_arguments(arguments[1], parameters)
+        adapter = adapter.links[alias]
+    method, native_parameters, operation_id = _messaging_tool_params(arguments[1], parameters)
+    # The existing LocalClient checks this same deadline after connection setup
+    # and before native emission. Request durability cannot start a new budget.
+    adapter.client = replace(adapter.client, deadline_ns=original_deadline)
+    request = adapter._prepare_operation(method, native_parameters, operation_id)
+    budget()
+    response = adapter.client.send(request)
+    budget()
+    public = _public_response(response)
+    print(json.dumps(public))
+    return 0 if public.get('ok') else 1
 
 
 def _native_query(endpoint: Path, query, *, deadline_ns: int) -> dict:
@@ -563,6 +620,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--observation-timeout-seconds', type=float)
     parser.add_argument('--reconcile-tooling')
     parser.add_argument('--prepare-group-attachment')
+    parser.add_argument('--authoring-expires-at-ms', type=int)
     parser.add_argument('--codex-home', type=Path)
     parser.add_argument('--connection-mirror', type=Path, action='append', default=[])
     parser.add_argument('--native-endpoint', type=Path)
@@ -574,7 +632,8 @@ def main(argv: list[str] | None = None) -> int:
         import math
         import time
         timeout = args.observation_timeout_seconds
-        if not (args.reconcile_tooling or args.native_preflight or args.prepare_group_attachment) or not math.isfinite(timeout) or not 0 < timeout <= 60:
+        if not (args.reconcile_tooling or args.native_preflight or args.prepare_group_attachment
+                or args.chat_arguments[:1] == ['call']) or not math.isfinite(timeout) or not 0 < timeout <= 60:
             raise OnboardingError('receiving_owner_deadline_expired')
         deadline = time.monotonic_ns() + int(timeout * 1_000_000_000)
         args.observation_deadline_ns = min(args.observation_deadline_ns or deadline, deadline)
@@ -597,6 +656,11 @@ def main(argv: list[str] | None = None) -> int:
             or args.binding is None or args.binding.name != 'binding.json' or args.codex_home is None
             or args.connection_mirror or args.native_endpoint is not None or args.native_thread
             or args.chat_arguments or args.observation_deadline_ns is None):
+        raise OnboardingError('qualified_native_peer_tool_required')
+    if args.authoring_expires_at_ms is not None and (
+            not 0 < args.authoring_expires_at_ms < 2**53
+            or args.chat_arguments[:2] not in (['call', 'messaging_send'], ['call', 'messaging_reply'])
+            or args.reconcile_tooling or args.native_preflight or args.prepare_group_attachment):
         raise OnboardingError('qualified_native_peer_tool_required')
     code = Path(__file__).resolve().parents[1]
     parameters = onboarding_code_successor.sdk_parameters(code, uid=args.code_owner)
@@ -646,7 +710,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.connection_mirror or args.codex_home is not None or args.native_endpoint is not None or args.native_thread:
         raise OnboardingError('qualified_native_peer_tool_required')
     # Import only after the exact interpreter, code and SDK tree are qualified.
-    return _serve_chat(args.chat_arguments, startup=startup, binding=binding, code=code, code_uid=args.code_owner)
+    return _serve_chat(args.chat_arguments, startup=startup, binding=binding, code=code,
+        code_uid=args.code_owner, deadline_ns=args.observation_deadline_ns,
+        authoring_expires_at_ms=args.authoring_expires_at_ms)
 
 # This maintained program runs as the receiving owner, using the already
 # qualified SDK interpreter. Existing or partly published artifacts are checked
@@ -1075,10 +1141,11 @@ class OwnerClient:
 
     def _tooling_call(self, plan: dict, *, candidate: tuple[Path, str],
                       arguments: Callable[[float], list[str]], timeout_seconds: float,
-                      deadline_ns: int | None) -> tuple[dict, dict, int]:
+                      deadline_ns: int | None, input_data: dict | None = None) -> tuple[dict, dict, int]:
         """One owner-qualified route for native readiness and tooling changes."""
         import math
         import time
+        from . import being_seed
         if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 60:
             raise OnboardingError('receiving_owner_deadline_expired')
         deadline = min(deadline_ns if deadline_ns is not None else 2**64,
@@ -1102,15 +1169,33 @@ class OwnerClient:
             'clusterctl.onboarding_owner_client', ['--code-digest', candidate[1], *arguments(remaining())])
         raw = self.host._dispatch(plan, ['exec', self.host.instance(plan), '--user', '1000',
             '--group', '1000', '--env', 'HOME=/home/agent', '--', *argv],
-            timeout_seconds=remaining(), deadline_ns=deadline)
+            timeout_seconds=remaining(), deadline_ns=deadline,
+            **({} if input_data is None else {'input_data':json.dumps(input_data, separators=(',', ':'))}))
         remaining()
-        if len(raw.encode()) > 65536:
+        if len(raw.encode()) > (65536 if input_data is None else being_seed.MAX_SELECTION):
             raise OnboardingError('verification_failed')
         result = json.loads(raw)
         if not isinstance(result, dict):
             raise OnboardingError('verification_failed')
         remaining()
         return result, sdk, deadline
+
+    def messaging(self, plan: dict, method: str, parameters: dict, *, candidate: tuple[Path, str],
+                    binding: Path, timeout_seconds: float = 30, deadline_ns: int | None = None,
+                    authoring_expires_at_ms: int | None = None) -> dict:
+        """Use the existing owner-qualified tools for an approved technical check."""
+        if (method not in {'messaging_send', 'messaging_reply', 'messaging_delivery'}
+                or method != 'messaging_delivery' and authoring_expires_at_ms is None):
+            raise OnboardingError('qualified_native_peer_tool_required')
+        result, _sdk, _deadline = self._tooling_call(plan, candidate=candidate,
+            timeout_seconds=timeout_seconds, deadline_ns=deadline_ns, input_data=parameters,
+            arguments=lambda remaining: ['--binding', str(binding), '--observation-timeout-seconds', str(remaining),
+                *([] if authoring_expires_at_ms is None else ['--authoring-expires-at-ms', str(authoring_expires_at_ms)]),
+                'call', method, '--timeout', str(remaining)])
+        if (result.get('schema') != 'dm.local.response/v1'
+                or result.get('ok') is not True or result.get('error') is not None):
+            raise OnboardingError('receiving_communication_unobserved')
+        return result
 
     def preflight_native(self, plan: dict, *, candidate: tuple[Path, str], endpoint: Path,
                          timeout_seconds: float = 30, deadline_ns: int | None = None) -> dict:
