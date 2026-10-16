@@ -1,7 +1,13 @@
 /* Catalog metadata is text and navigation, never executable code or authority. */
 "use strict";
-(() => {
+(async () => {
   const byId=id=>document.getElementById(id), webapp=window.Telegram?.WebApp;
+  try {
+    if(await window.DaimonMiniAppLaunch?.(JSON.parse(byId('miniapp-routes')?.textContent||'null')))return;
+  } catch {
+    byId('notice').textContent='No pudimos recuperar esta apertura de Telegram. Cerrá y volvé a abrir la app.';
+    return;
+  }
   const storageKey='dm.launcher.favorites/v1';
   let entries=[], favorites=new Set(), favoritesOnly=false, pending=null;
   try{const saved=JSON.parse(localStorage.getItem(storageKey)||'[]');if(Array.isArray(saved))favorites=new Set(saved.filter(x=>typeof x==='string').slice(0,256));}catch{}

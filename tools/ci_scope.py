@@ -337,6 +337,7 @@ LOADED_STARTUP_TESTS = ('tests/test_onboarding_sdk.py', 'tests/test_onboarding_c
 HOME_FILES = {'clusterctl/homes/__init__.py', 'clusterctl/homes/policy.py',
     'clusterctl/homes/launcher.py', 'clusterctl/homes/launcher/index.html',
     'clusterctl/homes/launcher/launcher.js', 'clusterctl/homes/launcher/launcher.css',
+    'clusterctl/homes/launcher/launch.js', 'tests/js/miniapp-launch.cjs',
     'tests/test_home_launcher.py', 'docs/design/miniapps-launcher.md',
     'clusterctl/homes/sessions.py', 'clusterctl/homes/authority.py',
     'clusterctl/homes/registry.py', 'clusterctl/homes/service.py',
