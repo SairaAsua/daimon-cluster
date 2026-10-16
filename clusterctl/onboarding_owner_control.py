@@ -70,6 +70,58 @@ def observe(owner: OwnerGroupClient, *, expected: dict[str, Any],
         return current
 
 
+def qualified_identity(owner: OwnerGroupClient, *, expected: dict[str, Any],
+                       expires_at_ms: int, deadline_ns: int, code: Path,
+                       require_admitted: bool, native_tooling: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Qualify the known loaded process without another cold startup ceremony."""
+    from daimon_matrix.canonical import canonical_bytes
+    from .onboarding_owner_client import observe_selected_tooling
+    import hashlib
+
+    _accept(deadline_ns)
+    if owner.deadline_ns != deadline_ns:
+        raise OnboardingError('receiving_owner_deadline_binding_required')
+    if (type(require_admitted) is not bool
+            or require_admitted != (expected.get('admission_parent') is not None)):
+        raise OnboardingError('receiving_control_parent_changed')
+    socket_before = owner.socket.lstat()
+    with ExitStack() as stack:
+        current = owner.qualified_identity(expires_at_ms=expires_at_ms,
+            require_admitted=require_admitted)
+        if (current['process'] != expected['process'] or current['server'] != expected['server']
+                or _selection(current) != expected['selection']):
+            raise OnboardingError('receiving_control_process_changed')
+        loaded = current['runtime_status']['loaded_runtime']
+        application = current['runtime_status']['loaded_application']
+        if application.get('loaded_base_sha256') != hashlib.sha256(canonical_bytes(loaded)).hexdigest():
+            raise OnboardingError('receiving_control_binding_conflict')
+        parent = None
+        if expected.get('admission_parent') is not None:
+            parent = stack.enter_context(ParentProcessPresence(current['process']))
+            if parent.process != expected['admission_parent']:
+                raise OnboardingError('receiving_control_parent_changed')
+        current = {**current, 'admission_parent': None if parent is None else parent.process,
+            'group': {'channel_id': 'tribe', 'socket': str(owner.socket)},
+            'responder_association': 'same-connection'}
+        if native_tooling is not None:
+            # These are the authenticated daemon's actual startup pins, not a
+            # claim that this maintenance component is its loaded generation.
+            current['native_tooling'] = observe_selected_tooling(native_tooling,
+                code=code, startup=loaded['qualified_startup'], code_uid=0,
+                deadline_ns=deadline_ns, receiving=current)
+        after = owner.socket.lstat()
+        if (socket_before.st_dev, socket_before.st_ino, socket_before.st_ctime_ns) != (
+                after.st_dev, after.st_ino, after.st_ctime_ns):
+            raise OnboardingError('receiving_group_socket_changed')
+        if parent is not None:
+            parent.verify()
+        if owner._observer is None:
+            raise OnboardingError('receiving_owner_scope_required')
+        owner._observer.verify()
+        _accept(deadline_ns)
+        return current
+
+
 def execute(owner: OwnerGroupClient, command: dict[str, Any], path: Path, *,
             expected: dict[str, Any], deadline_ns: int) -> dict[str, Any]:
     """One authenticated status, durable exact request and reconciled native ACK.
@@ -165,6 +217,9 @@ def main() -> int:
     parser.add_argument('--socket', type=Path, required=True)
     parser.add_argument('--path', type=Path)
     parser.add_argument('--observe-only', action='store_true')
+    parser.add_argument('--identity-expires-at-ms', type=int)
+    parser.add_argument('--code', type=Path)
+    parser.add_argument('--require-admitted', action='store_true')
     parser.add_argument('--deadline-ns', type=int, required=True)
     parser.add_argument('--time-namespace', required=True)
     args = parser.parse_args()
@@ -174,12 +229,21 @@ def main() -> int:
                 or os.readlink('/proc/self/ns/time') != args.time_namespace):
             raise OnboardingError('receiving_owner_deadline_binding_required')
         value = json.loads(sys.stdin.buffer.read(being_seed.MAX_SELECTION + 1))
-        fields = {'expected'} if args.observe_only else {'command', 'expected'}
+        identity_query = args.identity_expires_at_ms is not None
+        fields = ({'expected', 'native_tooling'} if identity_query else
+            {'expected'} if args.observe_only else {'command', 'expected'})
         if (not isinstance(value, dict) or set(value) != fields
-                or args.observe_only != (args.path is None)):
+                or (args.observe_only or identity_query) != (args.path is None)
+                or identity_query != (args.code is not None) or args.observe_only and identity_query
+                or args.require_admitted and not identity_query):
             raise OnboardingError('invalid_receiving_control_request')
         with OwnerGroupClient(args.root, args.socket, deadline_ns=args.deadline_ns) as owner:
-            if args.observe_only:
+            if identity_query:
+                assert args.code is not None
+                result = qualified_identity(owner, expected=value['expected'],
+                    expires_at_ms=args.identity_expires_at_ms, deadline_ns=args.deadline_ns,
+                    code=args.code, require_admitted=args.require_admitted, native_tooling=value['native_tooling'])
+            elif args.observe_only:
                 result = observe(owner, expected=value['expected'], deadline_ns=args.deadline_ns)
             else:
                 assert args.path is not None

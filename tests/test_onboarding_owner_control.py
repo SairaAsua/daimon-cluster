@@ -196,3 +196,119 @@ def test_observe_only_reads_known_receiver_once_without_authoring(tmp_path):
         assert not path.exists()
     finally:
         listener.close()
+
+
+def identity_fixture(tmp_path, monkeypatch):
+    import hashlib
+    from daimon_matrix.canonical import canonical_bytes
+    from clusterctl import onboarding_owner_client
+    values = fixture(tmp_path)
+    owner, _client, expected, _command, _path, state, calls, _listener = values
+    state['runtime_status']['loaded_application']['loaded_base_sha256'] = hashlib.sha256(
+        canonical_bytes(state['runtime_status']['loaded_runtime'])).hexdigest()
+    def existing_identity(**kwargs):
+        calls.append(('existing-qualified-identity', kwargs))
+        return {**copy.deepcopy(state), 'verified_identity': {'real-helper-proof': True}}
+    owner.qualified_identity = existing_identity
+    def existing_catalog(payload, **kwargs):
+        calls.append(('existing-catalog', payload, kwargs))
+        return {'current': True}
+    monkeypatch.setattr(onboarding_owner_client, 'observe_selected_tooling', existing_catalog)
+    return values
+
+
+@pytest.mark.parametrize('admitted', [False, True])
+def test_short_identity_keeps_current_owner_verification_catalog_and_parent(tmp_path, monkeypatch, admitted):
+    owner, _client, expected, _command, path, state, calls, listener = identity_fixture(tmp_path, monkeypatch)
+    parent_events = []
+    class Parent:
+        process = {'pid': 17}
+        def __enter__(self):
+            parent_events.append('open')
+            return self
+        def __exit__(self,*args): parent_events.append('close')
+        def verify(self): parent_events.append('verify')
+    if admitted:
+        monkeypatch.setattr(control, 'ParentProcessPresence', lambda process: Parent())
+        expected['admission_parent'] = {'pid': 17}
+    try:
+        horizon = time.time_ns()//1_000_000+10000
+        result = control.qualified_identity(owner,expected=expected,expires_at_ms=horizon,
+            deadline_ns=owner.deadline_ns,code=tmp_path,require_admitted=admitted,native_tooling={'accepted':'unchanged'})
+        assert ('existing-qualified-identity',dict(expires_at_ms=horizon,require_admitted=admitted)) in calls
+        catalog = next(c for c in calls if c[0]=='existing-catalog')
+        assert catalog[1]=={'accepted':'unchanged'} and catalog[2]['deadline_ns']==owner.deadline_ns
+        assert catalog[2]['startup']==state['runtime_status']['loaded_runtime']['qualified_startup']
+        assert catalog[2]['receiving']['verified_identity']=={'real-helper-proof': True}
+        assert result['group']==dict(channel_id='tribe',socket=str(owner.socket))
+        assert result['admission_parent']==({'pid':17} if admitted else None)
+        assert parent_events==(['open','verify','close'] if admitted else [])
+        assert not path.exists() and 'prepare' not in calls and 'status' not in calls
+    finally:
+        listener.close()
+
+
+@pytest.mark.parametrize('changed', ['process','selection','loaded_base','parent'])
+def test_short_identity_rejects_changed_loaded_binding_before_catalog(tmp_path,monkeypatch,changed):
+    owner, _client, expected, _command, _path, state, calls, listener = identity_fixture(tmp_path,monkeypatch)
+    if changed in ('process','selection'):
+        expected[changed]={}
+    if changed=='loaded_base':
+        state['runtime_status']['loaded_application']['loaded_base_sha256']='0'*64
+    if changed=='parent':
+        expected['admission_parent']={'pid':1}
+        class Parent:
+            process={'pid':2}
+            def __enter__(self):return self
+            def __exit__(self,*args):pass
+        monkeypatch.setattr(control,'ParentProcessPresence',lambda process:Parent())
+    try:
+        with pytest.raises(OnboardingError):
+            control.qualified_identity(owner,expected=expected,expires_at_ms=time.time_ns()//1_000_000+10000,
+                deadline_ns=owner.deadline_ns,code=tmp_path,require_admitted=expected.get('admission_parent') is not None,native_tooling={'accepted':True})
+        assert not any(c[0]=='existing-catalog' for c in calls if isinstance(c,tuple))
+    finally:
+        listener.close()
+
+
+def test_short_identity_catalog_consumes_same_absolute_budget(tmp_path,monkeypatch):
+    from clusterctl import onboarding_owner_client
+    owner, _client, expected, _command, _path, _state, _calls, listener = identity_fixture(tmp_path,monkeypatch)
+    owner.deadline_ns=time.monotonic_ns()+50_000_000
+    def slow_catalog(*args,**kwargs):
+        time.sleep(.12)
+        return {'current':True}
+    monkeypatch.setattr(onboarding_owner_client,'observe_selected_tooling',slow_catalog)
+    try:
+        with pytest.raises(OnboardingError,match='deadline_expired'):
+            control.qualified_identity(owner,expected=expected,expires_at_ms=time.time_ns()//1_000_000+10000,
+                deadline_ns=owner.deadline_ns,code=tmp_path,require_admitted=expected.get('admission_parent') is not None,native_tooling={'accepted':True})
+    finally:
+        listener.close()
+
+
+def test_short_identity_guest_requires_expected_parent_before_owner_query(tmp_path,monkeypatch):
+    owner, _client, expected, _command, _path, _state, calls, listener = identity_fixture(tmp_path,monkeypatch)
+    try:
+        with pytest.raises(OnboardingError,match='parent_changed'):
+            control.qualified_identity(owner,expected=expected,expires_at_ms=time.time_ns()//1_000_000+10000,
+                deadline_ns=owner.deadline_ns,code=tmp_path,require_admitted=True)
+        assert not calls
+    finally:
+        listener.close()
+
+
+def test_short_identity_socket_change_during_catalog_refuses(tmp_path,monkeypatch):
+    from clusterctl import onboarding_owner_client
+    owner, _client, expected, _command, _path, _state, _calls, listener = identity_fixture(tmp_path,monkeypatch)
+    def replaced(*args,**kwargs):
+        owner.socket.unlink()
+        owner.socket.write_bytes(b'replacement')
+        return {'current':True}
+    monkeypatch.setattr(onboarding_owner_client,'observe_selected_tooling',replaced)
+    try:
+        with pytest.raises(OnboardingError,match='socket_changed'):
+            control.qualified_identity(owner,expected=expected,expires_at_ms=time.time_ns()//1_000_000+10000,
+                deadline_ns=owner.deadline_ns,code=tmp_path,require_admitted=False,native_tooling={'accepted':True})
+    finally:
+        listener.close()

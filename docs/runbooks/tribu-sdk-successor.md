@@ -144,6 +144,17 @@ for success. SDK0dc already reconciles that ACK under its physical write fence.
 The shared time namespace is verified before passing an absolute monotonic
 budget to another local body. No readiness is cached between invocations.
 
+The same qualified maintenance client can perform the all-reader identity query
+for a known loaded process. It reuses `OwnerGroupClient.qualified_identity` for
+fresh authenticated status, scope/admission and public-bundle/credential verification,
+then the unchanged `observe_selected_tooling` for current configuration and catalog.
+Pin the original process, complete six selections, canonical loaded-base binding,
+guest parent and group socket through catalog completion. A guest must explicitly
+require admission. The coordinator's all-required rounds and60second window are
+unchanged. Repeating cold helper SDK qualification inside that window is not a
+freshness proof and must not make the qualified deployment impossible. The full
+Target route remains appropriate for first adoption or a changed process.
+
 This executor is a code-only maintenance component, not a replacement or new
 label for the loaded daemon. Stage its exact source/hash as protected public code;
 execute it as the receiving owner, never open private SDK/client material as host
