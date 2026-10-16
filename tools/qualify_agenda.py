@@ -3,7 +3,7 @@
 No installed service, real home state, bot or Matrix runtime is selected.
 """
 import argparse
-from contextlib import closing
+from contextlib import closing, contextmanager
 import json
 import os
 from pathlib import Path
@@ -15,13 +15,11 @@ import time
 import urllib.request
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--binary', required=True, type=Path)
-    args = parser.parse_args()
+@contextmanager
+def disposable_engine(binary):
+    """One pinned engine, private temporary state and guaranteed child cleanup."""
     root = Path(__file__).resolve().parents[1]
-    sys.path.insert(0, str(root))
-    binary = args.binary.resolve()
+    binary = Path(binary).resolve()
     version = subprocess.check_output([str(binary), 'version'], text=True)
     if not version.startswith('Vikunja api version v2.7.0\n'):
         raise ValueError('Pinned Vikunja 2.7.0 required')
@@ -66,20 +64,26 @@ log:
                         time.sleep(.1)
                 else:
                     raise RuntimeError('Disposable engine readiness deadline')
-                from tools.ci_scope import HOME_TESTS
-                command = [sys.executable, '-m', 'pytest', '-q', *HOME_TESTS,
-                           '--junitxml='+str(work/'agenda-tests.xml')]
-                code = subprocess.call(command, cwd=root,
-                    env={**os.environ, 'DAIMON_AGENDA_VIKUNJA': origin})
-                if code:
-                    return code
-                return code
+                yield origin, directory
             finally:
                 engine.terminate()
                 try:
                     engine.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     engine.kill(); engine.wait(timeout=5)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--binary', required=True, type=Path)
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root))
+    from tools.ci_scope import HOME_TESTS
+    with disposable_engine(args.binary) as (origin, _):
+        return subprocess.call([sys.executable, '-m', 'pytest', '-q', *HOME_TESTS,
+                                '--junitxml='+str(root/'.work/agenda-tests.xml')], cwd=root,
+                               env={**os.environ, 'DAIMON_AGENDA_VIKUNJA': origin})
 
 
 if __name__ == '__main__':

@@ -13,6 +13,7 @@ def test_agenda_adapter_uses_home_coverage_and_preserves_native_boundaries():
         'clusterctl/homes/agenda_assets/index.html','clusterctl/homes/agenda_assets/agenda.js',
         'clusterctl/homes/agenda_assets/agenda.css','tests/test_home_agenda.py',
         'tests/test_home_agenda_calendar.py','tools/agenda_owner.py','tools/qualify_agenda.py',
+        'tools/preview_agenda.py','tests/js/agenda-journey.cjs',
         'docs/services/agenda.md','tools/ci_scope.py','tests/test_ci_scope.py']
     assert select(changed, ROOT)==('homes',list(HOME_TESTS))
     assert {'tests/test_home_agenda.py','tests/test_home_agenda_calendar.py'}<=set(HOME_TESTS)

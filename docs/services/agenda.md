@@ -161,6 +161,39 @@ no live home state, bot, runtime or administrative access. Node is required
 by the existing launcher/style tests. Browser/WebView qualification is separate;
 do not infer a browser pass from backend tests.
 
+### Local rehearsal without a shared deployment
+
+`tools/preview_agenda.py --binary /selected/verified/vikunja-binary` serves the
+same agenda assets, HTTP adapter and pinned engine on a random **loopback-only**
+HTTPS port. Open the printed address on that computer; its one-day certificate
+is self-signed. A visible banner identifies the synthetic test session and
+example data. The tool reads no receiving identity/binding, Google client or
+existing home/database. Telegram's SDK is omitted in this local fixture.
+Ctrl+C stops the two listeners/engine and removes the temporary state. Never
+expose this fixture through a public/VPN proxy or reuse its automatic test
+session as an authentication mechanism.
+
+For a repeatable UI/engine journey, install the optional DOM test dependency in
+the ignored work directory and run:
+
+```sh
+npm install --prefix .work/dom-tools --no-audit --no-fund --save-exact jsdom@26.1.0
+python tools/preview_agenda.py --binary /selected/verified/vikunja-binary --check-dom
+```
+
+This runs actual form handlers through JSDOM, the HTTPS adapter and official
+Vikunja. It covers activation, first-use Google decisions, project/task creation,
+date-only and timed tasks, observations, completion/reopening, search, reopening
+the app, an acknowledged-server-write with a lost client reply, and local-day
+filtering across timezones. Current access loss is a controlled response fixture.
+It proves DOM behavior and persistence, **not** layout, secure-browser login or
+Telegram WebView behavior. The optional `--snapshot /selected/file.html` exports
+a clearly marked read-only design preview with no scripts, external resources,
+active controls or credentials; it is not an operational agenda.
+On receiving hosts with tight task limits, run the DOM and home-profile
+qualifications one at a time; concurrent engines/Node processes can exhaust
+available threads without establishing a product failure.
+
 Before live activation the holding operator must review the exact candidate,
 backup/verify existing gateway and engine/adapter SQLite state if present, and
 approve the exact service plan under repository `AGENTS.md`. Preserve the
