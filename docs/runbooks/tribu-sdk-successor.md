@@ -1344,6 +1344,14 @@ can fail before identity installation even when that installer has not changed.
 Qualify the selected module's actual verifier as well as package entrypoint imports;
 do not weaken its pin check or repair this mismatch by replacing receiving identity.
 
+Retained runtime-only selections keep their original frozen-asset contract,
+including the formerly permitted absent transfer-helper addition. Reading one
+does not qualify its tools for fresh context installation. Complete bundle
+verification applies to actual tool/provenance transitions; new builds always
+validate their final captured bundle independently, even if its inventory would
+fit the historical reader contract. Maintenance must not become a retroactive
+seed migration or make an existing recovery selection unreadable.
+
 The opt-in installed child case is
 `tests/test_onboarding_runtime.py::test_qualified_offline_child_uses_selected_code_and_preserves_identity`.
 `CLUSTER_QUALIFIED_ADMISSION_ARTIFACT` selects its prepared synthetic artifact;

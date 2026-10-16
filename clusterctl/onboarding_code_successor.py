@@ -193,8 +193,17 @@ def verify(code: Path, fingerprint: str, base: Path, base_fingerprint: str, *, u
         raise OnboardingError('compatible_onboarding_runtime_successor_required')
     before = {row['path']: row['sha256'] for row in original['files']}
     after = {row['path']: row['sha256'] for row in successor['files']}
+    closed_seed_paths = {SEED_TOOLS+'/tools/'+name for name in (
+        'export_being.py', 'receive_being.py', 'install_codex_identity.py', 'protected_being.py')}
+    closed_seed_paths.add(SEED_TOOLS+'/PROVENANCE.json')
+    changed_seed_paths = {name for name in closed_seed_paths if after.get(name) != before.get(name)}
+    legacy_addition = ({TRANSFER_TOOL} if TRANSFER_TOOL not in before
+        and 'clusterctl/onboarding_transfer.py' in after else set())
+    # Historical module-only selections never claimed seed-tool usability.
+    # Retain their frozen-asset contract and the former absent-helper addition;
+    # qualify the complete bundle only for a new executable-asset transition.
     seed_tools = (_seed_tool_bundle(code, code/'clusterctl/being_seed.py', uid=uid)
-        if 'clusterctl/being_seed.py' in after
+        if changed_seed_paths - legacy_addition and 'clusterctl/being_seed.py' in after
         and after['clusterctl/being_seed.py'] != before.get('clusterctl/being_seed.py') else {})
     def module(name: str) -> bool:
         return re.fullmatch(r'clusterctl/(?:__init__|[a-z][a-z0-9_]*)\.py', name) is not None
@@ -285,8 +294,10 @@ def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, .
             or any(re.fullmatch(r'(?:__init__|[a-z][a-z0-9_]*)\.py', name) is None for name in modules)):
         raise OnboardingError('qualified_onboarding_runtime_required')
     original_files = {row['path']:row['sha256'] for row in original['files']}
-    seed_tools = (_seed_tool_bundle(source.parent, source/'being_seed.py', uid=os.geteuid(), read=read_code)
-        if 'being_seed.py' in modules and hashlib.sha256(read_code(source/'being_seed.py')).hexdigest()
+    source_seed_tools = (_seed_tool_bundle(source.parent, source/'being_seed.py', uid=os.geteuid(), read=read_code)
+        if 'being_seed.py' in modules else {})
+    seed_tools = (source_seed_tools
+        if source_seed_tools and hashlib.sha256(read_code(source/'being_seed.py')).hexdigest()
         != original_files.get('clusterctl/being_seed.py') else {})
     output.mkdir(mode=0o755)
     replaced = {'clusterctl/' + name for name in modules} | set(seed_tools)
@@ -324,6 +335,9 @@ def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, .
     for directory in output.rglob('*'):
         if directory.is_dir():
             directory.chmod(0o755)
+    if source_seed_tools and _seed_tool_bundle(
+            output, output/'clusterctl/being_seed.py', uid=os.geteuid()) != source_seed_tools:
+        raise OnboardingError('qualified_onboarding_seed_tool_bundle_required')
     fingerprint = onboarding_release.seal(output, original['profile'])
     verify(output, fingerprint, base, base_fingerprint, uid=os.geteuid())
     return dict(runtime_digest=fingerprint, base_release_digest=base_fingerprint)

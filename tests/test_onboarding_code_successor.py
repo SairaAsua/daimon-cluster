@@ -140,6 +140,49 @@ def test_seed_runtime_verification_uses_selected_legacy_pins_not_builder_default
     assert verify(output, result['runtime_digest'], base, original, uid=os.geteuid())
 
 
+def test_historical_module_and_absent_helper_selection_keeps_its_original_contract(tmp_path):
+    """Existing runtime-only selections must stay readable for maintenance."""
+    import shutil
+    from pathlib import Path
+    from clusterctl.onboarding_code_successor import MARKER, SCHEMA, TRANSFER_TOOL
+    base, _, _, profile = fixture(tmp_path)
+    (base/TRANSFER_TOOL).unlink()
+    (base/'release.json').unlink()
+    original = onboarding_release.seal(base, profile)
+    output = tmp_path/'historical-successor'
+    shutil.copytree(base, output)
+    for name in ('being_seed.py', 'onboarding_transfer.py'):
+        path = output/'clusterctl'/name
+        path.write_bytes((Path(being_seed.__file__).parent/name).read_bytes())
+        path.chmod(0o644)
+    helper = output/TRANSFER_TOOL
+    helper.write_bytes((Path(being_seed.__file__).parents[1]/TRANSFER_TOOL).read_bytes())
+    helper.chmod(0o644)
+    (output/MARKER).write_text(json.dumps(dict(schema=SCHEMA, base_release_digest=original)))
+    (output/MARKER).chmod(0o644)
+    (output/'release.json').unlink()
+    fingerprint = onboarding_release.seal(output, profile)
+    assert verify(output, fingerprint, base, original, uid=os.geteuid())
+
+
+def test_builder_refuses_capture_drift_into_historical_assets(tmp_path, monkeypatch):
+    from pathlib import Path
+    from tools import build_onboarding_code
+    base, original, _, _ = fixture(tmp_path)
+    output = tmp_path/'successor'
+    copy = build_onboarding_code.copy_code
+    def drift(source, target):
+        copy(source, target)
+        if target == output/'support/being-seed-tools/PROVENANCE.json':
+            target.unlink()
+            for name in being_seed.TOOL_HASHES:
+                relative = 'support/being-seed-tools/tools/'+name
+                (output/relative).write_bytes((base/relative).read_bytes())
+    monkeypatch.setattr(build_onboarding_code, 'copy_code', drift)
+    with pytest.raises(OnboardingError, match='qualified_onboarding_seed_tool_bundle_required'):
+        build(base, original, Path(being_seed.__file__).parent, ('being_seed.py',), output)
+
+
 def test_transfer_successor_adds_pinned_helper_without_replacing_context(tmp_path):
     import hashlib
     base, _, source, profile = fixture(tmp_path)
