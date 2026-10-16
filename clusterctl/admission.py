@@ -897,6 +897,14 @@ class AdmissionClient:
         }
 
     def _call(self, action: str, **values: Any) -> Any:
+        deadline_ns = time.monotonic_ns() + int(self.timeout_s * 1_000_000_000)
+
+        def remaining() -> float:
+            budget = (deadline_ns - time.monotonic_ns()) / 1_000_000_000
+            if budget <= 0:
+                raise AdmissionUnavailable("admission round-trip deadline expired")
+            return budget
+
         request_id = str(uuid.uuid4())
         request = {
             "schema": REQUEST_SCHEMA,
@@ -916,17 +924,21 @@ class AdmissionClient:
         if len(encoded) > MAX_MESSAGE_BYTES:
             raise AdmissionError("admission request is too large")
         try:
-            with self.endpoint.connect(self.timeout_s) as connection:
+            with self.endpoint.connect(remaining()) as connection:
+                connection.settimeout(remaining())
                 connection.sendall(encoded)
                 chunks = bytearray()
                 while not chunks.endswith(b"\n"):
+                    connection.settimeout(remaining())
                     chunk = connection.recv(65536)
+                    remaining()
                     if not chunk:
                         break
                     chunks.extend(chunk)
                     if len(chunks) > MAX_MESSAGE_BYTES:
                         raise AdmissionUnavailable("admission response is too large")
         except (OSError, TimeoutError) as exception:
+            remaining()
             raise AdmissionUnavailable("admission authority is unavailable") from exception
         try:
             response = json.loads(chunks)
@@ -944,6 +956,7 @@ class AdmissionClient:
             _canonical(response), signature, self.authority_public_key
         ):
             raise AdmissionUnavailable("admission response signature is invalid")
+        remaining()
         if response.get("ok") is not True:
             if response.get("error") in {"AdmissionConflict", "FenceConflict"}:
                 raise AdmissionConflict(str(response.get("message")))
