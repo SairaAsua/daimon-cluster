@@ -149,6 +149,36 @@ def test_initial_controller_publication_uses_native_writer_without_fake_predeces
         receiving_update.freeze_guest_bootstrap(target, deadline_ns=deadline(), initial=True, initial_service=True)
 
 
+def test_schema_phase_uses_post_controller_context_and_does_not_republish_it(fixture):
+    from daimon_matrix import operator_communication_migration as migration
+    target, request, _group, _ = fixture
+    initial = initial_request(target, request)
+    owner = GuestOwnerBootstrap(target, initial)
+    identifier = str(uuid.uuid4())
+    preview_request = dict(operation_id=identifier, step='context', action='context-preview', params={})
+    before = target.group_publication(preview_request, authority_closure={})
+    ready = owner.execute('stage', deadline_ns=deadline())
+    owner.execute('publish', deadline_ns=deadline(), ready_sha256=ready['ready_sha256'])
+    after = target.group_publication(preview_request, authority_closure={})
+    assert before['owner_context_sha256'] != after['owner_context_sha256']
+    request = dict(operation_id=identifier, step='communication-prepare', action='communication-prepare',
+        params=dict(expected_plan_sha256=after['communication_plan']['plan_sha256'],
+            expires_at_ms=initial['expires_at_ms']))
+    options = dict(authority_closure={}, expected_context_sha256=after['owner_context_sha256'])
+    with pytest.raises(OnboardingError, match='owner_context_conflict'):
+        target.group_publication(request, **{**options, 'expected_context_sha256':before['owner_context_sha256']})
+    publication = (owner.records/'capability_published.json').read_bytes()
+    native = {name:(owner.runtime/name).read_bytes() for name in ('runtime.json', 'custody.json')}
+    ledger = owner.runtime/target.document_bundle()['ledger']
+    identity = (ledger.stat().st_dev, ledger.stat().st_ino)
+    result = target.group_publication(request, **options)
+    assert result['migration']['target_version'] == migration.plan(ledger)['source_version'] == 4
+    assert target.group_publication(request, **options) == result
+    assert (ledger.stat().st_dev, ledger.stat().st_ino) == identity
+    assert (owner.records/'capability_published.json').read_bytes() == publication
+    assert all((owner.runtime/name).read_bytes() == raw for name,raw in native.items())
+
+
 @pytest.mark.parametrize('committed', [False, True])
 def test_expired_initial_publication_allows_only_exact_committed_recovery(fixture, monkeypatch, committed):
     from daimon_matrix import operator_runtime_upgrade as upgrade

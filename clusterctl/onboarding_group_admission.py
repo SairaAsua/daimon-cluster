@@ -24,6 +24,7 @@ METHODS = frozenset({'tribe.invite', 'tribe.membership.accept', 'relationship.ev
                      'relationship.snapshot'})
 PUBLICATIONS = {
     'context-preview': set(),
+    'communication-prepare': {'expected_plan_sha256', 'expires_at_ms'},
     'application': {'expected_application_sha256', 'specification', 'additions',
                     'admitted_being_refs', 'secret_sources'},
     'visibility-disclosure': {'approved_destination', 'issued_at_ms'},
@@ -324,6 +325,7 @@ def publication_recipe(value: dict, admission: dict, social: dict, senders: list
                     or any(not isinstance(step, str) or re.fullmatch('[a-z][a-z0-9-]{0,79}', step) is None
                            for step in row['steps'].values())
                     or len(set(row['steps'].values())) != 6
+                    or name not in old and 'communication-prepare' in row['steps'].values()
                     or name in old and (any(row['steps'][key] != preparations[name]['steps'][key]
                         for key in ('application', 'visibility', 'selection'))
                         or preparations[name]['steps']['snapshot'] in row['steps'].values())):
@@ -679,9 +681,15 @@ def publication_command(value: dict) -> dict:
                     and set(value['params']) - PUBLICATIONS['snapshot'] <= {'expected_stores', 'expected_preservation'})):
             raise ValueError
         params = value['params']
+        if value['action'] == 'communication-prepare' and (
+                not isinstance(params['expected_plan_sha256'], str)
+                or re.fullmatch('[0-9a-f]{64}', params['expected_plan_sha256']) is None
+                or type(params['expires_at_ms']) is not int
+                or not 0 < params['expires_at_ms'] < 2**53):
+            raise ValueError
         if 'application_precondition' in value:
             guard = value['application_precondition']
-            if (value['action'] in {'application', 'context-preview'}
+            if (value['action'] in {'application', 'context-preview', 'communication-prepare'}
                     or not isinstance(guard, dict) or set(guard) != {'application_step', 'application_sha256'}
                     or not isinstance(guard['application_step'], str)
                     or re.fullmatch('[a-z][a-z0-9-]{0,79}', guard['application_step']) is None
@@ -841,10 +849,15 @@ def preview_owner_context(runtime_root: Path, group_root: Path, operation_id: st
     fresh, _ = _owner_context(runtime_root, group_root, operation_id, closure)
     if fresh != approved or _first_owner_context(runtime_root, group_root, fresh, authorities) != context:
         raise OnboardingError('onboarding_group_owner_context_conflict')
+    preparation = {}
+    if context['predecessor_selection_sha256'] is None:
+        from daimon_matrix import operator_communication_migration as migration
+        preparation['communication_plan'] = migration.plan(runtime_root / context['identity']['ledger']['filename'])
     budget()
     return dict(schema='cluster-group-owner-context-preview/v1', operation_id=operation_id,
         owner_context_sha256=digest(context), runtime_bundle_sha256=approved['identity']['runtime_bundle_sha256'],
-        predecessor_selection_sha256=context['predecessor_selection_sha256'], receiving_readiness='unobserved')
+        predecessor_selection_sha256=context['predecessor_selection_sha256'], receiving_readiness='unobserved',
+        **preparation)
 
 
 def owner_authorities(runtime_root: Path, group_root: Path, journal: Path,
@@ -1033,12 +1046,65 @@ def _publication_snapshot(hosted, group_root: Path, operation: Path, value: dict
 
 def _publication_effect(hosted, group_root: Path, value: dict, closure: dict, *,
                         operation: Path, context: dict,
-                        snapshot: Callable[[], dict] | None) -> dict:
+                        snapshot: Callable[[], dict] | None,
+                        deadline_ns: int | None = None) -> dict:
     from daimon_matrix import operator_messaging
     from daimon_matrix.messaging_config import config_digest
     params = value['params']
     directory = group_root / 'application'
     action = value['action']
+    if action == 'communication-prepare':
+        from daimon_matrix import operator_communication_migration as migration
+        from .onboarding_service import GuestServiceBootstrap
+        store = hosted.service.communication
+        if store is None:
+            raise OnboardingError('onboarding_group_communication_store_required')
+        preparation = operation / 'communication-preparation'
+        preview_path = preparation / 'plan.json'
+        backup = preparation / 'migration'
+        original = None
+        if preview_path.exists():
+            private_directory(preparation)
+            original = being_seed._read(preview_path, limit=being_seed.MAX_SELECTION)
+            if (original.get('schema') != migration.SCHEMA
+                    or original.get('target_version') not in {3, 4}
+                    or original.get('plan_sha256') != params['expected_plan_sha256']
+                    or config_digest({key: value for key, value in original.items() if key != 'plan_sha256'})
+                       != params['expected_plan_sha256']):
+                raise OnboardingError('onboarding_group_communication_plan_changed')
+            GuestServiceBootstrap._record(preview_path, original)
+            # A no-op has no native migration journal. Its original, durable
+            # plan is its historical outcome, even after later group/history.
+            if not original['steps']:
+                return dict(migration=original)
+            if (backup / 'completed.json').exists():
+                return dict(migration=migration.apply(store, backup,
+                    params['expected_plan_sha256'], deadline_ns=deadline_ns))
+        if (context['predecessor_selection_sha256'] is not None
+                or (group_root / 'selection.json').exists()
+                or directory.exists()):
+            raise OnboardingError('onboarding_group_initial_schema_required')
+        current = migration.plan(store.ledger.path)
+        if original is None:
+            if current['target_version'] not in {3, 4}:
+                raise OnboardingError('onboarding_group_communication_schema_unsupported')
+            if current['plan_sha256'] != params['expected_plan_sha256']:
+                raise migration.MigrationError('migration_plan_changed')
+            if time.time_ns() // 1_000_000 >= params['expires_at_ms']:
+                raise OnboardingError('receiving_preservation_authorization_expired')
+            private_directory(preparation, create=True)
+            original = GuestServiceBootstrap._record(preview_path, current)
+        if not original['steps']:
+            return dict(migration=original)
+        if current['steps']:
+            now = time.time_ns() // 1_000_000
+            if now >= params['expires_at_ms']:
+                raise OnboardingError('receiving_preservation_authorization_expired')
+            expires = time.monotonic_ns() + (params['expires_at_ms'] - now) * 1_000_000
+            deadline_ns = expires if deadline_ns is None else min(deadline_ns, expires)
+        result = migration.apply(store, backup,
+            params['expected_plan_sha256'], deadline_ns=deadline_ns)
+        return dict(migration=result)
     if action == 'snapshot':
         return _publication_snapshot(hosted, group_root, operation, value, context, snapshot)
     if action == 'application':
@@ -1146,7 +1212,7 @@ def publication_request(hosted, group_root: Path, journal: Path, value: dict, *,
                 raise OnboardingError('onboarding_group_publication_visibility_changed')
             check_deadline()
         observed = _publication_effect(hosted, group_root, selected, context['authority_closure'],
-            operation=operation, context=context, snapshot=snapshot)
+            operation=operation, context=context, snapshot=snapshot, deadline_ns=deadline_ns)
         if (selected['action'] == 'snapshot' and retained['result'] is not None
                 and 'stores' not in retained['result'] and 'expected_stores' not in selected['params']):
             # Preserve an older completed observation's exact result shape.

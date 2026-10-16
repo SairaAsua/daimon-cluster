@@ -52,6 +52,180 @@ def initial_publication(group_source, profile):
     return owner, group, journal, request, base
 
 
+@pytest.fixture
+def schema_owner(tmp_path):
+    from tests.test_onboarding_target import receiving
+    ceremony, plan, target = receiving(tmp_path)
+    target.activate(ceremony.authorize_target(plan, target.prepare()))
+    target.apply_credential(ceremony.authorize_credential(plan, target.credential_request()))
+    return target
+
+
+@pytest.mark.parametrize('boundary', ['prepared', 'intermediate', 'reply'])
+def test_initial_schema_owner_phase_resumes_original_plan_and_physical_store(schema_owner, monkeypatch, boundary):
+    from daimon_matrix import operator_communication_migration as migration
+    from daimon_matrix.communication import CommunicationStore
+    from clusterctl.onboarding_group_admission import load_owner_runtime
+    owner = schema_owner
+    group, journal = owner.root/'tribe', owner.root/'group-admission'
+    operation = str(uuid.uuid4())
+    runtime = owner.package / 'runtime'
+    ledger = runtime / owner.document_bundle()['ledger']
+    original = migration.plan(ledger)
+    assert original['source_version'] == 1
+    identity = (ledger.stat().st_dev, ledger.stat().st_ino)
+    original_ledger = load_owner_runtime(runtime, owner._reader, authorities={}).service.ledger
+    events = original_ledger.events()
+    native = {name:(runtime/name).read_bytes() for name in ('runtime.json', 'custody.json')}
+    preview = owner.group_publication(dict(operation_id=operation,
+        step='context', action='context-preview', params={}), authority_closure={})
+    assert preview['communication_plan'] == original
+    request = dict(operation_id=operation, step='communication-prepare',
+        action='communication-prepare', params=dict(expected_plan_sha256=original['plan_sha256'],
+            expires_at_ms=time.time_ns()//1_000_000+60_000))
+    options = dict(authority_closure={}, expected_context_sha256=preview['owner_context_sha256'],
+        deadline_ns=time.monotonic_ns()+30_000_000_000)
+    write, apply, upgrade = migration._write, migration.apply, CommunicationStore.upgrade_legs_v3
+    def interrupted_write(path, value):
+        write(path, value)
+        if boundary == 'prepared' and path.name == 'prepared.json':
+            raise OSError('synthetic schema interruption')
+    def interrupted_apply(*args, **kwargs):
+        result = apply(*args, **kwargs)
+        if boundary == 'reply':
+            raise OSError('synthetic schema interruption')
+        return result
+    def interrupted_upgrade(store):
+        if boundary == 'intermediate' and store.ledger.path == ledger:
+            raise OSError('synthetic schema interruption')
+        return upgrade(store)
+    with monkeypatch.context() as fault:
+        fault.setattr(migration, '_write', interrupted_write)
+        fault.setattr(migration, 'apply', interrupted_apply)
+        fault.setattr(CommunicationStore, 'upgrade_legs_v3', interrupted_upgrade)
+        with pytest.raises(OSError, match='schema interruption'):
+            owner.group_publication(request, **options)
+    options['deadline_ns'] = time.monotonic_ns()+30_000_000_000
+    if boundary == 'reply':
+        # Explicit later-publication path seam; completed history must be
+        # recognized before fresh no-application guards, not republished.
+        (group/'application').mkdir()
+    result = owner.group_publication(request, **options)
+    assert owner.group_publication(request, **options) == result
+    assert result['migration']['source_plan_sha256'] == original['plan_sha256']
+    assert result['migration']['target_version'] == migration.plan(ledger)['source_version'] == 4
+    assert (ledger.stat().st_dev, ledger.stat().st_ino) == identity
+    assert original_ledger.events() == events
+    assert all((runtime/name).read_bytes() == raw for name,raw in native.items())
+    assert (group/'application').exists() == (boundary == 'reply')
+    assert not (group/'selection.json').exists()
+    assert (journal/request['operation_id']/'communication-preparation/migration/completed.json').exists()
+
+
+@pytest.mark.parametrize('rejection', ['expired', 'plan'])
+def test_schema_preparation_refuses_unapproved_effects(schema_owner, rejection):
+    from daimon_matrix import operator_communication_migration as migration
+    owner = schema_owner
+    runtime = owner.package/'runtime'
+    ledger = runtime / being_seed._read(runtime/'runtime.json')['ledger']
+    before = migration.plan(ledger)
+    request = dict(operation_id=str(uuid.uuid4()), step='communication-prepare', action='communication-prepare',
+        params=dict(expected_plan_sha256='0'*64 if rejection == 'plan' else before['plan_sha256'],
+            expires_at_ms=time.time_ns()//1_000_000+(-1 if rejection == 'expired' else 60_000)))
+    expected = 'authorization_expired' if rejection == 'expired' else 'migration_plan_changed'
+    with pytest.raises((OnboardingError, migration.MigrationError), match=expected):
+        owner.group_publication(request, authority_closure={})
+    assert migration.plan(ledger) == before
+
+
+def test_schema_preparation_refuses_an_existing_group(group_source):
+    from daimon_matrix import operator_communication_migration as migration
+    source, _target, _peer, peer_bundle, _old = group_source
+    ledger = source.root / being_seed._read(source.root/'runtime.json')['ledger']
+    before = migration.plan(ledger)
+    request = dict(operation_id=str(uuid.uuid4()), step='communication-prepare', action='communication-prepare',
+        params=dict(expected_plan_sha256=before['plan_sha256'], expires_at_ms=time.time_ns()//1_000_000+60_000))
+    with pytest.raises(OnboardingError, match='initial_schema_required'):
+        source.group_publication(request, authority_closure=closure(peer_bundle))
+    assert migration.plan(ledger) == before
+
+
+def test_schema_expiry_during_plan_durability_cannot_begin_ddl(schema_owner, monkeypatch):
+    from types import SimpleNamespace
+    from daimon_matrix import operator_communication_migration as migration
+    from clusterctl import onboarding_group_admission as admission
+    from clusterctl.onboarding_service import GuestServiceBootstrap
+    owner = schema_owner
+    ledger = owner.package/'runtime'/owner.document_bundle()['ledger']
+    original = migration.plan(ledger)
+    expiry = time.time_ns()//1_000_000+60_000
+    clock = [time.time_ns()]
+    record = GuestServiceBootstrap._record
+    def expire(path, value):
+        result = record(path, value)
+        if path.name == 'plan.json' and path.parent.name == 'communication-preparation':
+            clock[0] = expiry*1_000_000
+        return result
+    request = dict(operation_id=str(uuid.uuid4()), step='communication-prepare', action='communication-prepare',
+        params=dict(expected_plan_sha256=original['plan_sha256'], expires_at_ms=expiry))
+    with monkeypatch.context() as fault:
+        fault.setattr(admission, 'time', SimpleNamespace(monotonic_ns=time.monotonic_ns, time_ns=lambda: clock[0]))
+        fault.setattr(GuestServiceBootstrap, '_record', staticmethod(expire))
+        with pytest.raises(OnboardingError, match='authorization_expired'):
+            owner.group_publication(request, authority_closure={})
+    assert migration.plan(ledger) == original
+    assert not (owner.root/'group-admission'/request['operation_id']/'communication-preparation/migration').exists()
+    assert owner.group_publication(request, authority_closure={})['migration']['target_version'] == 4
+
+
+@pytest.mark.parametrize('version', [3, 4])
+def test_noop_schema_history_survives_lost_owner_result_later_history_and_publication(schema_owner, monkeypatch, version):
+    import sqlite3
+    from contextlib import closing
+    from daimon_matrix import operator_communication_migration as migration
+    from clusterctl.onboarding_group_admission import load_owner_runtime
+    owner = schema_owner
+    runtime = owner.package/'runtime'
+    hosted = load_owner_runtime(runtime, owner._reader, authorities={})
+    store = hosted.service.communication
+    store.upgrade_receipts_v2()
+    store.upgrade_legs_v3()
+    if version == 3:
+        # Native migration's original healthy-v3 fixture, on an empty store.
+        with closing(sqlite3.connect(store.ledger.path)) as database:
+            database.execute('DROP TABLE communication_leg_aliases')
+            database.execute('DROP TABLE communication_leg_migration')
+            database.execute("UPDATE communication_meta SET value='3' WHERE key='schema_version'")
+            database.commit()
+    original = migration.plan(store.ledger.path)
+    assert original['source_version'] == original['target_version'] == version
+    identifier = str(uuid.uuid4())
+    request = dict(operation_id=identifier, step='communication-prepare', action='communication-prepare',
+        params=dict(expected_plan_sha256=original['plan_sha256'], expires_at_ms=time.time_ns()//1_000_000+60_000))
+    write = being_seed._write
+    result_path = owner.root/'group-admission'/identifier/'publications/communication-prepare.json'
+    def lost(path, value, **kwargs):
+        if path == result_path and value.get('result') is not None:
+            raise OSError('synthetic lost noop result')
+        write(path, value, **kwargs)
+    with monkeypatch.context() as fault:
+        fault.setattr(being_seed, '_write', lost)
+        with pytest.raises(OSError, match='lost noop result'):
+            owner.group_publication(request, authority_closure={})
+    with owner._runtime_writer():
+        later = load_owner_runtime(runtime, owner._reader, authorities={})
+        event = later.service.ledger.append_local(kind='experience.observed', subject='later schema history',
+            payload={'summary':'A genuine later event remains intact.'}, signer=later.service.signer,
+            sensitivity='shareable', occurred_at_ms=time.time_ns()//1_000_000)
+    (owner.root/'tribe/application').mkdir()  # Later-publication path seam, not a signed group proof.
+    result = owner.group_publication(request, authority_closure={})
+    assert result['migration'] == original
+    assert owner.group_publication(request, authority_closure={}) == result
+    assert migration.plan(store.ledger.path)['state_sha256'] != original['state_sha256']
+    assert later.service.ledger.events()[-1]['event_id'] == event['event_id']
+    assert not (owner.root/'group-admission'/identifier/'communication-preparation/migration').exists()
+
+
 @pytest.mark.parametrize('profile', ['source', 'target'])
 def test_context_preview_is_read_only_and_pins_the_later_native_writer(group_source, monkeypatch, profile):
     source, target, _peer, peer_bundle, _old = group_source
@@ -413,6 +587,7 @@ def test_cohort_publication_derives_native_acceptance_and_recovers_lost_results(
         lambda value: value['owners']['founder']['steps'].update(application='another-child-step'),
         lambda value: value['owners']['founder']['steps'].update(snapshot='lifecycle-snapshot'),
         lambda value: value['owners']['founder']['steps'].update(disclosure='lifecycle-snapshot'),
+        lambda value: value['owners']['entrant']['steps'].update(disclosure='communication-prepare'),
         lambda value: value['owners']['entrant']['disclosure'].update(approved_destination={**destination, 'chat_id':-999}),
         lambda value: value['owners']['founder']['application']['additions'].update(roster=[]),
         lambda value: value['owners']['entrant']['application']['specification']['listen'].update(port=0),
@@ -675,6 +850,15 @@ def test_publication_packets_are_closed_and_cannot_use_online_relationship_route
     assert request_packet(dict(command=value, offline=True, authority_closure={}))['command'] == value
     preview = {**value, 'action': 'context-preview', 'params': {}}
     assert publication_command(preview) == preview
+    preparation = {**value, 'action':'communication-prepare',
+        'params':dict(expected_plan_sha256='1'*64, expires_at_ms=123)}
+    assert publication_command(preparation) == preparation
+    for invalid in ({'expected_plan_sha256':'invalid'}, {'expires_at_ms':True},
+                    {'expires_at_ms':-1}, {'extra':True}):
+        with pytest.raises(OnboardingError, match='publication_command_required'):
+            publication_command({**preparation, 'params':{**preparation['params'], **invalid}})
+    with pytest.raises(OnboardingError, match='publication_command_required'):
+        publication_command({**preparation, 'application_precondition':guard})
     from clusterctl.onboarding_group_admission import publication_request
     with pytest.raises(OnboardingError, match='preview_is_read_only'):
         publication_request(None, None, None, preview)

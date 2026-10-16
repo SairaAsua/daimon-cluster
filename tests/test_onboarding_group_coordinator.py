@@ -142,7 +142,8 @@ def fixture(tmp_path, monkeypatch):
         managed=managed, activation=_activation)
 
 
-def test_worker_prepares_and_binds_every_old_child_without_stopping_members(fixture, monkeypatch):
+@pytest.mark.parametrize('lost_phase', ['communication', 'child'])
+def test_worker_prepares_and_binds_every_old_child_without_stopping_members(fixture, monkeypatch, lost_phase):
     """Real worker/journal/binder; native governance/child producer are seams."""
     import uuid
     from clusterctl import onboarding_receiving_update as updates
@@ -167,7 +168,27 @@ def test_worker_prepares_and_binds_every_old_child_without_stopping_members(fixt
     being_seed._write(f.path, configured)
     monkeypatch.setattr('clusterctl.onboarding_group_admission.membership_recipe', lambda value, *a: copy.deepcopy(value))
     children, requests, lose = {}, [], [True]
+    communication, schema_calls = {}, []
+    def prepare_communication(request, **options):
+        assert f.body['publications'] == 1, 'controller tree publication must precede schema preparation'
+        assert options['expected_context_sha256'] == social['owner_contexts']['newcomer']
+        assert not any(owner.effects for owner in f.owners.values())
+        schema_calls.append(copy.deepcopy(request))
+        if request['action'] == 'context-preview':
+            return dict(owner_context_sha256=social['owner_contexts']['newcomer'],
+                predecessor_selection_sha256=None, communication_plan=dict(target_version=4, plan_sha256='8'*64))
+        assert request['params']['expected_plan_sha256'] == '8'*64
+        assert request['params']['expires_at_ms'] == transition['cohort_admission']['activation']['expires_at_ms']
+        communication['result'] = dict(schema='cluster-group-publication-result/v1',
+            **{k:request[k] for k in ('operation_id', 'step', 'action')}, status='recorded',
+            receiving_readiness='unobserved', migration=dict(target_version=4, source_plan_sha256='8'*64))
+        if lost_phase == 'communication' and lose[0]:
+            lose[0] = False
+            raise OSError('synthetic lost communication preparation response')
+        return copy.deepcopy(communication['result'])
+    f.owners['newcomer'].group_publication = prepare_communication
     def prepare(backend, plan, selected_journal, request, **options):
+        assert communication.get('result'), 'schema preparation must precede old-member preparation'
         assert backend is f.backend and selected_journal.path == journal.path
         assert request['cohort_intent_sha256'] == digest(row['intent'])
         assert request['operation_id'] == social['operation_id']
@@ -183,14 +204,14 @@ def test_worker_prepares_and_binds_every_old_child_without_stopping_members(fixt
                 profile='guest', name=name, with_group=False, with_exit=False,
                 setup=(cohort, f.owners, journal, row, f.activation))
             children[name] = recipe['lifecycle_operation_id']
-        if lose[0]:
+        if lost_phase == 'child' and lose[0]:
             lose[0] = False
             raise OSError('synthetic lost child preparation response')
         return dict(schema='cluster-guest-admission-prepared/v1', operation_id=children[name],
             request_sha256=digest(request), cohort_operation_id=row['operation_id'],
             cohort_intent_sha256=digest(row['intent']), receiving_readiness='unobserved')
     monkeypatch.setattr(updates, 'prepare_guest_admission', prepare)
-    with pytest.raises(OSError, match='lost child preparation response'):
+    with pytest.raises(OSError, match='lost '+lost_phase+' preparation response'):
         GroupCoordinator(f.backend).advance('newcomer')
     result = GroupCoordinator(f.backend).advance('newcomer')
     assert result['lifecycle_prepared'] and result['receiving_readiness'] == 'unobserved'
@@ -198,7 +219,12 @@ def test_worker_prepares_and_binds_every_old_child_without_stopping_members(fixt
     assert {name: binding['lifecycle_operation_id'] for name, binding in bound.items()} == children
     count = len(requests)
     assert GroupCoordinator(f.backend).advance('newcomer') == result
-    assert len(requests) == count and requests[0] == requests[1]
+    assert len(requests) == count
+    if lost_phase == 'child':
+        assert requests[0] == requests[1]
+    else:
+        assert schema_calls[1] == schema_calls[2]
+        assert sum(call['action'] == 'context-preview' for call in schema_calls) == 1
     assert journal.get(row['operation_id'])['state'] == 'planned'
     assert all(owner.effects == 0 for owner in f.owners.values())
 

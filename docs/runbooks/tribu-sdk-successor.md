@@ -1125,9 +1125,8 @@ survives same-guest reexec.
 
 Matrix and acceptance stages remain pending until this exact receiving operation
 is complete, followed by the existing actual managed-presence/acceptance checks.
-The remaining coordinator phases are unfinished: signed invitation/acceptance,
-approved publication-command derivation/comparison,
-full distribution, lifecycle reload/initial load, cohort/steady selection and
+The remaining automatic-caller integration joins the supported offline social
+and publication phases, lifecycle reload/initial load, cohort/steady selection and
 scoped communication acceptance. The installed old-members/newcomer journey is
 also pending. Native/physical/controller preparation does not complete portal
 admission, enable a Matrix sender or qualify a deployment. This future-admission
@@ -1158,17 +1157,34 @@ Dependent commands pin their retained application under the actual owner writer;
 selector publication additionally pins the retained/current visibility installation.
 A completed phase is historical evidence and never re-quiesces replacements.
 
-Genuine first group publication also requires the newcomer's native communication
-schema to support receipts V2 and legs V3. This prerequisite is not yet automated
-by the caller. The installed journey must prepare it before stopping old members.
-Use the maintained offline migration with its exact plan/evidence. Its `apply()`
-alone is not safely repeatable after partial migration: bounded continuation of
-the retained source/intermediate/target evidence remains required. Do not hide
-that gap with fixture-only upgrades, another directory or an unverified restore.
+Genuine first group publication requires the newcomer's native communication
+schema to support receipts V2 and legs V3. The coordinator now retains a separate
+`communication-prepare` command after controller preparation and before preparing
+old-member lifecycles. It reuses the existing group-publication owner route and
+the maintained resumable native migration. Fresh schema changes respect the
+original approved plan, physical store, fixed expiry and remaining caller budget.
+Native healthy schema3/4 is already current; do not invent a v3-to-v4 transition.
+
+Read-only context preview supplies the initial native plan. The owner retains
+that exact plan under `communication-preparation/plan.json` and native migration
+evidence under its `migration` child. A retained no-op or verified native
+completion recovers historically even after later ledger work or application
+publication. Pending changes still require absence of a group/application and
+may not overwrite later history. Reserve the entrant's fixed
+`communication-prepare` step against all six public publication step names.
+
+The schema phase requires the approved post-controller owner-context digest.
+Capability publication exchanges the runtime tree and can change its bundle hash
+and ledger inode. Never silently replace a pre-controller social-context pin,
+rerun capability publication after schema changes, or restore a database to make
+a retry work. The explicit pre/post-controller context join is still unfinished
+in the complete automatic caller; a mismatch refuses before migration or old
+member interruption. Source preparation is not installed admission acceptance.
 
 Retain the exact command/context digest in the same private operation before
 dispatch; persist the resulting public hashes or signatures afterwards. Retry
-rechecks the real SDK publication/CAS even if a result is cached. Preserve a
+rechecks the real SDK publication/CAS for application/visibility changes even if
+a result is cached; schema completion remains historical. Preserve a
 later winner and leave an uncertain result unresolved. Do not mint another
 messaging client, duplicate governance or restore old publication bytes.
 Results report `receiving_readiness=unobserved`; these operations neither start

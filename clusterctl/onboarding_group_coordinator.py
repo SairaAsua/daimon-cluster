@@ -303,11 +303,66 @@ class GroupCoordinator:
                 self._prepare_body(plan, journal, row, admission, candidate, deadline_ns=deadline,
                     historical_only=expired)
                 remaining()
+                self._prepare_communication(plan, journal, row, admission, owners[name], deadline_ns=deadline)
+                remaining()
                 lifecycles = self._prepare_lifecycles(plan, journal, row, admission, cohort, deadline_ns=deadline)
                 remaining()
                 return dict(operation_id=row['operation_id'], native_prepared=True,
                     physical_prepared=True, controller_prepared=True, receiving_readiness='unobserved',
                     **({'lifecycle_prepared': True} if lifecycles else {}))
+
+    def _prepare_communication(self, plan, journal, row, admission, owner, *, deadline_ns: int) -> None:
+        """Retain the entrant's schema phase after controller tree publication.
+
+        Reuse the existing owner route and original native plan. No old member
+        is interrupted, and no capability publication is retried after DDL.
+        """
+        caller = row['intended_transition']['portal_admission']
+        if caller['schema'] != SOCIAL_CALLER_SCHEMA:
+            return
+        def retained():
+            return (journal.get(row['operation_id'])['runtime_observation'] or {}).get('portal_admission', {})
+        with self._job_scope(plan):
+            self._binding(plan)
+        if 'communication_ready' in retained():
+            return
+        if time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('receiving_host_deadline_expired')
+        social = caller['social']
+        context = social['owner_contexts'][plan['name']]
+        authorities = {ref: value for ref, value in social['authority_closure'].items()
+            if ref != admission['receivers'][plan['name']]['being_ref']}
+        request = retained().get('communication_intent')
+        if request is None:
+            preview = owner.group_publication(dict(operation_id=social['operation_id'],
+                step='communication-context', action='context-preview', params={}),
+                authority_closure=authorities, expected_context_sha256=context)
+            native = preview.get('communication_plan')
+            if (preview.get('owner_context_sha256') != context
+                    or preview.get('predecessor_selection_sha256') is not None
+                    or not isinstance(native, dict) or native.get('target_version') not in {3, 4}
+                    or re.fullmatch('[0-9a-f]{64}', native.get('plan_sha256', '')) is None):
+                raise OnboardingError('onboarding_group_initial_schema_required')
+            request = dict(operation_id=social['operation_id'], step='communication-prepare',
+                action='communication-prepare', params=dict(expected_plan_sha256=native['plan_sha256'],
+                    expires_at_ms=admission['activation']['expires_at_ms']))
+            self._retain(journal, row, 'communication_intent', request)
+        if time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('receiving_host_deadline_expired')
+        result = owner.group_publication(request, authority_closure=authorities,
+            expected_context_sha256=context)
+        migration = result.get('migration', {})
+        if (result.get('schema') != 'cluster-group-publication-result/v1'
+                or result.get('status') != 'recorded'
+                or any(result.get(key) != request[key] for key in ('operation_id', 'step', 'action'))
+                or result.get('receiving_readiness') != 'unobserved'
+                or migration.get('target_version') not in {3, 4}
+                or migration.get('source_plan_sha256', migration.get('plan_sha256'))
+                    != request['params']['expected_plan_sha256']):
+            raise OnboardingError('onboarding_group_initial_schema_required')
+        if time.monotonic_ns() >= deadline_ns:
+            raise OnboardingError('receiving_host_deadline_expired')
+        self._retain(journal, row, 'communication_ready', result)
 
     def _prepare_lifecycles(self, plan, journal, row, admission, cohort, *, deadline_ns: int) -> bool:
         """Prepare/bind old lifecycles only; never stop without a full finisher."""
