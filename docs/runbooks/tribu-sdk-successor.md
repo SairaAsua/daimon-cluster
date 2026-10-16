@@ -1425,3 +1425,18 @@ the original frozen Telecodex binary, and native service ownership retains the
 base binding. A runtime helper upgrade is not a bot/listener binary upgrade.
 Keep explicit Telegram successors on their existing independent selection path;
 do not set `telegram_code` to a runtime-only artifact to obtain a newer CLI verb.
+
+The opt-in `tests.integration.portal_admission_network` owns one private L2 bridge
+and one NIC per retained synthetic guest for actual cross-namespace HTTP. It
+checks the exact synthetic owners, bridge, inherited/local device and interface
+ownership before any effect. Its fixture-root lock serializes preparation and
+cleanup. Desired firewall expressions are retained and synced before the atomic
+nft transaction; retries accept exact installed rules without requiring a
+post-effect receipt. Cleanup validates complete remaining expressions and deletes
+owned rules/table in one transaction. It never flushes or edits existing rules.
+Fresh guest ingress to host administrative ports and routing outside this bridge
+remain denied; established returns are limited to the fixture's HTTP addresses
+and ports. No NAT, DHCP, default route or pairwise proxy is added. This is fixture
+construction, not a production transport-reconfiguration API or live acceptance.
+Stop only the owned synthetic Matrix units before the finite fixture authority
+retires, so expiry does not cause pointless restart loops.
