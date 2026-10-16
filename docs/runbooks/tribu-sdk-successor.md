@@ -1448,5 +1448,13 @@ Fresh guest ingress to host administrative ports and routing outside this bridge
 remain denied; established returns are limited to the fixture's HTTP addresses
 and ports. No NAT, DHCP, default route or pairwise proxy is added. This is fixture
 construction, not a production transport-reconfiguration API or live acceptance.
+The retained initial application used loopback across separate namespaces.
+`tests.integration.portal_admission_baseline` constructs only a corrected synthetic
+baseline: exact bridge addresses, native signed metadata generation, unchanged
+client/stores/keys and retained predecessor. It requires the offline owner writer,
+publication lock and exact original intent; retry preserves a later winner. Reissue
+the unchanged visibility disclosure and use the existing signed selection CAS,
+then capture actual new baseline load/context before admission. This test setup
+does not qualify production route updates or revive old pending transmissions.
 Stop only the owned synthetic Matrix units before the finite fixture authority
 retires, so expiry does not cause pointless restart loops.
