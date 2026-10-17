@@ -10,6 +10,7 @@
   }
   const storageKey='dm.launcher.favorites/v1';
   let entries=[], favorites=new Set(), favoritesOnly=false, pending=null;
+  let attention=null, attentionPending=false;
   try{const saved=JSON.parse(localStorage.getItem(storageKey)||'[]');if(Array.isArray(saved))favorites=new Set(saved.filter(x=>typeof x==='string').slice(0,256));}catch{}
   const icons={
     nexus:'<circle cx="16" cy="16" r="5"/><ellipse cx="16" cy="16" rx="14" ry="6" transform="rotate(-40 16 16)"/><path d="M16 1v5m0 20v5M1 16h5m20 0h5"/>',
@@ -30,6 +31,10 @@
       const icon=document.createElement('span');icon.className='app-icon';icon.setAttribute('aria-hidden','true');
       const key=/nexus/i.test(entry.title)?'nexus':/sessions/i.test(entry.title)?'sessions':/home\s*maker/i.test(entry.title)?'homemaker':'app';
       icon.innerHTML='<svg viewBox="0 0 32 32">'+icons[key]+'</svg>';
+      if(attention?.symbol && matchesAttention(entry)){
+        const dot=document.createElement('span');dot.className='attention-dot';dot.textContent=attention.symbol;icon.append(dot);
+        link.setAttribute('aria-label',entry.title+' · '+(attention.level==='unknown'?'Estado de alertas sin confirmar':attention.count+' alertas por atender'));
+      }
       const title=document.createElement('span');title.className='app-title';title.textContent=entry.title;
       const summary=document.createElement('span');summary.className='app-summary';summary.textContent=entry.summary;
       const author=document.createElement('span');author.className='app-author';
@@ -39,8 +44,46 @@
       star.onclick=()=>{if(favorites.has(entry.id))favorites.delete(entry.id);else favorites.add(entry.id);try{localStorage.setItem(storageKey,JSON.stringify([...favorites].slice(-256)));}catch{}render();};
       row.append(link,star);return row;
     }));
+    paintAttention();
     byId('empty').hidden=shown.length>0;
     byId('empty').textContent=term?'No hay coincidencias. Probá otro nombre.':favoritesOnly?'Tocá ☆ en una app para guardarla acá.':'Todavía no hay aplicaciones publicadas.';
+  }
+  function matchesAttention(entry){return attention && (attention.app_url?sameApp(entry.url,attention.app_url):/^sessions$/i.test(entry.title));}
+  function sameApp(left,right){
+    try{const a=new URL(left),b=new URL(right);return a.origin===b.origin&&a.pathname.toLowerCase()===b.pathname.toLowerCase();}catch{return false;}
+  }
+  function paintAttention(){
+    const box=byId('alert-trail');box.replaceChildren();
+    const entry=attention&&entries.find(matchesAttention);
+    box.hidden=!entry||(!attention.count&&attention.level!=='unknown');
+    if(box.hidden)return;
+    const title=document.createElement('strong');
+    title.textContent=attention.symbol+' '+(attention.level==='unknown'?'Estado de alertas sin confirmar':attention.count+' alerta'+(attention.count===1?'':'s')+' por atender');
+    const list=document.createElement('ul');
+    for(const row of attention.summaries){const item=document.createElement('li');item.textContent=row.symbol+' '+row.summary;list.append(item);}
+    const link=document.createElement('a');link.href=entry.url;link.textContent='Ver alertas en Sessions ↗';
+    link.onclick=event=>{if(webapp?.openTelegramLink){event.preventDefault();webapp.openTelegramLink(entry.url);}};
+    box.append(title,list,link);
+    if(attention.level==='unknown'){const note=document.createElement('p');note.textContent='No pudimos confirmar el estado actual. Abrí Sessions para comprobarlo.';box.append(note);}
+  }
+  async function loadAttention(){
+    if(attentionPending||document.visibilityState==='hidden'||!webapp?.initData)return;
+    attentionPending=true;
+    const controller=new AbortController(),deadline=setTimeout(()=>controller.abort(),5000);
+    try{
+      const response=await fetch('/apps/attention',{method:'POST',credentials:'omit',redirect:'error',cache:'no-store',signal:controller.signal,
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({init_data:webapp.initData})});
+      if(!response.ok)throw Error('unavailable');const value=await response.json();
+      const symbols={clear:'',info:'🔵',warning:'🟠',error:'🔴',unknown:'⚪'};
+      if(value.schema!=='telecodex.alert-attention/v1'||!(value.level in symbols)||value.symbol!==symbols[value.level]||
+        !Number.isInteger(value.count)||value.count<0||value.count>100000||!Array.isArray(value.summaries)||value.summaries.length>3||
+        !value.summaries.every(r=>r&&typeof r.summary==='string'&&r.summary.length<=280&&['🔴','🟠','🔵'].includes(r.symbol))||
+        !safeURL({url:value.app_url,launch:'telegram'}))throw Error('invalid');
+      attention=value;
+    }catch{
+      // Keep no private summaries after auth/route/observation expiry. Unknown is never green.
+      attention={...attention,level:'unknown',symbol:'⚪',count:0,summaries:[]};
+    }finally{clearTimeout(deadline);attentionPending=false;render();}
   }
   async function load(){
     if(pending)return;
@@ -61,10 +104,10 @@
   }}catch{}
   byId('search').addEventListener('input',render);
   byId('favorites').onclick=()=>{favoritesOnly=!favoritesOnly;byId('favorites').setAttribute('aria-pressed',String(favoritesOnly));render();};
-  byId('refresh').onclick=load;
-  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')load();});
+  byId('refresh').onclick=()=>{load();loadAttention();};
+  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){load();loadAttention();}});
   window.addEventListener('pageshow',load);
   function chrome(){const css=getComputedStyle(document.documentElement);try{webapp?.setHeaderColor(css.getPropertyValue('--dm-background').trim());webapp?.setBackgroundColor(css.getPropertyValue('--dm-background').trim());}catch{}}
   window.addEventListener('home-style:resolved',chrome);
-  webapp?.ready?.();load();
+  webapp?.ready?.();load();loadAttention();setInterval(loadAttention,30000);
 })();
