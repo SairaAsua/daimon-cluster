@@ -141,3 +141,24 @@ before leaving. Never append Telegram launch data or private session parameters.
 Saved server work continues independently; preserving every in-memory view after
 a cross-origin navigation is not promised. Qualify actual Android/iOS WebView
 return behavior separately from browser routing.
+
+## Authenticated alert trail
+
+A separate same-origin `POST /apps/attention` route is operator-mapped to
+Telecodex's bounded read-only signed-launch endpoint. It validates the actual
+receiving bot/user and current human grant, then returns the same attention point
+used by the Telegram menu, with at most three safe summaries. The banner opens the
+existing registered Sessions link; its card repeats the exact point. Sessions opens
+active alert details with matching severity symbols. Labels accompany color.
+
+Public catalog data is unchanged. No private summary or launch payload is stored
+in the catalog, URLs or custom browser storage. Visible clients refresh every
+thirty seconds; hidden clients perform no observation. Failure clears summaries
+and shows white unknown rather than observed clear state. A response's registered
+app URL matches the card destination; a title is not an authority binding.
+
+Current receiving adoption is CompAII-only on shared Apps and its home. Other bot
+signatures are rejected and need their own receiving route; no shared credentials
+or inferred permissions. Anonymous browser views retain public navigation only.
+The receiver's five-minute signed-launch validity is preserved: reopening obtains
+fresh launch data. Browser fixtures do not establish physical phone acceptance.
