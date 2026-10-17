@@ -641,3 +641,34 @@ After accepted membership/governance changes, recovery finishes forward through
 compatible group artifacts. Old terminated memberships/grants and archived pair
 defaults are not an operational rollback. Historical messages remain readable;
 exact expired retries return their retained outcome without new transmission.
+
+## Managed restart before the first loaded receipt
+
+A successful StartUnit receipt names one manager invocation. If systemd replaces
+that invocation before `controlled_loaded` is retained, `bootstrap-start` correctly
+refuses to reuse its old proof. Do not overwrite that receipt, relax manager
+comparison or restart a valid successor merely to satisfy the observer.
+
+Use `GuestBootstrapController.recover_start(recovery_id, implementation=...)`.
+The exact recovery ID freezes the original bootstrap/start digest, original
+horizon and freshly authenticated successor. Its root `bootstrap-recover-start`
+action proves the original parent exited, pins the current child and parent,
+binds them to the unchanged selected unit/drop-ins/cgroup and retains a separate
+immutable successor receipt. It never stops, starts, selects or reloads a service.
+The host then runs every existing loaded SDK, identity, application and gate check
+and stores the explicit recovery reference through the normal journal CAS.
+
+The qualified control-plane implementation can be newer than the already running
+body candidate. Both content-addressed code generations are independently
+verified and mounted read-only; the recovery CLI binds its executing module to
+`--implementation-code` and its digest while `--runtime-code` still identifies
+the unchanged target. This never substitutes a maintenance helper for a body's
+loaded-code evidence or executes that body's private SDK as root.
+
+An uncertain recovery resumes the same frozen request and revalidates that exact
+live successor. A changed successor needs a distinct recovery request. Pending
+recovery prevents `execute` from replaying the original start. Initial support is
+limited to recovery before the first retained `controlled_loaded`; later process
+replacement remains a separate lifecycle operation. Restore any paused workers
+on both successful and contained-failure paths. Keep the initial startup failure
+separate from the recovery outcome; a generic refusal is not its diagnosis.

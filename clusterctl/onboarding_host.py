@@ -1106,16 +1106,18 @@ class HostBackend:
 
     def _guest_service_call(self, plan: dict, action: str, *, candidate: tuple[Path, str],
                             timeout_seconds: float, request: dict | None = None,
-                            owner_observation: dict | None = None) -> dict:
+                            owner_observation: dict | None = None,
+                            implementation: tuple[Path, str] | None = None) -> dict:
         """Named-unit root effects execute public Cluster code, never owner SDK.
 
         The caller holds the host operation/job locks and records uncertainty.
         This method does not create mounts or authorize a live interruption.
         """
-        if (action not in {'bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce', 'bootstrap-select', 'bootstrap-start'}
+        if (action not in {'bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce', 'bootstrap-select', 'bootstrap-start', 'bootstrap-recover-start'}
                 or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 60
                 or (action == 'bootstrap-inspect') != (request is None)
-                or action != 'bootstrap-inspect' and owner_observation is not None):
+                or action != 'bootstrap-inspect' and owner_observation is not None
+                or (action == 'bootstrap-recover-start') != (implementation is not None)):
             raise OnboardingError('receiving_guest_service_request_required')
         deadline_ns = time.monotonic_ns() + int(timeout_seconds * 1_000_000_000)
         if not self._ceremony(plan).authorize(plan):
@@ -1127,6 +1129,17 @@ class HostBackend:
             raise OnboardingError('qualified_onboarding_candidate_mount_required')
         arguments = ['--action', action, '--code', str(base), *runtime_args,
             '--plan', '/home/agent/.onboarding-input/plan.json']
+        if implementation is not None:
+            # Updating this control-plane implementation does not select or
+            # restart the target body's already running receiving code.
+            if self.config.code is None:
+                raise OnboardingError('qualified_guest_service_implementation_required')
+            onboarding_code_successor.selection(implementation[0], implementation[1],
+                self.config.code, self.config.release_digest, uid=os.geteuid())
+            code, _, implementation_mounts = self._runtime_paths(plan, base, candidate=implementation)
+            if not self._mounted(plan, implementation_mounts, deadline_ns=deadline_ns):
+                raise OnboardingError('qualified_onboarding_candidate_mount_required')
+            arguments += ['--implementation-code', str(code), '--implementation-digest', implementation[1]]
         for flag, value, limit in (('--bootstrap-request-json', request, 65536),
                                    ('--owner-observation-json', owner_observation, 2 * 1024**2)):
             if value is not None:

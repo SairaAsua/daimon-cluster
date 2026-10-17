@@ -62,7 +62,8 @@ def fixture(tmp_path, monkeypatch):
         intended_transition=dict(guest_bootstraps={'eko': selected}), audit_identity={'actor': 'synthetic'})
     monkeypatch.setattr(updates, 'preflight', lambda *_args, **_kwargs: copy.deepcopy(checked))
     new_process, new_parent = {**process, 'pid': 333, 'start_ticks': 12}, {**parent, 'pid': 322, 'start_ticks': 11}
-    started = dict(manager={**manager, 'MainPID': '322', 'InvocationID': 'new'})
+    started = dict(manager={**manager, 'MainPID': '322', 'InvocationID': 'new'},
+        admission_parent=copy.deepcopy(new_parent))
     calls = []
     class Backend:
         def __init__(self):
@@ -105,7 +106,7 @@ def fixture(tmp_path, monkeypatch):
                 if not self.active:
                     result['service']['manager'].update(ActiveState='inactive', SubState='dead', MainPID='0')
                 return result
-            return dict(service={**copy.deepcopy(started), 'unit_sha256': 'e' * 64},
+            return dict(service=dict(manager=copy.deepcopy(started['manager']), unit_sha256='e' * 64),
                 scope=dict(process=new_process, admission_parent=new_parent))
         def _target_call(self, _plan, action, **options):
             calls.append(action)
@@ -480,3 +481,85 @@ def test_controlled_guest_software_adoption_preserves_authority_and_recovers_los
     assert backend.stages == backend.starts == backend.stops == 1 and backend.publications == 0
     effects = controller.journal.get(row['operation_id'])['runtime_observation']['guest_bootstraps']['eko']
     assert 'owner_preserved' in effects and not {'owner_ready', 'owner_published'} & effects.keys()
+
+
+def test_managed_successor_recovery_keeps_original_start_and_lifecycle(fixture, monkeypatch):
+    controller, backend, calls, _ = fixture
+    def unavailable(*_args, **_options):
+        raise OSError('initial owner observation unavailable')
+    with monkeypatch.context() as patch:
+        patch.setattr(controller, '_loaded', unavailable)
+        with pytest.raises(OSError):
+            controller.execute()
+    original_row = controller.journal.get(controller.operation_id)
+    original_start = copy.deepcopy(original_row['runtime_observation']['guest_bootstraps']['eko']['started'])
+    real_root, real_owner = backend._guest_service_call, backend._target_call
+    recovery_id = str(uuid.uuid4())
+    lost = [True]
+    receipts = []
+    def root(plan, action, **options):
+        if action == 'bootstrap-recover-start':
+            request = options['request']
+            scope = dict(process=request['successor']['process'],
+                admission_parent=request['successor']['admission_parent'])
+            receipt = dict(schema='cluster-guest-start-successor/v1', recovery_operation_id=recovery_id,
+                recovery_sha256=digest(request), bootstrap_sha256=digest(request['bootstrap']),
+                started_sha256=digest(original_start), implementation_sha256='f' * 64,
+                predecessor_parent=original_start['admission_parent'], predecessor_exited=True,
+                scope=scope, manager=request['successor']['service']['manager'],
+                unit_sha256='e' * 64, receiving_readiness='unobserved')
+            receipts.append(receipt)
+            if lost:
+                lost.pop()
+                raise OSError('lost recovery response')
+            return receipt
+        assert action == 'bootstrap-inspect', 'recovery repeated lifecycle'
+        result = real_root(plan, action, **options)
+        result['service']['manager'].update(MainPID='422', InvocationID='managed-successor')
+        result['scope']['process'].update(pid=433, start_ticks=22)
+        result['scope']['admission_parent'].update(pid=422, start_ticks=21)
+        return result
+    def owner(*args, **options):
+        assert args[1] == 'admitted-running'
+        result = real_owner(*args, **options)
+        result['process'].update(pid=433, start_ticks=22)
+        result['admission_parent'].update(pid=422, start_ticks=21)
+        result['runtime_status']['loaded_runtime']['qualified_startup']['process_id'] = 433
+        result['group_runtime_status']['receiving']['channels']['tribe'] = dict(
+            controlled=True, phase='unselected', readers=[], process_id=433)
+        return result
+    monkeypatch.setattr(backend, '_guest_service_call', root)
+    monkeypatch.setattr(backend, '_target_call', owner)
+    row, frozen, candidate = controller._row()
+    vector = (Path(candidate['runtime_code']), candidate['runtime_digest'])
+    with pytest.raises(OnboardingError, match='loaded_conflict'):
+        controller._loaded(frozen, candidate, vector, 30)
+    implementation = (Path('/qualified/maintenance'), 'f' * 64)
+    with pytest.raises(OSError, match='lost recovery'):
+        controller.recover_start(recovery_id, implementation=implementation)
+    with pytest.raises(OnboardingError, match='start_recovery_required'):
+        controller.execute()
+    loaded = controller.recover_start(recovery_id, implementation=implementation)
+    assert loaded['start_recovery_operation_id'] == recovery_id
+    assert receipts[0] == receipts[1]
+    assert controller.execute() == loaded
+    effects = controller.journal.get(controller.operation_id)['runtime_observation']['guest_bootstraps']['eko']
+    assert effects['started'] == original_start
+    assert backend.stops == backend.starts == backend.stages == backend.publications == 1
+
+
+def test_managed_start_recovery_refuses_backend_configuration_drift_before_observation(fixture, monkeypatch):
+    from dataclasses import replace
+    controller, backend, calls, _ = fixture
+    def unavailable(*_args, **_options):
+        raise OSError('initial owner observation unavailable')
+    with monkeypatch.context() as patch:
+        patch.setattr(controller, '_loaded', unavailable)
+        with pytest.raises(OSError):
+            controller.execute()
+    row = controller.journal.get(controller.operation_id)
+    previous = list(calls)
+    backend.config = replace(backend.config, concurrency=backend.config.concurrency + 1)
+    with pytest.raises(OnboardingError, match='binding_conflict'):
+        controller.recover_start(str(uuid.uuid4()), implementation=(Path('/qualified/maintenance'), 'f' * 64))
+    assert calls == previous and controller.journal.get(controller.operation_id) == row

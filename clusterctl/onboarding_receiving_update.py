@@ -1873,6 +1873,8 @@ class GuestBootstrapController:
                 self._record('candidate_validated', root_call('bootstrap-validate'))
             if 'controlled_loaded' in effects:
                 return self._loaded(frozen, candidate, vector, timeout_seconds)
+            if any(key.startswith('start_recovery_request:') for key in effects):
+                raise OnboardingError('receiving_guest_bootstrap_start_recovery_required')
             if 'quiesced' not in effects:
                 current = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
                     timeout_seconds=timeout_seconds)
@@ -1939,13 +1941,92 @@ class GuestBootstrapController:
             self._record('controlled_loaded', loaded)
             return loaded
 
-    def _loaded(self, frozen: dict, candidate: dict, vector: tuple[Path, str], timeout_seconds: float) -> dict:
-        observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=vector,
-            observation_timeout_seconds=timeout_seconds, require_loaded=True)
+    def recover_start(self, recovery_id: str, *, implementation: tuple[Path, str],
+                      timeout_seconds: float = 30) -> dict:
+        """Adopt an exact managed successor before load; no stop/start or renewal."""
+        from .onboarding_host import HostConfig
+        if str(uuid.UUID(recovery_id)) != recovery_id:
+            raise OnboardingError('receiving_guest_start_recovery_required')
+        with ExitStack() as locks:
+            locks.enter_context(self.journal.mutation_lock(self.operation_id))
+            row, frozen, candidate = self._row()
+            jobs = private_directory(self.backend.config.jobs)
+            locks.enter_context(being_seed._locked(jobs))
+            store = JobStore(jobs)
+            for name in store.names():
+                locks.enter_context(being_seed._locked(private_directory(store.directory(name))))
+            row, frozen, candidate = self._row()
+            if self.backend.config != HostConfig.load(Path(row['expected_precondition']['host_config'])):
+                raise OnboardingError('receiving_guest_bootstrap_binding_conflict')
+            effects = (row['runtime_observation'] or {}).get('guest_bootstraps', {}).get(self.name, {})
+            if 'controlled_loaded' in effects or any(key not in effects for key in
+                    ('candidate_validated', 'quiesced', 'unit_selected', 'started')):
+                raise OnboardingError('receiving_guest_start_recovery_required')
+            if candidate['expires_at_ms'] <= time.time_ns() // 1_000_000:
+                raise OnboardingError('receiving_guest_bootstrap_authorization_expired')
+            vector = (Path(candidate['runtime_code']), candidate['runtime_digest'])
+            checked = preflight(vector[0], vector[1], Path(candidate['manifest_path']),
+                row['intent']['runtime_call']['manifest_digest'], being_ref=frozen['owner']['being_ref'],
+                embodiment_id=frozen['owner']['origin']['embodiment_id'],
+                code_uid=candidate['code_uid'], manifest_uid=candidate['manifest_uid'])
+            if checked != candidate['prepared']:
+                raise OnboardingError('receiving_guest_bootstrap_candidate_changed')
+            observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=vector,
+                observation_timeout_seconds=timeout_seconds, require_loaded=True)
+            root = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
+                timeout_seconds=timeout_seconds, owner_observation={key: observed[key]
+                    for key in ('process', 'admission_parent')})
+            previous = {**frozen['owner']['predecessor'],
+                'service': frozen['root']['service'], 'scope': frozen['root']['scope']}
+            bootstrap = dict(schema='cluster-guest-service-bootstrap/v1', operation_id=self._native_operation_id(),
+                plan_digest=digest(frozen['plan']), predecessor=previous, argv=candidate['argv'])
+            request = dict(schema='cluster-guest-start-recovery/v1', operation_id=recovery_id,
+                bootstrap=bootstrap, started_sha256=digest(effects['started']),
+                successor={**{key: observed[key] for key in ('process', 'admission_parent')}, 'service': root['service']},
+                implementation_sha256=implementation[1], expires_at_ms=candidate['expires_at_ms'])
+            self._record('start_recovery_request:' + recovery_id, request)
+            receipt = self.backend._guest_service_call(frozen['plan'], 'bootstrap-recover-start',
+                candidate=vector, timeout_seconds=timeout_seconds, request=request, implementation=implementation)
+            if (receipt.get('schema') != 'cluster-guest-start-successor/v1'
+                    or receipt.get('recovery_operation_id') != recovery_id
+                    or receipt.get('recovery_sha256') != digest(request)
+                    or receipt.get('bootstrap_sha256') != digest(bootstrap)
+                    or receipt.get('started_sha256') != digest(effects['started'])
+                    or receipt.get('implementation_sha256') != implementation[1]
+                    or receipt.get('predecessor_parent') != effects['started']['admission_parent']
+                    or receipt.get('predecessor_exited') is not True
+                    or receipt.get('manager') != root['service']['manager']
+                    or receipt.get('scope') != root['scope']
+                    or receipt.get('unit_sha256') != effects['unit_selected']['selected_sha256']):
+                raise OnboardingError('receiving_guest_start_recovery_conflict')
+            self._record('start_recovery_receipt:' + recovery_id, receipt)
+            loaded = self._loaded(frozen, candidate, vector, timeout_seconds,
+                observed=observed, start_recovery_id=recovery_id)
+            self._record('controlled_loaded', loaded)
+            return loaded
+
+    def _loaded(self, frozen: dict, candidate: dict, vector: tuple[Path, str], timeout_seconds: float,
+                *, observed: dict | None = None, start_recovery_id: str | None = None) -> dict:
+        if observed is None:
+            observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=vector,
+                observation_timeout_seconds=timeout_seconds, require_loaded=True)
         root = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
             timeout_seconds=timeout_seconds, owner_observation={key: observed[key]
                 for key in ('process', 'admission_parent')})
         effects = self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]
+        if start_recovery_id is None:
+            start_recovery_id = effects.get('controlled_loaded', {}).get('start_recovery_operation_id')
+        manager = effects['started']['manager']
+        if start_recovery_id is not None:
+            request = effects.get('start_recovery_request:' + start_recovery_id)
+            receipt = effects.get('start_recovery_receipt:' + start_recovery_id)
+            if (not isinstance(request, dict) or not isinstance(receipt, dict)
+                    or receipt.get('recovery_sha256') != digest(request)
+                    or receipt.get('started_sha256') != digest(effects['started'])
+                    or receipt.get('scope') != root['scope']
+                    or receipt.get('manager') != root['service']['manager']):
+                raise OnboardingError('receiving_guest_start_recovery_conflict')
+            manager = receipt['manager']
         expected_runtime, _ = bootstrap_effects(effects, source=False, mode=frozen['owner'].get('mode', 'issue'))
         loaded = observed['runtime_status']['loaded_runtime']
         startup = loaded['qualified_startup']
@@ -1955,7 +2036,7 @@ class GuestBootstrapController:
                 or root['scope']['admission_parent'] != observed['admission_parent']
                 or root['service']['unit_sha256'] != effects['unit_selected']['selected_sha256']
                 or root['service'].get('dropins', {}) != frozen['root']['service'].get('dropins', {})
-                or root['service']['manager'] != effects['started']['manager']
+                or root['service']['manager'] != manager
                 or any(startup.get(key) != value for key, value in dict(
                     code_digest=candidate['runtime_digest'], matrix_commit=candidate['prepared']['matrix_revision'],
                     sdk_digest=candidate['prepared']['sdk_digest'], reader=candidate['prepared']['reader'],
@@ -1978,6 +2059,8 @@ class GuestBootstrapController:
             startup_instance_id=startup['startup_instance_id'],
             loaded_runtime=loaded, loaded_application={key: value for key, value in application.items() if key != 'reader_gates'},
             group_sha256=frozen['owner']['group_sha256'], receiving_readiness='unobserved')
+        if start_recovery_id is not None:
+            result['start_recovery_operation_id'] = start_recovery_id
         if effects.get('controlled_loaded', result) != result:
             raise OnboardingError('receiving_guest_bootstrap_loaded_conflict')
         return result

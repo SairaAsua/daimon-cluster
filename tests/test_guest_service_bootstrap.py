@@ -442,7 +442,7 @@ def test_expired_budget_creates_no_effect_or_operation_state(fixture):
 
 @pytest.mark.parametrize(
     "action",
-    ["bootstrap-inspect", "bootstrap-quiesce", "bootstrap-select", "bootstrap-start"],
+    ["bootstrap-inspect", "bootstrap-quiesce", "bootstrap-select", "bootstrap-start", "bootstrap-recover-start"],
 )
 def test_closed_root_cli_never_calls_install_or_owner_sdk(monkeypatch, capsys, action):
     import json
@@ -482,6 +482,12 @@ def test_closed_root_cli_never_calls_install_or_owner_sdk(monkeypatch, capsys, a
             calls.append((verb, request, kwargs))
             return {"receiving_readiness": "unobserved"}
 
+        def recover_start(self, request, **kwargs):
+            assert request['bootstrap']['plan_digest'] == digest(selected)
+            assert request['implementation_sha256'] == 'f' * 64
+            calls.append(('recover-start', request, kwargs))
+            return {'receiving_readiness': 'unobserved'}
+
     monkeypatch.setattr(onboarding_service, "GuestServiceBootstrap", Controller)
     argv = [
         "--code",
@@ -492,9 +498,15 @@ def test_closed_root_cli_never_calls_install_or_owner_sdk(monkeypatch, capsys, a
         action,
     ]
     if action != "bootstrap-inspect":
+        request = {"plan_digest": digest(selected)}
+        if action == 'bootstrap-recover-start':
+            implementation = '/opt/daimon-onboarding-runtime/' + 'f' * 64
+            monkeypatch.setattr(onboarding_service, '__file__', implementation + '/clusterctl/onboarding_service.py')
+            argv += ['--implementation-code', implementation, '--implementation-digest', 'f' * 64]
+            request = {'bootstrap': request, 'implementation_sha256': 'f' * 64}
         argv += [
             "--bootstrap-request-json",
-            json.dumps({"plan_digest": digest(selected)}),
+            json.dumps(request),
         ]
     assert onboarding_service.main(argv) == 0
     assert len(calls) == 1 and calls[0][0] == action.removeprefix("bootstrap-")
@@ -616,3 +628,101 @@ def test_root_validates_actual_candidate_before_any_lifecycle_effect(fixture):
     with pytest.raises(OnboardingError, match='predecessor_changed'):
         controller.execute('validate', request, deadline_ns=deadline())
     assert manager.stops == manager.starts == 0
+
+
+@pytest.fixture
+def managed_successor(fixture, monkeypatch):
+    from clusterctl.onboarding import digest
+    controller, manager, bootstrap = fixture
+    controller.execute('quiesce', bootstrap, deadline_ns=deadline())
+    controller.execute('select', bootstrap, deadline_ns=deadline())
+    started = controller.execute('start', bootstrap, deadline_ns=deadline())
+    original_inspect = manager.inspect
+    parent = {**started['admission_parent'], 'pid': 322, 'start_ticks': 19}
+    child = {**parent, 'pid': 333, 'start_ticks': 20}
+    manager.exited[started['admission_parent']['pid']] = True
+    manager.invocation = 'managed-successor'
+    def inspect(**options):
+        value = original_inspect(**options)
+        value['manager']['MainPID'] = str(parent['pid'])
+        return value
+    manager.inspect = inspect
+    class Family:
+        def __init__(self, observed):
+            assert observed == child
+            self.process = dict(parent)
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            pass
+        def verify(self):
+            pass
+    monkeypatch.setattr(owner_process, 'ParentProcessPresence', Family)
+    recovery = dict(schema='cluster-guest-start-recovery/v1', operation_id=str(uuid.uuid4()),
+        bootstrap=bootstrap, started_sha256=digest(started),
+        successor=dict(process=child, admission_parent=parent, service=manager.inspect()),
+        implementation_sha256='b' * 64, expires_at_ms=time.time_ns() // 1_000_000 + 60000)
+    for name in ('start', 'stop'):
+        monkeypatch.setattr(manager, name, lambda **_: pytest.fail('recovery changed service lifecycle'))
+    return controller, manager, recovery, started
+
+
+def test_managed_start_recovery_retains_original_and_rechecks_exact_retry(managed_successor):
+    controller, manager, request, started = managed_successor
+    root = controller._request(request['bootstrap'])[0]
+    originals = {name: (root / name).read_bytes() for name in
+        ('started.json', 'start-intent.json', 'pending-parent.json')}
+    result = controller.recover_start(request, deadline_ns=deadline())
+    assert result['predecessor_exited'] is True
+    assert result['scope']['admission_parent'] == request['successor']['admission_parent']
+    assert controller.recover_start(request, deadline_ns=deadline()) == result
+    assert controller._retained(root, 'started') == started
+    assert all((root / name).read_bytes() == raw for name, raw in originals.items())
+    manager.invocation = 'another-successor'
+    with pytest.raises(OnboardingError, match='successor_changed'):
+        controller.recover_start(request, deadline_ns=deadline())
+
+
+@pytest.mark.parametrize('change', ['live-parent', 'other-boot', 'unit', 'dropin', 'cgroup', 'ancestry', 'expired', 'start-digest'])
+def test_managed_start_recovery_rejects_changed_preconditions(managed_successor, change):
+    controller, manager, request, started = managed_successor
+    if change == 'live-parent':
+        manager.exited[started['admission_parent']['pid']] = False
+    elif change == 'other-boot':
+        request['successor']['admission_parent']['boot_id'] = str(uuid.uuid4())
+    elif change == 'unit':
+        manager.unit.write_bytes(manager.unit.read_bytes() + b'#changed\n')
+    elif change == 'dropin':
+        manager.dropins = {'/unexpected.conf': 'c' * 64}
+    elif change == 'cgroup':
+        request['successor']['service']['manager']['ControlGroup'] = '/other/' + UNIT
+    elif change == 'ancestry':
+        request['successor']['admission_parent']['pid'] += 1
+    elif change == 'expired':
+        request['expires_at_ms'] = 1
+    else:
+        request['started_sha256'] = 'f' * 64
+    with pytest.raises((OnboardingError, owner_process.PresenceError)):
+        controller.recover_start(request, deadline_ns=deadline())
+
+
+def test_managed_start_recovery_rejects_reused_pid_and_observation_race(managed_successor, monkeypatch):
+    controller, manager, request, _ = managed_successor
+    def reused(_):
+        raise owner_process.PresenceError('owner_process_exit_observation_rejected')
+    with monkeypatch.context() as patch:
+        patch.setattr(owner_process, 'observe_process_exit', reused)
+        with pytest.raises(owner_process.PresenceError):
+            controller.recover_start(request, deadline_ns=deadline())
+    inspect = manager.inspect
+    count = 0
+    def changing(**options):
+        nonlocal count
+        value = inspect(**options)
+        count += 1
+        if count > 1:
+            value['manager']['InvocationID'] = 'raced'
+        return value
+    monkeypatch.setattr(manager, 'inspect', changing)
+    with pytest.raises(OnboardingError, match='successor_changed'):
+        controller.recover_start(request, deadline_ns=deadline())

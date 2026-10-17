@@ -797,3 +797,33 @@ def test_short_owner_control_keeps_affected_receiving_contracts_only(tmp_path):
     assert select(changed,ROOT)==('peer',list(OWNER_CONTROL_TESTS))
     assert select(changed,tmp_path)==('full',['tests'])
     assert select([*changed,'clusterctl/admission.py'],ROOT)==('full',['tests'])
+
+
+def test_managed_start_recovery_keeps_receiving_host_and_access_coverage(monkeypatch):
+    import subprocess
+    from tools import ci_scope
+    from types import SimpleNamespace
+    original, current = b'original host route', b'explicit qualified Root recovery route'
+    sha256 = ci_scope.hashlib.sha256
+    monkeypatch.setattr(ci_scope.hashlib, 'sha256', lambda raw:
+        SimpleNamespace(hexdigest=lambda: 'cc1e19f193e69cc67c08d121243067813f6ae6b56bbbb358cf5888be2909c216')
+        if raw == original else SimpleNamespace(hexdigest=lambda: 'afb3f1f78e151f6cdb078903bb8856d401172dc5f677dba05908cca7b6051732')
+        if raw == current else sha256(raw))
+    read = Path.read_bytes
+    monkeypatch.setattr(Path, 'read_bytes', lambda path:
+        current if path == ROOT/'clusterctl/onboarding_host.py' else read(path))
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *a, **k:
+        subprocess.CompletedProcess(a, 0, original))
+    changed = ['clusterctl/onboarding_host.py', 'tests/test_onboarding_host.py',
+        'clusterctl/onboarding_service.py', 'tests/test_guest_service_bootstrap.py',
+        'clusterctl/onboarding_receiving_update.py', 'tests/test_guest_bootstrap_controller.py',
+        'docs/runbooks/tribu-sdk-successor.md', 'tools/ci_scope.py', 'tests/test_ci_scope.py']
+    profile, tests = select(changed, ROOT, base='a'*40)
+    assert profile == 'peer' and set(ci_scope.LOADED_STARTUP_TESTS) <= set(tests)
+    assert {'tests/test_onboarding_host.py', 'tests/test_onboarding_host_ownership.py',
+        'tests/test_onboarding_managed.py', 'tests/test_onboarding_peer_host.py'} <= set(tests)
+    assert len(tests) == len(set(tests))
+    assert select([*changed, 'clusterctl/onboarding_custody.py'], ROOT, base='a'*40)[0] == 'full'
+    monkeypatch.setattr(Path, 'read_bytes', lambda path:
+        current + b'\n# another delta' if path == ROOT/'clusterctl/onboarding_host.py' else read(path))
+    assert select(changed, ROOT, base='a'*40)[0] == 'full'

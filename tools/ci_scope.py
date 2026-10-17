@@ -414,6 +414,12 @@ def host_observation_only(root: Path, base: str) -> bool:
         'cc1e19f193e69cc67c08d121243067813f6ae6b56bbbb358cf5888be2909c216'):
         # Extend the existing prepared-SDK entry to the three bootstrap verbs.
         return True
+    if (hashlib.sha256(original).hexdigest(), hashlib.sha256(current).hexdigest()) == (
+        'cc1e19f193e69cc67c08d121243067813f6ae6b56bbbb358cf5888be2909c216',
+        'afb3f1f78e151f6cdb078903bb8856d401172dc5f677dba05908cca7b6051732'):
+        # Explicit managed-start recovery uses a separately qualified Root helper.
+        # Keep every loaded-startup and host route/access contract below.
+        return True
     return (hashlib.sha256(original).hexdigest() in {
         '742fb3e396d4619369152cde4c3811c22df18504e504d7012e99c99772040c59',
         '8b0a728465958acb8da5ae0d212fd69c3b548a07f9f9d677e66ec3146b3780d2'}

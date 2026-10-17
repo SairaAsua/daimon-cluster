@@ -1,6 +1,8 @@
 """Typed substrate commands preserve foreign bodies and reconcile partial creation."""
 import copy
 import json
+import os
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -499,6 +501,46 @@ def test_host_root_service_route_never_executes_private_sdk_or_installer(tmp_pat
     assert not any('site-packages' in item or '/venv/' in item for item in argv)
     assert '--receive-only' not in argv and '--visibility-installation' not in argv
     assert 0 < bounds['timeout_seconds'] <= 5
+
+
+@pytest.mark.parametrize('change', [None, 'unmounted', 'changed-code', 'missing-implementation'])
+def test_managed_start_recovery_uses_qualified_root_helper_without_changing_target(tmp_path, monkeypatch, change):
+    from clusterctl import onboarding_code_successor
+    backend, value, run, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    implementation_path = tmp_path / 'root-implementation'
+    shutil.copytree(candidate[0], implementation_path)
+    (implementation_path / 'clusterctl/onboarding_target.py').write_text('# qualified maintenance successor\n')
+    # Re-seal the fixture as a distinct compatible public-code generation.
+    from clusterctl import onboarding_release
+    profile = json.loads((implementation_path / 'release.json').read_bytes())['profile']
+    (implementation_path / 'release.json').unlink()
+    implementation = (implementation_path, onboarding_release.seal(implementation_path, profile))
+    onboarding_code_successor.selection(implementation_path, implementation[1],
+        backend.config.code, backend.config.release_digest, uid=os.geteuid())
+    guest_implementation = '/opt/daimon-onboarding-runtime/' + implementation[1]
+    if change != 'unmounted':
+        run.instances[0]['expanded_devices']['maintenance-helper'] = dict(type='disk',
+            source=str(implementation_path), path=guest_implementation, readonly='true', shift='true')
+    if change == 'changed-code':
+        (implementation_path / 'clusterctl/onboarding_target.py').write_text('# unqualified overwrite\n')
+    options = dict(candidate=candidate, timeout_seconds=5, request={'recovery': 'synthetic'})
+    if change != 'missing-implementation':
+        options['implementation'] = implementation
+    if change:
+        with pytest.raises(OnboardingError):
+            backend._guest_service_call(value, 'bootstrap-recover-start', **options)
+        assert not calls
+        return
+    assert backend._guest_service_call(value, 'bootstrap-recover-start', **options) == {'observed': True}
+    argv = calls[0][0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '0', '--group', '0']
+    assert argv[argv.index('--') + 1] == '/usr/bin/python3'
+    assert argv[argv.index('--runtime-code') + 1] == '/opt/daimon-onboarding-runtime/' + candidate[1]
+    assert argv[argv.index('--runtime-digest') + 1] == candidate[1]
+    assert argv[argv.index('--implementation-code') + 1] == guest_implementation
+    assert argv[argv.index('--implementation-digest') + 1] == implementation[1]
+    assert guest_implementation in argv[:argv.index('--action')]
+    assert not any('/venv/' in part for part in argv)
 
 
 @pytest.mark.parametrize('phase', ['freeze', 'stage', 'publish'])
