@@ -462,6 +462,12 @@ def receiving_support_only(root: Path, base: str, names: set[str]) -> bool:
 
 
 def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
+    storage_files = {'tools/storage_hygiene.py', 'tests/test_storage_hygiene.py',
+                     'docs/operations/host-storage-hygiene.md'}
+    storage_tests = ['tests/test_storage_hygiene.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    if (set(changed) & storage_files and set(changed) <= storage_files | CI_FILES
+            and all((root / name).is_file() for name in storage_tests)):
+        return 'peer', storage_tests
     if (set(changed) & (OWNER_CONTROL_FILES - {'tools/check_rc_types.py'})
             and set(changed) <= OWNER_CONTROL_FILES | CI_FILES | RUNBOOK_DOCS
             and all((root / name).is_file() for name in OWNER_CONTROL_TESTS)):

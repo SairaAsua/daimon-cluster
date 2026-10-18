@@ -827,3 +827,14 @@ def test_managed_start_recovery_keeps_receiving_host_and_access_coverage(monkeyp
     monkeypatch.setattr(Path, 'read_bytes', lambda path:
         current + b'\n# another delta' if path == ROOT/'clusterctl/onboarding_host.py' else read(path))
     assert select(changed, ROOT, base='a'*40)[0] == 'full'
+
+
+def test_storage_retention_keeps_its_coverage_and_unknown_changes_stay_full(tmp_path):
+    files = ['tools/storage_hygiene.py', 'tests/test_storage_hygiene.py',
+             'docs/operations/host-storage-hygiene.md', 'tools/ci_scope.py',
+             'tests/test_ci_scope.py']
+    assert select(files, ROOT) == ('peer', ['tests/test_storage_hygiene.py',
+        'tests/test_ci_scope.py', 'tests/test_ci_workflow.py'])
+    assert select(files, tmp_path) == ('full', ['tests'])
+    for extra in ['clusterctl/onboarding_host.py', 'requirements.txt', 'unknown.py']:
+        assert select([*files, extra], ROOT) == ('full', ['tests'])
