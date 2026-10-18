@@ -72,7 +72,8 @@ def observe(owner: OwnerGroupClient, *, expected: dict[str, Any],
 
 def qualified_identity(owner: OwnerGroupClient, *, expected: dict[str, Any],
                        expires_at_ms: int, deadline_ns: int, code: Path,
-                       require_admitted: bool, native_tooling: dict[str, Any] | None = None) -> dict[str, Any]:
+                       require_admitted: bool, native_tooling: dict[str, Any] | None = None,
+                       body_venv: Path | None = None) -> dict[str, Any]:
     """Qualify the known loaded process without another cold startup ceremony."""
     from daimon_matrix.canonical import canonical_bytes
     from .onboarding_owner_client import observe_selected_tooling
@@ -106,9 +107,18 @@ def qualified_identity(owner: OwnerGroupClient, *, expected: dict[str, Any],
         if native_tooling is not None:
             # These are the authenticated daemon's actual startup pins, not a
             # claim that this maintenance component is its loaded generation.
+            context = {}
+            if body_venv is not None:
+                sdk_digest = loaded['qualified_startup'].get('sdk_digest')
+                prefix = Path(sys.prefix)
+                if (not isinstance(sdk_digest, str) or re.fullmatch('[0-9a-f]{64}', sdk_digest) is None
+                        or prefix.name != 'venv' or re.fullmatch('[0-9a-f]{64}', prefix.parent.name) is None
+                        or body_venv != prefix.parent.parent / sdk_digest / 'venv'):
+                    raise OnboardingError('receiving_control_binding_conflict')
+                context['venv'] = body_venv
             current['native_tooling'] = observe_selected_tooling(native_tooling,
                 code=code, startup=loaded['qualified_startup'], code_uid=0,
-                deadline_ns=deadline_ns, receiving=current)
+                deadline_ns=deadline_ns, receiving=current, **context)
         after = owner.socket.lstat()
         if (socket_before.st_dev, socket_before.st_ino, socket_before.st_ctime_ns) != (
                 after.st_dev, after.st_ino, after.st_ctime_ns):
@@ -219,6 +229,7 @@ def main() -> int:
     parser.add_argument('--observe-only', action='store_true')
     parser.add_argument('--identity-expires-at-ms', type=int)
     parser.add_argument('--code', type=Path)
+    parser.add_argument('--body-venv', type=Path)
     parser.add_argument('--require-admitted', action='store_true')
     parser.add_argument('--deadline-ns', type=int, required=True)
     parser.add_argument('--time-namespace', required=True)
@@ -235,6 +246,7 @@ def main() -> int:
         if (not isinstance(value, dict) or set(value) != fields
                 or (args.observe_only or identity_query) != (args.path is None)
                 or identity_query != (args.code is not None) or args.observe_only and identity_query
+                or args.body_venv is not None and not identity_query
                 or args.require_admitted and not identity_query):
             raise OnboardingError('invalid_receiving_control_request')
         with OwnerGroupClient(args.root, args.socket, deadline_ns=args.deadline_ns) as owner:
@@ -242,7 +254,8 @@ def main() -> int:
                 assert args.code is not None
                 result = qualified_identity(owner, expected=value['expected'],
                     expires_at_ms=args.identity_expires_at_ms, deadline_ns=args.deadline_ns,
-                    code=args.code, require_admitted=args.require_admitted, native_tooling=value['native_tooling'])
+                    code=args.code, require_admitted=args.require_admitted, native_tooling=value['native_tooling'],
+                    body_venv=args.body_venv)
             elif args.observe_only:
                 result = observe(owner, expected=value['expected'], deadline_ns=args.deadline_ns)
             else:

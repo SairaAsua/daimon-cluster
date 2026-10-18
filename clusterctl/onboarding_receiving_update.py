@@ -1774,6 +1774,32 @@ class GuestBootstrapController:
             pass
         return str(uuid.uuid5(uuid.NAMESPACE_URL, 'cluster-guest-bootstrap:' + self.operation_id))
 
+    def _observation_vector(self, row: dict, body: tuple[Path, str]) -> tuple[Path, str]:
+        """Use a frozen newer observer without relabeling the selected body.
+
+        An older rollback body need not understand the observer CLI. Only
+        authenticated observation uses this vector; lifecycle/publication and
+        all _loaded comparisons continue to consume the actual body candidate.
+        """
+        from . import onboarding_code_successor
+        observer = row['expected_precondition'].get('receiving_observer')
+        if observer is None:
+            return body
+        if (not isinstance(observer, dict) or set(observer) != {'code', 'code_digest'}
+                or not isinstance(observer['code'], str) or not Path(observer['code']).is_absolute()
+                or '..' in Path(observer['code']).parts
+                or re.fullmatch('[0-9a-f]{64}', observer.get('code_digest', '')) is None):
+            raise OnboardingError('qualified_receiving_observer_required')
+        code = Path(observer['code'])
+        frozen = row['expected_precondition']['guest_bootstraps'][self.name]
+        onboarding_code_successor.verify(code, observer['code_digest'], self.backend.config.code,
+            frozen['plan']['release_digest'], uid=os.geteuid())
+        parameters = onboarding_code_successor.sdk_parameters(code, uid=os.geteuid())
+        if not parameters:
+            raise OnboardingError('qualified_receiving_observer_required')
+        onboarding_sdk.verify(code, uid=os.geteuid(), **parameters)
+        return code, observer['code_digest']
+
     def _row(self) -> tuple[dict, dict, dict]:
         row = self.journal.get(self.operation_id)
         if (row is None or row['operation'] != 'receiving-update'
@@ -1971,7 +1997,7 @@ class GuestBootstrapController:
                 code_uid=candidate['code_uid'], manifest_uid=candidate['manifest_uid'])
             if checked != candidate['prepared']:
                 raise OnboardingError('receiving_guest_bootstrap_candidate_changed')
-            observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=vector,
+            observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=self._observation_vector(row, vector),
                 observation_timeout_seconds=timeout_seconds, require_loaded=True, current_native=True)
             root = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
                 timeout_seconds=timeout_seconds, owner_observation={key: observed[key]
@@ -2008,7 +2034,8 @@ class GuestBootstrapController:
     def _loaded(self, frozen: dict, candidate: dict, vector: tuple[Path, str], timeout_seconds: float,
                 *, observed: dict | None = None, start_recovery_id: str | None = None) -> dict:
         if observed is None:
-            observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=vector,
+            row = self._row()[0]
+            observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=self._observation_vector(row, vector),
                 observation_timeout_seconds=timeout_seconds, require_loaded=True, current_native=True)
         root = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
             timeout_seconds=timeout_seconds, owner_observation={key: observed[key]

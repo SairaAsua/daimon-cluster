@@ -1,5 +1,76 @@
 # Receiver-compatible Matrix updates
 
+## Supported routine maintenance command
+
+For already admitted Source and guest bodies, use the maintained
+`clusterctl.receiving_maintenance` operation. The implementation composes the
+existing Source, guest and cohort controllers and their journals; it does not
+re-enroll a body. Complete any older unfinished lifecycle through its original
+controller first. Do not import or relabel its operation as a new maintenance.
+
+Build the fixed helper closure with `python -m tools.build_receiving_maintenance`
+(`--base`, `--base-digest`, `--sdk`, `--matrix-commit`,
+`--matrix-wheel-sha256`, `--output`). This wraps the existing immutable successor
+builder. Keep the original base, qualified SDK, previous body and selected native
+tooling. Qualify the exact captured helper, then publish it under root-owned
+non-writable public code storage; building does not qualify or select it.
+
+Use one protected root-owned mode-0600 JSON spec (`cluster-receiving-maintenance/v1`):
+
+- `name`, `journal`, `host_config`: stable operation label, Root OperationJournal
+  directory and existing host configuration. Keep the exact spec for retries.
+- `candidate`: `code`, `code_digest`, `manifest_path`, `manifest_digest`,
+  `expires_at_ms`. The approved release manifest names **all** required current
+  receivers, their exact predecessor selections, SDK and candidate helper.
+- `observer`: separately qualified `code` and `code_digest`. It contains the
+  current native observer/control implementation and can differ from the body
+  candidate for a compatible backward software selection.
+- `source`: non-root `uid`, `gid`, `home`, `config`, `config_sha256`, `unit`,
+  `root`, `socket`, `bootstrap_venv`, `bootstrap_imports`, owner-local `journal`,
+  `transaction` and existing `tooling` recipe. The bootstrap interpreter and
+  closed imports are an already qualified SDK anchor, never arbitrary executables.
+- `guests`: mapping from existing job name to its actual authorized `grant`
+  path and existing `tooling` recipe. Jobs must be complete and match the grants.
+
+Run from the qualified helper's supported interpreter/import context:
+
+```sh
+python -m clusterctl.receiving_maintenance --spec "$maintenance_spec" prepare
+python -m clusterctl.receiving_maintenance --spec "$maintenance_spec" apply
+python -m clusterctl.receiving_maintenance --spec "$maintenance_spec" status
+```
+
+`prepare` installs only missing immutable SDK generations, prepares readonly
+mounts, preflights each receiver and freezes the original processes and child
+operations. It does not stop services, change active selectors or revoke senders.
+Source private SDK/config/journal access occurs only after dropping to its actual
+UID/GID with supplementary groups cleared. Root retains public selections and
+child references, never Source custody or a copied writable owner journal.
+
+Notify the human before `apply` interrupts Matrix services. This does not grant
+permission for global Stop, Codex/Telegram restart or unrelated service changes.
+The onboarding worker stays active: existing nonblocking job locks protect the
+selector/lifecycle effects. A collision returns `busy` (exit75); resume the **same
+spec** after that job completes. Do not pause a worker or loop/rebuild as a repair.
+
+`apply` revokes original sender processes, applies the retained host-selector CAS,
+then completes only missing Source/guest lifecycle effects, tooling adoption and
+positive all-required reader selection. A lost Source start reply goes directly
+to the original start observation, without another stop/publication. A partial
+positive selection resumes through `activate`, without repeating its revoke
+preparation. Complete HostConfig drift refuses before resumed lifecycle dispatch.
+After uncertainty, inspect retained status and resume the same operation; never
+remint messages, renew horizons or replace operations to hide missing evidence.
+
+`receiving-selected` records observed adoption, not communication. The command
+sends no messages and starts no models. Preserve actual communication receipts
+separately; reused evidence remains valid only while relevant conditions match.
+A compatible backward body update is a **new exact transition** from current
+state, using the new observer but comparing the actual loaded **body** pins.
+Never restore old authority, data, reader sets, request IDs or expired horizons.
+Keep uncertain publications and original histories intact.
+
+
 Current coordination: [Matrix #336](https://github.com/AlterMundi/daimon-matrix/issues/336),
 [Cluster #232](https://github.com/nicoechaniz/daimon-cluster/issues/232).
 The original readable-presentation increment is retained under

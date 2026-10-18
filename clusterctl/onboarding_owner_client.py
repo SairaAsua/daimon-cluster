@@ -86,7 +86,8 @@ def validate_tooling_recipe(recipe: dict) -> dict:
 
 
 def observe_selected_tooling(payload: dict, *, code: Path, startup: dict,
-                             code_uid: int, deadline_ns: int | None, receiving: dict) -> dict:
+                             code_uid: int, deadline_ns: int | None, receiving: dict,
+                             venv: Path | None = None) -> dict:
     if not isinstance(payload, dict) or set(payload) != {'recipe', 'accepted'}:
         raise OnboardingError('receiving_native_tooling_unobserved')
     recipe = validate_tooling_recipe(payload['recipe'])
@@ -102,7 +103,8 @@ def observe_selected_tooling(payload: dict, *, code: Path, startup: dict,
     binding_filename = recipe.get('binding_filename', 'binding.json')
     binding, fingerprint = installer._binding_fingerprint(attachment, binding_filename=binding_filename)
     import sys
-    command = chat_command(Path(sys.prefix), Path(sys.prefix).parent / 'runtime-imports',
+    selected_venv = Path(sys.prefix) if venv is None else venv
+    command = chat_command(selected_venv, selected_venv.parent / 'runtime-imports',
         code, code_digest=startup['code_digest'], binding=attachment / binding_filename, code_uid=code_uid)
     from daimon_matrix.canonical import canonical_bytes
     from daimon_matrix.agent_chat import MULTI_SCHEMA, bridge

@@ -309,6 +309,17 @@ class HostBackend:
         except (OSError, subprocess.TimeoutExpired):
             raise OnboardingError("onboarding_host_operation_failed") from None
         if result.returncode:
+            if argv[0] == 'exec' and 'clusterctl.onboarding_owner_control' in argv:
+                from .onboarding_owner_control import PUBLIC_ERRORS
+                for line in result.stderr.splitlines():
+                    try:
+                        detail = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (isinstance(detail, dict) and set(detail) == {'error'}
+                            and isinstance(detail.get('error'), str)
+                            and detail.get('error') in PUBLIC_ERRORS):
+                        raise OnboardingError(detail['error'])
             raise OnboardingError("onboarding_host_operation_failed")
         return result.stdout
 
