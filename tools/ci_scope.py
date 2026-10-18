@@ -509,6 +509,17 @@ OWNER_DIAGNOSTIC_ADDITION = b"""            if argv[0] == 'exec' and 'clusterctl
                         raise OnboardingError(detail['error'])
 """
 
+OWNER_TRANSPORT_ORIGINAL = b'''        except (OSError, subprocess.TimeoutExpired):
+            raise OnboardingError("onboarding_host_operation_failed") from None
+'''
+OWNER_TRANSPORT_DIAGNOSTIC = b'''        except (OSError, subprocess.TimeoutExpired) as error:
+            if timeout_seconds is not None and argv[0] == 'exec' and 'clusterctl.onboarding_owner_control' in argv:
+                code = ('receiving_host_deadline_expired' if isinstance(error, subprocess.TimeoutExpired)
+                    else 'receiving_host_launch_failed')
+                raise OnboardingError(code) from None
+            raise OnboardingError("onboarding_host_operation_failed") from None
+'''
+
 
 def owner_diagnostics_only(root: Path, base: str) -> bool:
     """Accept only the closed owner-control diagnostic addition to HostBackend."""
@@ -520,6 +531,9 @@ def owner_diagnostics_only(root: Path, base: str) -> bool:
     if before.returncode:
         return False
     current = (root / name).read_bytes()
+    if (current.count(OWNER_TRANSPORT_DIAGNOSTIC) == 1 and
+            current.replace(OWNER_TRANSPORT_DIAGNOSTIC, OWNER_TRANSPORT_ORIGINAL, 1) == before.stdout):
+        return True
     return current.count(OWNER_DIAGNOSTIC_ADDITION) == 1 and current.replace(
         OWNER_DIAGNOSTIC_ADDITION, b'', 1) == before.stdout
 

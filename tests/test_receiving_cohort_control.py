@@ -397,7 +397,7 @@ def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profi
     elif assessment_fault is not None:
         recipes['eko']['prepared']['assessment'][assessment_fault]='0'*64
     row=plan_update(journal,manifest_digest=digest(manifest),target='receiving:activation-fixture',
-        expected_precondition=dict(senders=frozen_senders,receiver_selections=before,
+        expected_precondition=dict(senders=frozen_senders,receiver_selections=before,tribe_ref='tribe:fixture',
             **({} if host_configuration is None else {'host_configuration':host_configuration})),
         intended_transition={**({} if host_configuration is None else {'host_runtime':{}}),
             'cohort_activation':dict(manifest_path=str(manifest_path),manifest_uid=os.geteuid(),

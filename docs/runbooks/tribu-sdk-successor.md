@@ -108,6 +108,34 @@ reader expiry. A changed gate/vector, expired reader or stale second round
 refuses activation. This host-coordinator correction can observe the unchanged
 prepared candidate; it does not require another body restart or SDK installation.
 
+If activation retained `cohort_reassessment`, its old positive requests stay
+fenced. Complete its original `reconcile_reassessment` until every sender is
+observed disabled. Prepare a linked activation-only successor through the same
+maintenance spec:
+
+```sh
+python -B -m clusterctl.receiving_maintenance --spec "$maintenance_spec" reassess \
+  --previous-cohort "$failed_cohort" --manifest "$assessment_manifest" \
+  --manifest-digest "$assessment_manifest_digest"
+python -B -m clusterctl.receiving_maintenance --spec "$maintenance_spec" apply
+```
+
+The exact protected release can change only predecessor selection hashes to
+the already loaded current candidate. Contract, candidate artifacts, authority,
+provenance, original expiry and observation window stay fixed. Preparation
+requires current empty gates on the retained loaded processes and completed
+predecessor fencing. It links original lifecycle and tooling evidence without
+claiming another installation; normal fresh native qualification still runs.
+The immutable child/tip is published before any control. Exact retry finds that
+child before freezing again. Apply follows explicit links under the parent lock,
+preserving the original host CAS and all failed intents; it performs no SDK or
+body lifecycle replay. A forked tip, changed vector or expired horizon refuses.
+
+Bounded Source/guest owner subprocess failures retain separate closed timeout
+and launch-failure codes. Neither code proves that a submitted native effect did
+or did not complete. Never infer that cause from older generic failures or expose
+raw stderr, argv or exception text to obtain it.
+
 `receiving-selected` records observed adoption, not communication. The command
 sends no messages and starts no models. Preserve actual communication receipts
 separately; reused evidence remains valid only while relevant conditions match.

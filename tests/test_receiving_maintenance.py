@@ -74,6 +74,208 @@ def test_owner_diagnostic_retains_safe_code_without_arbitrary_output():
         maintenance._response(response, deadline_ns=time.monotonic_ns() - 1)
 
 
+@pytest.mark.parametrize('timeout', [False, True])
+def test_source_owner_transport_retains_closed_failure_class(tmp_path, monkeypatch, timeout):
+    import os
+    config = tmp_path/'source.json'
+    config.write_text('{}')
+    config.chmod(0o600)
+    base = SimpleNamespace(root=tmp_path/'runtime', socket=tmp_path/'tribe.sock', config=config,
+        owner_uid=os.geteuid(), owner_gid=os.getegid(), timeout_seconds=1, deadline_ns=None,
+        venv=tmp_path/'sdk'/'old'/'venv')
+    owner = maintenance.PinnedOwnerClient(base, {'code':str(tmp_path/'code'), 'code_digest':'a'*64},
+        {}, body_code=tmp_path/'code')
+    monkeypatch.setattr(maintenance, '_sdk', lambda *args: ({'sdk':'fixture'}, {}))
+    def fail(*args, **kwargs):
+        if timeout:
+            raise maintenance.subprocess.TimeoutExpired('private argv', 1, stderr='private credential')
+        raise OSError('private path or credential')
+    monkeypatch.setattr(maintenance.subprocess, 'run', fail)
+    code = 'receiving_host_deadline_expired' if timeout else 'receiving_host_launch_failed'
+    with pytest.raises(OnboardingError, match='^' + code + '$'):
+        owner.status()
+
+
+def reassessment_fixture(tmp_path, monkeypatch):
+    """Real cohort journal/manifest, fake native owners; no SDK/lifecycle effects."""
+    import copy
+    import os
+    from pathlib import Path
+    from clusterctl import onboarding_receiving_update as updates
+    from tests.test_receiving_cohort_control import activation_fixture
+    controller, owners, journal, previous = activation_fixture(tmp_path)
+    controller.prepare_activation()
+    monkeypatch.setattr(controller, '_current_activation', lambda *a, **k:
+        (_ for _ in ()).throw(OnboardingError('receiving_cohort_activation_changed')))
+    with pytest.raises(OnboardingError, match='activation_changed'):
+        controller.activate()
+    row = journal.get(previous)
+    plan = row['intended_transition']['cohort_activation']
+    manifest = json.loads(Path(plan['manifest_path']).read_text())
+    for receiver in manifest['required_receivers']:
+        name = next(name for name, owner in owners.items() if owner.being == receiver['being_ref'])
+        receiver['expected_selection_sha256'] = digest(plan['receivers'][name]['selection'])
+    path = tmp_path/'reassessment.json'
+    from clusterctl import being_seed
+    being_seed._write(path, manifest)
+    spec = {'fixture':'fixed specification'}
+    parent = plan_update(journal, manifest_digest='f'*64, target='receiving-maintenance:reassessment-fixture',
+        expected_precondition={'maintenance_spec':spec}, intended_transition={}, audit_identity={'actor':'fixture'})
+    loaded = {}
+    for name, owner in owners.items():
+        loaded['loaded:'+name] = dict(process=copy.deepcopy(owner.process),
+            loaded_runtime={**copy.deepcopy(owner.loaded), 'local_origin':copy.deepcopy(owner.server)},
+            loaded_application=copy.deepcopy(owner.application))
+    journal.advance(parent['operation_id'], parent['state'], runtime_observation={'maintenance':{
+        'cohort':{'operation_id':previous}, **loaded}})
+    operation = maintenance.ReceivingMaintenance.__new__(maintenance.ReceivingMaintenance)
+    operation.spec, operation.journal, operation.operation_id = spec, journal, parent['operation_id']
+    operation._owners = lambda values: owners
+    recipe = next(iter(plan['receivers'].values()))
+    lifecycle = journal.get(recipe['lifecycle_operation_id'])
+    operation.body = (Path(lifecycle['intended_transition']['source_bootstrap']['qualification']['code']),
+        recipe['selection']['receiving_code'])
+    # Exercise real verification with this fixture's UID instead of production0.
+    manifest_read, preflight = updates._manifest, updates.preflight
+    monkeypatch.setattr(updates, '_manifest', lambda path, fingerprint, **kw:
+        manifest_read(path, fingerprint, uid=os.geteuid()))
+    monkeypatch.setattr(updates, 'preflight', lambda *args, **kw:
+        preflight(*args, **{**kw,'code_uid':os.geteuid(),'manifest_uid':os.geteuid()}))
+    return operation, owners, path, manifest, previous
+
+
+@pytest.mark.parametrize('loss', [None, 'child', 'tip'])
+def test_activation_only_reassessment_retains_one_child_after_lost_reply(tmp_path, monkeypatch, loss):
+    operation, owners, path, manifest, previous = reassessment_fixture(tmp_path, monkeypatch)
+    journal = operation.journal
+    before = len(journal.list_all())
+    effects_before = [owner.effects for owner in owners.values()]
+    if loss == 'child':
+        original = operation._prepare_reassessment
+        def lose(*args):
+            original(*args)
+            raise OSError('lost child reply')
+        monkeypatch.setattr(operation, '_prepare_reassessment', lose)
+    elif loss == 'tip':
+        original = operation._record
+        def lose(*args):
+            original(*args)
+            raise OSError('lost tip reply')
+        monkeypatch.setattr(operation, '_record', lose)
+    if loss:
+        with pytest.raises(OSError):
+            operation.reassess(path, digest(manifest), previous)
+    def unexpected(*args, **kwargs):
+        pytest.fail('replayed lifecycle, SDK, installation or fresh freeze')
+    if loss == 'tip':
+        monkeypatch.setattr(operation, '_record', unexpected)
+    if loss:
+        monkeypatch.setattr(operation, '_prepare_reassessment', unexpected)
+    operation.reassess(path, digest(manifest), previous)
+    assert len(journal.list_all()) == before + 1
+    assert [owner.effects for owner in owners.values()] == effects_before
+    effects = operation._effects()
+    assert effects['cohort']['operation_id'] == previous
+    child = journal.get(operation._cohort_tip(effects))
+    old = journal.get(previous)
+    assert child['expected_precondition']['previous_cohort'] == previous
+    assert child['runtime_observation']['native_tooling'] == old['runtime_observation'].get('native_tooling', {})
+    assert child['intended_transition']['cohort_activation']['expires_at_ms'] == old['intended_transition']['cohort_activation']['expires_at_ms']
+
+
+@pytest.mark.parametrize('fault', ['artifact', 'authority', 'provenance', 'nonempty', 'process'])
+def test_reassessment_refuses_changed_release_or_unfinished_gate(tmp_path, monkeypatch, fault):
+    from clusterctl import being_seed
+    operation, owners, path, manifest, previous = reassessment_fixture(tmp_path, monkeypatch)
+    before = len(operation.journal.list_all())
+    if fault == 'artifact':
+        manifest['artifacts']['receiving_code'] = '0'*64
+    elif fault == 'authority':
+        manifest['authorities']['candidate'][0]['control_head'] = 'changed'
+    elif fault == 'provenance':
+        manifest['provenance']['qualification_sha256'] = '0'*64
+    elif fault == 'nonempty':
+        owners['eko'].gate['readers'] = [{}]
+    else:
+        owners['eko'].process['start_ticks'] += 1
+    being_seed._write(path, manifest)
+    with pytest.raises(OnboardingError):
+        operation.reassess(path, digest(manifest), previous)
+    assert len(operation.journal.list_all()) == before
+
+
+def test_cohort_tip_refuses_forks_and_disconnected_children():
+    resolve = maintenance.ReceivingMaintenance._cohort_tip
+    root = {'cohort':{'operation_id':'original'}}
+    one = {**root,'assessment:a':{'operation_id':'one','previous_operation_id':'original'}}
+    assert resolve(one) == 'one'
+    for parent in ('original','missing','one'):
+        bad = {**one,'assessment:b':{'operation_id':'one' if parent=='one' else 'two','previous_operation_id':parent}}
+        with pytest.raises(OnboardingError, match='child_conflict'):
+            resolve(bad)
+
+
+def test_reassessment_tip_cannot_be_replaced_by_another_request(tmp_path, monkeypatch):
+    operation, _, path, manifest, previous = reassessment_fixture(tmp_path, monkeypatch)
+    operation.reassess(path, digest(manifest), previous)
+    tip = operation._cohort_tip(operation._effects())
+    with pytest.raises(OnboardingError, match='child_conflict'):
+        operation.reassess(path.with_name('another.json'), digest(manifest), previous)
+    assert operation._cohort_tip(operation._effects()) == tip
+
+
+def test_reassessment_preserves_expiry_and_refuses_after_horizon(tmp_path, monkeypatch):
+    import time
+    operation, _, path, manifest, previous = reassessment_fixture(tmp_path, monkeypatch)
+    horizon = operation.journal.get(previous)['intended_transition']['cohort_activation']['expires_at_ms']
+    monkeypatch.setattr(time, 'time_ns', lambda: (horizon + 1)*1_000_000)
+    with pytest.raises(OnboardingError, match='authorization_expired'):
+        operation.reassess(path, digest(manifest), previous)
+    assert operation._cohort_tip(operation._effects()) == previous
+
+
+def test_apply_uses_published_assessment_without_replaying_lifecycle(tmp_path, monkeypatch):
+    from clusterctl import being_seed, onboarding_host, onboarding_receiving_update as updates
+    journal = OperationJournal(tmp_path/'journal')
+    host = tmp_path/'host.json'
+    being_seed._write(host, {'selected':'host'})
+    original = plan_update(journal, manifest_digest='a'*64, target='original',
+        expected_precondition={'host_configuration':{'selected':'host'}}, intended_transition={'host_runtime':{}},
+        audit_identity={'actor':'fixture'})
+    child = plan_update(journal, manifest_digest='b'*64, target='assessment',
+        expected_precondition={}, intended_transition={}, audit_identity={'actor':'fixture'})
+    spec = {'fixture':'immutable spec'}
+    parent = plan_update(journal, manifest_digest='a'*64, target='maintenance',
+        expected_precondition={'maintenance_spec':spec}, intended_transition={}, audit_identity={'actor':'fixture'})
+    journal.advance(parent['operation_id'], parent['state'], runtime_observation={'maintenance':{
+        'cohort':{'operation_id':original['operation_id']}, 'host-selected':{'selected':True},
+        'loaded:source':{'retained':'source'}, 'loaded:eko':{'retained':'eko'},
+        'assessment:b':{'operation_id':child['operation_id'],'previous_operation_id':original['operation_id']}}})
+    events = []
+    class Cohort:
+        def __init__(self, actual_journal, identifier, owners):
+            assert actual_journal is journal and identifier == child['operation_id']
+        def _row(self): return journal.get(child['operation_id'])
+        def revoke_senders(self): events.append('revoke-current')
+        def reconcile_tooling(self): events.append('retained-tooling')
+        def activate(self):
+            events.append('select-current')
+            return {'operation_id':child['operation_id']}
+    def unexpected(*args, **kwargs):
+        pytest.fail('activation-only recovery replayed SDK/lifecycle/host selection')
+    monkeypatch.setattr(updates, 'CohortController', Cohort)
+    monkeypatch.setattr(updates, 'GuestBootstrapController', unexpected)
+    monkeypatch.setattr(onboarding_host.HostConfig, 'load', lambda *_: {})
+    monkeypatch.setattr(onboarding_host, 'HostBackend', lambda *_: object())
+    operation = maintenance.ReceivingMaintenance.__new__(maintenance.ReceivingMaintenance)
+    operation.spec, operation.journal, operation.operation_id = spec, journal, parent['operation_id']
+    operation.config_path, operation.plans = host, {'eko':{}}
+    operation.source = SimpleNamespace(call=unexpected)
+    operation._owners = lambda loaded: {'retained':'owners'}
+    assert operation.apply()['phase'] == 'receiving-selected'
+    assert events == ['revoke-current','retained-tooling','select-current']
+
+
 @pytest.mark.parametrize('lost', ['source-start', 'host-selection'])
 def test_coordinator_resumes_same_journal_after_effect_and_lost_response(tmp_path, monkeypatch, lost):
     from clusterctl import onboarding_host, onboarding_receiving_update as updates

@@ -30,6 +30,21 @@ def test_only_typed_context_install_has_the_large_archive_deadline(monkeypatch):
     assert calls == [7200, 1800, 1800]
 
 
+@pytest.mark.parametrize('timeout', [False, True])
+def test_bounded_owner_transport_distinguishes_timeout_from_launch_failure(monkeypatch, timeout):
+    from clusterctl import onboarding_host
+    def fail(*args, **kwargs):
+        if timeout:
+            raise onboarding_host.subprocess.TimeoutExpired('private argv', 1, stderr='private credential')
+        raise OSError('private path or credential')
+    monkeypatch.setattr(onboarding_host.subprocess, 'run', fail)
+    code = 'receiving_host_deadline_expired' if timeout else 'receiving_host_launch_failed'
+    with pytest.raises(OnboardingError, match='^' + code + '$'):
+        HostBackend._run(['exec', 'dm-fixture', '--', 'clusterctl.onboarding_owner_control'], timeout_seconds=1)
+    with pytest.raises(OnboardingError, match='^onboarding_host_operation_failed$'):
+        HostBackend._run(['list', '--format=json'], timeout_seconds=1)
+
+
 class IncusFixture:
     def __init__(self):
         self.instances = []
