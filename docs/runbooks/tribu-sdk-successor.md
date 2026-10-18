@@ -151,9 +151,11 @@ The original readable-presentation increment is retained under
 [Matrix #287](https://github.com/AlterMundi/daimon-matrix/issues/287).
 Matrix owns signed messaging and presentation; Cluster selects the exact
 executable SDK and receiving helpers on the existing bodies.
-The accepted three-VPS selection is Matrix `9b2b8ec` / SDK `53c4ee01` /
-receiving code `422e79c6`; see [the current deployment record](../../RESUME.md)
-and its six-leg native/semantic/ACK proof. Main integration and maintenance
+The current three-VPS selection is Matrix `9b2b8ec` / SDK `53c4ee01` /
+body/observer code `6dffe887`, with Root coordinator `2c883c9f`; see
+[the current deployment record](../../RESUME.md). The earlier accepted `422e79c6`
+body and six-leg native/semantic/ACK proof remain retained, alongside the new
+actual selection and native-tool communication receipts. Main integration and maintenance
 improvements (#270/#273) do not invalidate unchanged installed qualification.
 Broader I/O and future-admission acceptance remain separate.
 
@@ -758,8 +760,9 @@ diagnostic sidecars carry observations without granting transmission authority.
 
 ## Membership group default — 2026-10-13
 
-Matrix #151/#198 and merged #330/#332 own the conversation contract. Current
-deployed SDK source: `a1a70b6420692d19f85ad0edb945cba00c3f5459`. CompAII, Eko and Oliva
+Matrix #151/#198 and merged #330/#332 own the conversation contract. At that increment the
+deployed SDK source was `a1a70b6420692d19f85ad0edb945cba00c3f5459`; the current
+selection is recorded above. CompAII, Eko and Oliva
 share one signed group, with authenticated receipts for the three VPS bodies.
 One message freezes all active Root bodies, including unavailable siblings; one
 Tribu publication represents that message. A transport ACK is not delivery.
