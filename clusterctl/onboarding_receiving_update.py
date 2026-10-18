@@ -379,7 +379,7 @@ class GuestGroupClient:
         return result
 
     def status(self) -> dict:
-        value = self._call('admitted-running', require_loaded=True)
+        value = self._call('admitted-running', require_loaded=True, current_native=True)
         status = value.get('group_runtime_status')
         gate = None if not isinstance(status, dict) else status.get('receiving', {}).get('channels', {}).get('tribe')
         if (value.get('responder_association') != 'same-connection'
@@ -1972,7 +1972,7 @@ class GuestBootstrapController:
             if checked != candidate['prepared']:
                 raise OnboardingError('receiving_guest_bootstrap_candidate_changed')
             observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=vector,
-                observation_timeout_seconds=timeout_seconds, require_loaded=True)
+                observation_timeout_seconds=timeout_seconds, require_loaded=True, current_native=True)
             root = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
                 timeout_seconds=timeout_seconds, owner_observation={key: observed[key]
                     for key in ('process', 'admission_parent')})
@@ -2009,7 +2009,7 @@ class GuestBootstrapController:
                 *, observed: dict | None = None, start_recovery_id: str | None = None) -> dict:
         if observed is None:
             observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=vector,
-                observation_timeout_seconds=timeout_seconds, require_loaded=True)
+                observation_timeout_seconds=timeout_seconds, require_loaded=True, current_native=True)
         root = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
             timeout_seconds=timeout_seconds, owner_observation={key: observed[key]
                 for key in ('process', 'admission_parent')})

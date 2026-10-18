@@ -659,6 +659,69 @@ class Target:
                 receiving_readiness='unobserved',
                 responder_association='same-connection' if connected else 'legacy-probe')
 
+    def current_running(self, *, deadline_ns: int | None) -> dict:
+        """Observe an admitted preservation update without replaying onboarding.
+
+        This is the current authenticated public bundle and signed group, not
+        proof of the original enrollment ceremony. The maintenance controller
+        still compares the result with its frozen identity/artifact selection.
+        No custody, archived pair history or runtime writer lock is opened.
+        """
+        from daimon_matrix.canonical import canonical_bytes
+        from .onboarding_peer import observed_group
+        from .onboarding_receiving_update import OwnerGroupClient
+        from .owner_process import ParentProcessPresence
+        if type(deadline_ns) is not int or deadline_ns <= time.monotonic_ns():
+            raise OnboardingError('onboarding_observation_deadline_expired')
+        root = self.package / 'runtime'
+        binding = document(self.root / 'plan.json')
+        if binding != self._binding():
+            raise OnboardingError('current_onboarding_target_required')
+        bundle = self.document_bundle()
+        group = observed_group(self, bundle)
+        if group is None:
+            raise OnboardingError('qualified_onboarding_group_required')
+        paths = (root / 'matrix.sock', Path(group['socket']))
+        sockets = [_socket_identity(path, deadline_ns) for path in paths]
+        horizon = time.time_ns() // 1_000_000 + max(1, (deadline_ns - time.monotonic_ns()) // 1_000_000)
+        with OwnerGroupClient(root, paths[1], deadline_ns=deadline_ns) as owner, \
+                OwnerGroupClient(root, paths[0], deadline_ns=deadline_ns) as base:
+            current = owner.qualified_identity(expires_at_ms=horizon, require_admitted=True)
+            native = base.base_status()
+            loaded = current['runtime_status'].get('loaded_runtime')
+            application = current['runtime_status'].get('loaded_application')
+            if (current['process'] != native['process'] or current['server'] != native['server']
+                    or not isinstance(loaded, dict)
+                    or loaded.get('runtime_bundle_sha256') != digest(bundle)
+                    or current.get('verified_identity', {}).get('runtime_bundle_sha256') != digest(bundle)
+                    or native['runtime_status'].get('loaded_runtime') != loaded
+                    or not isinstance(loaded.get('qualified_startup'), dict)
+                    or not isinstance(application, dict)
+                    or application.get('loaded_base_sha256') != hashlib.sha256(canonical_bytes(loaded)).hexdigest()):
+                raise OnboardingError('receiving_control_process_changed')
+            with ParentProcessPresence(current['process']) as parent:
+                if (self.document_bundle() != bundle
+                        or document(self.root / 'plan.json') != binding
+                        or observed_group(self, bundle) != group
+                        or any((before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+                            for before, after in zip(sockets, (path.lstat() for path in paths)))):
+                    raise OnboardingError('receiving_bootstrap_public_preimage_changed')
+                if owner._observer is None or base._observer is None:
+                    raise OnboardingError('receiving_owner_scope_required')
+                owner._observer.verify()
+                base._observer.verify()
+                parent.verify()
+                if time.monotonic_ns() >= deadline_ns:
+                    raise OnboardingError('onboarding_observation_deadline_expired')
+                return dict(schema='cluster-onboarding-runtime-presence/v1',
+                    plan_digest=digest(self.plan), origin=current['server'], process=current['process'],
+                    admission_parent=parent.process, runtime_id=loaded['runtime_id'],
+                    runtime_sha256=digest(bundle), runtime_status=native['runtime_status'],
+                    group=group, group_runtime_status=current['runtime_status'],
+                    receiving_identity=current['identity'], receiving_readiness='unobserved',
+                    responder_association='same-connection',
+                    observation_method='authenticated-current-owner-base-and-group')
+
     @staticmethod
     def _bootstrap_public_identity(bundle: dict, config) -> dict:
         """Bind a current authorized client, without custody or loaded claims."""
@@ -686,7 +749,7 @@ class Target:
                           deadline_ns: int | None = None) -> dict:
         """Use the selected admitted group; preserve exact retained controls."""
         from .onboarding_receiving_update import owner_control
-        observed = self.running(admitted=True, require_loaded=True, deadline_ns=deadline_ns)
+        observed = self.current_running(deadline_ns=deadline_ns)
         result = owner_control(self.package / 'runtime', observed['group'], observed,
             action, path, command=command, status_key='group_runtime_status', deadline_ns=deadline_ns)
         if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
@@ -695,7 +758,7 @@ class Target:
 
     def qualified_receiving_identity(self, *, expires_at_ms: int, deadline_ns: int) -> dict:
         from .onboarding_receiving_update import OwnerGroupClient
-        observed = self.running(admitted=True, require_loaded=True, deadline_ns=deadline_ns)
+        observed = self.current_running(deadline_ns=deadline_ns)
         with OwnerGroupClient(self.package / 'runtime', Path(observed['group']['socket']),
                               deadline_ns=deadline_ns) as owner:
             current = owner.qualified_identity(expires_at_ms=expires_at_ms, require_admitted=True)
@@ -734,6 +797,8 @@ def main(argv: list[str] | None = None) -> int:
     visibility.add_argument("--visibility-installation", type=Path)
     parser.add_argument("--ready-fd", type=int)
     parser.add_argument('--require-loaded', action='store_true')
+    parser.add_argument('--current-native', action='store_true',
+        help='observe an already admitted qualified maintenance selection')
     parser.add_argument('--observation-timeout-seconds', type=float)
     parser.add_argument('--observation-deadline-ns', type=int)
     parser.add_argument('--control-file', type=Path)
@@ -748,6 +813,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         controlling = args.action in {'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
         identity_query = args.action == 'receiving-identity'
+        if args.current_native and (args.action != 'admitted-running' or not args.require_loaded
+                or args.observation_timeout_seconds is None and args.observation_deadline_ns is None):
+            raise OnboardingError('qualified_onboarding_target_observer_required')
         if args.native_tooling_json is not None and (not identity_query
                 or len(args.native_tooling_json.encode()) > 65536):
             raise OnboardingError('receiving_native_tooling_recipe_required')
@@ -920,9 +988,11 @@ def main(argv: list[str] | None = None) -> int:
                                 ready_descriptor=args.ready_fd)
         if args.action in {"running", "admitted-running"}:
             stage = 'native-observation'
-            print(json.dumps(target.running(admitted=args.action == 'admitted-running',
+            observed = (target.current_running(deadline_ns=observation_deadline_ns) if args.current_native
+                else target.running(admitted=args.action == 'admitted-running',
                 require_loaded=args.require_loaded,
-                deadline_ns=observation_deadline_ns)))
+                deadline_ns=observation_deadline_ns))
+            print(json.dumps(observed))
             return 0
         if args.action in {'admission-check', 'admission-enroll'}:
             from .onboarding_admission import ReceivingHolder

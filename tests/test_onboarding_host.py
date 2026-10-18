@@ -311,13 +311,14 @@ def candidate_call_fixture(tmp_path, monkeypatch):
     return backend, value, run, candidate, calls
 
 
-def test_host_probes_exact_mounted_candidate_without_selecting_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize('current_native', [False, True])
+def test_host_probes_exact_mounted_candidate_without_selecting_it(tmp_path, monkeypatch, current_native):
     backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
     config = backend.config
     original = {path: path.read_bytes() for path in candidate[0].rglob('*') if path.is_file()}
     monkeypatch.setattr(backend, '_runtime_selection', lambda _: pytest.fail('active selection used for candidate'))
     result = backend._target_call(value, 'admitted-running', candidate=candidate,
-        observation_timeout_seconds=5, require_loaded=True)
+        observation_timeout_seconds=5, require_loaded=True, current_native=current_native)
     assert result == {'observed': True} and backend.config is config
     assert len(calls) == 1
     argv, options = calls[0]
@@ -330,6 +331,7 @@ def test_host_probes_exact_mounted_candidate_without_selecting_it(tmp_path, monk
     assert argv[argv.index('--runtime-digest') + 1] == candidate[1]
     assert argv[argv.index('--runtime-code') + 1].endswith(candidate[1])
     assert '--require-loaded' in argv
+    assert ('--current-native' in argv) is current_native
     assert 0 < float(argv[argv.index('--observation-timeout-seconds') + 1]) <= 5
     assert 0 < options['timeout_seconds'] <= 5
     assert original == {path: path.read_bytes() for path in original}

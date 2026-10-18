@@ -340,3 +340,118 @@ def test_changed_preparation_cannot_build_or_issue_a_receipt_under_read_ownershi
     assert not receipt.exists()
     assert imports.is_dir()
     assert not list(venv.parent.glob('runtime-imports-*'))
+
+
+@pytest.mark.parametrize('outcome', ['native', 'unavailable', 'unsupported', 'io-error', 'old-kernel'])
+def test_sdk_flush_opens_original_error_cursor_before_staging(tmp_path, monkeypatch, outcome):
+    import ctypes
+    import errno
+    import stat
+    from types import SimpleNamespace
+    calls = []
+    root = tmp_path / 'staged'
+    descriptors = []
+    class Sync:
+        def __call__(self, descriptor):
+            assert stat.S_ISDIR(os.fstat(descriptor).st_mode)
+            assert os.fstat(descriptor).st_ino == tmp_path.stat().st_ino
+            descriptors.append(descriptor)
+            calls.append('after-write' if root.exists() else 'before-write')
+            if outcome == 'native':
+                return 0
+            ctypes.set_errno(errno.EOPNOTSUPP if outcome == 'unsupported' else errno.EIO)
+            return -1
+    libc = SimpleNamespace() if outcome == 'unavailable' else SimpleNamespace(syncfs=Sync())
+    monkeypatch.setattr(ctypes, 'CDLL', lambda *args, **kwargs: libc)
+    if outcome == 'old-kernel':
+        monkeypatch.setattr(os, 'uname', lambda: SimpleNamespace(sysname='Linux', release='5.7.99'))
+    if outcome == 'io-error':
+        with pytest.raises(OSError) as error:
+            with onboarding_sdk._import_sync(tmp_path):
+                pytest.fail('storage error entered staging')
+        assert error.value.errno == errno.EIO and calls == ['before-write']
+        return
+    with onboarding_sdk._import_sync(tmp_path) as monitor:
+        if outcome == 'native':
+            assert monitor is not None and calls == ['before-write']
+            root.mkdir(mode=0o700)
+            (root / 'one.py').write_bytes(b'exact staged bytes')
+            onboarding_sdk._sync_import_tree(root, monitor)
+        else:
+            assert monitor is None and not root.exists()
+    assert calls == (['before-write', 'after-write'] if outcome == 'native'
+                     else ['before-write'] if outcome == 'unsupported' else [])
+    if descriptors:
+        assert len(set(descriptors)) == 1
+        with pytest.raises(OSError):
+            os.fstat(descriptors[0])
+
+
+def test_sdk_flush_failure_never_publishes_and_exact_retry_recovers(tmp_path, monkeypatch):
+    code, fingerprint, home = fixture(tmp_path)
+    venv = onboarding_sdk.install(home, code, fingerprint, code_uid=os.geteuid())
+    original = onboarding_sdk._sync_import_tree
+    def fail(root, monitor):
+        assert (root / 'daimon_matrix/__init__.py').exists()
+        assert not (venv.parent / 'runtime-imports').exists()
+        assert all(p.stat().st_mode & 0o777 == (0o700 if p.is_dir() else 0o600)
+                   for p in (root, *root.rglob('*')))
+        raise OSError('synthetic storage failure before publication')
+    monkeypatch.setattr(onboarding_sdk, '_sync_import_tree', fail)
+    with pytest.raises(OSError, match='before publication'):
+        onboarding_sdk.runtime_imports(venv, code, code_uid=os.geteuid())
+    assert not (venv.parent / 'runtime-imports').exists()
+    assert not (venv.parent / 'runtime-imports.json').exists()
+    assert not list(venv.parent.glob('runtime-imports-*'))
+    monkeypatch.setattr(onboarding_sdk, '_sync_import_tree', original)
+    imports = onboarding_sdk.runtime_imports(venv, code, code_uid=os.geteuid())
+    receipt = (venv.parent / 'runtime-imports.json').read_bytes()
+    monkeypatch.setattr(onboarding_sdk, '_sync_import_tree', lambda *_: pytest.fail('immutable retry rewrote imports'))
+    assert onboarding_sdk.runtime_imports(venv, code, code_uid=os.geteuid()) == imports
+    assert (venv.parent / 'runtime-imports.json').read_bytes() == receipt
+
+
+def test_unsupported_sdk_flush_syncs_each_original_writer_before_close(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    code, fingerprint, home = fixture(tmp_path)
+    venv = onboarding_sdk.install(home, code, fingerprint, code_uid=os.geteuid())
+    monkeypatch.setattr(onboarding_sdk.ctypes, 'CDLL', lambda *args, **kwargs: SimpleNamespace())
+    writers, synced = set(), []
+    original_open, original_sync = Path.open, os.fsync
+    class Writer:
+        def __init__(self, stream): self.stream = stream
+        def __enter__(self):
+            stream = self.stream.__enter__()
+            writers.add(stream.fileno())
+            return stream
+        def __exit__(self, *args):
+            writers.remove(self.stream.fileno())
+            return self.stream.__exit__(*args)
+    def opened(path, mode='r', *args, **kwargs):
+        stream = original_open(path, mode, *args, **kwargs)
+        return Writer(stream) if mode == 'xb' and 'runtime-imports-' in str(path) else stream
+    def sync(descriptor):
+        path = os.readlink('/proc/self/fd/' + str(descriptor))
+        if 'runtime-imports-' in path and Path(path).is_file():
+            assert descriptor in writers
+            synced.append(path)
+        return original_sync(descriptor)
+    monkeypatch.setattr(Path, 'open', opened)
+    monkeypatch.setattr(os, 'fsync', sync)
+    onboarding_sdk.runtime_imports(venv, code, code_uid=os.geteuid())
+    assert len(synced) == 4 and not writers
+
+
+def test_sdk_flush_rejects_a_tree_spanning_filesystems(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    with onboarding_sdk._import_sync(tmp_path) as monitor:
+        assert monitor is not None
+        root = tmp_path / 'staged'
+        (root / 'nested').mkdir(parents=True)
+        original = Path.lstat
+        def lstat(path):
+            observed = original(path)
+            return SimpleNamespace(st_dev=observed.st_dev + 1) if path.name == 'nested' else observed
+        monkeypatch.setattr(Path, 'lstat', lstat)
+        with pytest.raises(OnboardingError, match='qualified_runtime_imports_required'):
+            onboarding_sdk._sync_import_tree(root, monitor)

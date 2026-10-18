@@ -409,6 +409,24 @@ def host_observation_only(root: Path, base: str) -> bool:
     new=b"set(value) - {'group', 'receiving_controller'} != {\"phase\", \"request\", \"receipt\"}"
     if original.count(old)==1 and original.replace(old,new,1)==current:
         return True
+    # This observer opt-in changes no provisioning, custody, mounts or service
+    # code. Prove the exact additive transformation instead of pinning another
+    # pair of whole-file hashes for each unrelated main merge.
+    observer_additions = (
+        b'                     current_native: bool = False,\n',
+        b"        if current_native and (action != 'admitted-running' or not require_loaded\n"
+        b"                or candidate is None or observation_timeout_seconds is None):\n"
+        b"            raise OnboardingError('qualified_onboarding_target_observer_required')\n",
+        b"        if current_native:\n            arguments += ['--current-native']\n",
+    )
+    stripped = current
+    for addition in observer_additions:
+        if stripped.count(addition) != 1:
+            break
+        stripped = stripped.replace(addition, b'', 1)
+    else:
+        if stripped == original:
+            return True
     if (hashlib.sha256(original).hexdigest(), hashlib.sha256(current).hexdigest()) == (
         'cf3878966677401d094410595541f3f5395b0964d28910057299443c9b86a1a5',
         'cc1e19f193e69cc67c08d121243067813f6ae6b56bbbb358cf5888be2909c216'):

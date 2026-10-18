@@ -6,6 +6,8 @@ The wheelhouse is covered by the receiving release's content digest.
 from __future__ import annotations
 
 import hashlib
+import ctypes
+import errno
 import io
 import json
 import os
@@ -15,6 +17,7 @@ import subprocess
 import sys
 import uuid
 import zipfile
+from contextlib import ExitStack, contextmanager
 from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
 
@@ -22,7 +25,7 @@ from . import being_seed, onboarding_release
 from .onboarding import OnboardingError, digest, private_directory
 
 SCHEMA = "cluster-onboarding-sdk/v1"
-MATRIX_COMMIT = "80542cee1d56e3d46bbda21f4174e3df75cf5585"
+MATRIX_COMMIT = "9b2b8ec2c455d3bf316bc00dc9e1bac44e9d5094"
 PREVIOUS_MATRIX_COMMIT = "196ec7219f954cf4e514a1f61ae72eb3451d851e"
 
 
@@ -159,6 +162,56 @@ def runtime_imports(venv: Path, code: Path, *, code_uid: int = 0,
                             matrix_wheel_sha256=matrix_wheel_sha256)[0]
 
 
+@contextmanager
+def _import_sync(parent: Path):
+    """Select durability before staging and retain its original error cursor.
+
+    Linux >=5.8 syncfs reports filesystem writeback errors since this directory
+    FD was opened. Open it before even creating the temporary tree, not after
+    writes whose errors another filesystem user might already have observed.
+    Unsupported/older kernels retain fsync on each original writer FD.
+    """
+    kernel = re.match(r'^(\d+)\.(\d+)', os.uname().release)
+    if os.uname().sysname != 'Linux' or kernel is None or tuple(map(int, kernel.groups())) < (5, 8):
+        yield None
+        return
+    syncfs = getattr(ctypes.CDLL(None, use_errno=True), 'syncfs', None)
+    if syncfs is None:
+        yield None
+        return
+    syncfs.argtypes = [ctypes.c_int]
+    syncfs.restype = ctypes.c_int
+    descriptor = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        # Probe support before mutation. A later flush error is always fatal;
+        # it cannot be laundered through a reopened-file fallback.
+        if syncfs(descriptor) != 0:
+            code = ctypes.get_errno()
+            if code not in {errno.ENOSYS, errno.EOPNOTSUPP, errno.EINVAL}:
+                raise OSError(code, 'SDK filesystem flush failed')
+            yield None
+        else:
+            yield (descriptor, syncfs)
+    finally:
+        os.close(descriptor)
+
+
+def _sync_import_tree(root: Path, monitor: tuple) -> None:
+    """Flush one staged filesystem through its pre-write error cursor.
+
+    This also flushes unrelated pending writes on the same filesystem;
+    preparation budgets include that cost. No mount/runtime settings change.
+    """
+    descriptor, syncfs = monitor
+    observed = os.fstat(descriptor)
+    parent = root.parent.lstat()
+    if ((observed.st_dev, observed.st_ino) != (parent.st_dev, parent.st_ino)
+            or any(path.lstat().st_dev != observed.st_dev for path in (root, *root.rglob('*')))):
+        raise OnboardingError('qualified_runtime_imports_required')
+    if syncfs(descriptor) != 0:
+        raise OSError(ctypes.get_errno(), 'SDK filesystem flush failed')
+
+
 def _runtime_imports(venv: Path, code: Path, *, code_uid: int = 0,
                      matrix_commit: str = MATRIX_COMMIT,
                      matrix_wheel_sha256: str | None = None) -> tuple[Path, dict, dict[str, str]]:
@@ -181,13 +234,14 @@ def _runtime_imports(venv: Path, code: Path, *, code_uid: int = 0,
     # must not interrupt each other's full verification. Construction and SDK
     # installation retain exclusive ownership of this same lock.
     prepared = target.exists() and receipt.exists()
-    with being_seed._locked(root, shared=prepared):
+    with being_seed._locked(root, shared=prepared), ExitStack() as sync_ownership:
         if prepared and (not target.exists() or not receipt.exists()):
             # Do not build or mint a receipt while holding read ownership if
             # preparation changed before acquiring it.
             raise OnboardingError('qualified_runtime_imports_required')
         temporary = root / ('runtime-imports-' + uuid.uuid4().hex)
         building = not target.exists() and not target.is_symlink()
+        monitor = sync_ownership.enter_context(_import_sync(root)) if building else None
         if building:
             temporary.mkdir(mode=0o700)
         files: dict[str, str] = {}
@@ -219,22 +273,26 @@ def _runtime_imports(venv: Path, code: Path, *, code_uid: int = 0,
                             destination.parent.mkdir(parents=True, exist_ok=True)
                             with destination.open('xb') as output:
                                 output.write(contents)
-                                output.flush()
-                                os.fsync(output.fileno())
-                            destination.chmod(0o600)
+                                os.fchmod(output.fileno(), 0o600)
+                                if monitor is None:
+                                    output.flush()
+                                    os.fsync(output.fileno())
             expected = dict(schema='cluster-onboarding-runtime-imports/v1', sdk_digest=digest(sdk),
                             files_sha256=digest(files))
             if building:
                 for directory in temporary.rglob('*'):
                     if directory.is_dir():
                         directory.chmod(0o700)
-                directories_to_sync = [temporary, *[p for p in temporary.rglob('*') if p.is_dir()]]
-                for directory in sorted(directories_to_sync, key=lambda p: len(p.parts), reverse=True):
-                    descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-                    try:
-                        os.fsync(descriptor)
-                    finally:
-                        os.close(descriptor)
+                if monitor is not None:
+                    _sync_import_tree(temporary, monitor)
+                else:
+                    directories_to_sync = [temporary, *[p for p in temporary.rglob('*') if p.is_dir()]]
+                    for directory in sorted(directories_to_sync, key=lambda p: len(p.parts), reverse=True):
+                        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                        try:
+                            os.fsync(descriptor)
+                        finally:
+                            os.close(descriptor)
                 os.replace(temporary, target)
                 descriptor = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 try:
