@@ -859,3 +859,25 @@ def test_current_native_host_observer_requires_exact_additive_delta(tmp_path, mo
     assert not host_observation_only(tmp_path, 'a' * 40)
     path.write_bytes(parent + additions.replace(b"action != 'admitted-running'", b"action != 'running'"))
     assert not host_observation_only(tmp_path, 'a' * 40)
+
+
+def test_maintenance_composition_keeps_changed_contracts_and_exact_host_delta(monkeypatch):
+    import subprocess
+    from tools import ci_scope
+    host = 'clusterctl/onboarding_host.py'
+    current = (ROOT / host).read_bytes()
+    assert current.count(ci_scope.OWNER_DIAGNOSTIC_ADDITION) == 1
+    previous = current.replace(ci_scope.OWNER_DIAGNOSTIC_ADDITION, b'', 1)
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *_a, **_k:
+        subprocess.CompletedProcess([], 0, previous))
+    changed = sorted(ci_scope.MAINTENANCE_FILES | {host, 'tests/test_onboarding_host.py',
+        'tools/ci_scope.py', 'tests/test_ci_scope.py', 'docs/runbooks/tribu-sdk-successor.md'})
+    profile, tests = select(changed, ROOT, base='a' * 40)
+    assert profile == 'peer' and set(tests) == set(ci_scope.MAINTENANCE_TESTS)
+    assert select(changed, ROOT) == ('full', ['tests'])
+    for extra in ('requirements-weave.txt', 'clusterctl/onboarding_custody.py',
+                  'clusterctl/onboarding_admission.py', 'unknown.py'):
+        assert select([*changed, extra], ROOT, base='a' * 40) == ('full', ['tests'])
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *_a, **_k:
+        subprocess.CompletedProcess([], 0, previous + b'\n# unrelated change\n'))
+    assert select(changed, ROOT, base='a' * 40) == ('full', ['tests'])

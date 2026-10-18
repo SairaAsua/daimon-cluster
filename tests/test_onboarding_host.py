@@ -606,3 +606,20 @@ def test_incus_stdin_is_bounded_and_never_routed_through_a_shell(monkeypatch):
     with pytest.raises(OnboardingError, match='invalid_receiving_control_request'):
         HostBackend._run(['exec', 'fixture'], input_data='x' * (being_seed.MAX_SELECTION + 1))
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('payload,expected', [
+    ('{"error":"receiving_control_process_changed"}', 'receiving_control_process_changed'),
+    ('{"error":"/private/credential"}', 'onboarding_host_operation_failed'),
+    ('{"error":[]}', 'onboarding_host_operation_failed'),
+    ('{"error":"receiving_control_process_changed","extra":"private"}', 'onboarding_host_operation_failed'),
+])
+def test_owner_control_transport_retains_only_closed_public_diagnostics(monkeypatch, payload, expected):
+    from types import SimpleNamespace
+    monkeypatch.setattr('clusterctl.onboarding_host.subprocess.run', lambda *args, **kwargs:
+        SimpleNamespace(returncode=1, stdout='', stderr=payload))
+    with pytest.raises(OnboardingError, match='^' + expected + '$'):
+        HostBackend._run(['exec', 'dm-fixture', '--', '/approved/python',
+                          'clusterctl.onboarding_owner_control'], timeout_seconds=1)
+    with pytest.raises(OnboardingError, match='^onboarding_host_operation_failed$'):
+        HostBackend._run(['list', '--format=json'], timeout_seconds=1)

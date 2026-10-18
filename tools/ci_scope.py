@@ -301,6 +301,23 @@ OWNER_CONTROL_TESTS = ('tests/test_onboarding_owner_control.py',
     'tests/test_receiving_cohort_control.py', 'tests/test_receiving_process_observation.py',
     'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
 
+# Routine receiving maintenance composes controllers without changing SDK,
+# authority, custody or the native model. Unknown deltas retain wider coverage.
+MAINTENANCE_FILES = {'clusterctl/receiving_maintenance.py', 'tests/test_receiving_maintenance.py',
+    'clusterctl/receiving_worker.py', 'tests/test_receiving_worker.py',
+    'tools/build_receiving_maintenance.py', 'tools/check_rc_types.py',
+    'clusterctl/onboarding_owner_control.py', 'tests/test_onboarding_owner_control.py', 'tests/test_receiving_cohort_control.py',
+    'clusterctl/onboarding_owner_client.py', 'tests/test_onboarding_owner_client.py',
+    'clusterctl/onboarding_receiving_update.py', 'tests/test_guest_bootstrap_controller.py'}
+MAINTENANCE_TESTS = ('tests/test_receiving_worker.py', 'tests/test_receiving_maintenance.py', 'tests/test_onboarding_owner_control.py',
+    'tests/test_source_bootstrap.py', 'tests/test_source_owner_adapter.py',
+    'tests/test_guest_bootstrap_controller.py', 'tests/test_receiving_cohort_control.py',
+    'tests/test_receiving_host_selection.py', 'tests/test_receiving_update_journal.py',
+    'tests/test_receiving_process_observation.py', 'tests/test_onboarding_owner_client.py',
+    'tests/test_onboarding_host.py', 'tests/test_onboarding_host_ownership.py',
+    'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
+
+
 LOADED_STARTUP_FILES = {'RESUME.md', 'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_target.py',
     'clusterctl/onboarding_code_successor.py',
     'clusterctl/onboarding_service.py', 'tests/test_source_bootstrap.py',
@@ -479,7 +496,41 @@ def receiving_support_only(root: Path, base: str, names: set[str]) -> bool:
     return True
 
 
+OWNER_DIAGNOSTIC_ADDITION = b"""            if argv[0] == 'exec' and 'clusterctl.onboarding_owner_control' in argv:
+                from .onboarding_owner_control import PUBLIC_ERRORS
+                for line in result.stderr.splitlines():
+                    try:
+                        detail = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (isinstance(detail, dict) and set(detail) == {'error'}
+                            and isinstance(detail.get('error'), str)
+                            and detail.get('error') in PUBLIC_ERRORS):
+                        raise OnboardingError(detail['error'])
+"""
+
+
+def owner_diagnostics_only(root: Path, base: str) -> bool:
+    """Accept only the closed owner-control diagnostic addition to HostBackend."""
+    if not re.fullmatch(r'[0-9a-f]{40}', base):
+        return False
+    name = 'clusterctl/onboarding_host.py'
+    before = subprocess.run(['git', 'show', base + ':' + name], cwd=root,
+        capture_output=True, check=False)
+    if before.returncode:
+        return False
+    current = (root / name).read_bytes()
+    return current.count(OWNER_DIAGNOSTIC_ADDITION) == 1 and current.replace(
+        OWNER_DIAGNOSTIC_ADDITION, b'', 1) == before.stdout
+
+
 def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
+    host = {'clusterctl/onboarding_host.py', 'tests/test_onboarding_host.py'}
+    if ({'clusterctl/receiving_maintenance.py', 'tests/test_receiving_maintenance.py'} <= set(changed)
+            and set(changed) <= MAINTENANCE_FILES | host | CI_FILES | RUNBOOK_DOCS
+            and all((root / name).is_file() for name in MAINTENANCE_TESTS)
+            and ('clusterctl/onboarding_host.py' not in changed or owner_diagnostics_only(root, base))):
+        return 'peer', list(MAINTENANCE_TESTS)
     storage_files = {'tools/storage_hygiene.py', 'tests/test_storage_hygiene.py',
                      'docs/operations/host-storage-hygiene.md'}
     storage_tests = ['tests/test_storage_hygiene.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py']

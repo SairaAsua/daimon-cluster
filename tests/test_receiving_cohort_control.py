@@ -274,7 +274,7 @@ def fixture(tmp_path):
     return path, original, runtime, owners, journal, row['operation_id']
 
 
-def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profile='source', assessment_fault=None, tooling_profile='matrix-only'):
+def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profile='source', assessment_fault=None, tooling_profile='matrix-only', host_configuration=None):
     """Fake RPC/import/load seams; actual protected manifest and journal."""
     from types import MethodType
     from tests.test_receiving_update_preflight import fixture as reader_fixture, call as qualify_reader
@@ -397,8 +397,10 @@ def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profi
     elif assessment_fault is not None:
         recipes['eko']['prepared']['assessment'][assessment_fault]='0'*64
     row=plan_update(journal,manifest_digest=digest(manifest),target='receiving:activation-fixture',
-        expected_precondition=dict(senders=frozen_senders,receiver_selections=before),
-        intended_transition={'cohort_activation':dict(manifest_path=str(manifest_path),manifest_uid=os.geteuid(),
+        expected_precondition=dict(senders=frozen_senders,receiver_selections=before,
+            **({} if host_configuration is None else {'host_configuration':host_configuration})),
+        intended_transition={**({} if host_configuration is None else {'host_runtime':{}}),
+            'cohort_activation':dict(manifest_path=str(manifest_path),manifest_uid=os.geteuid(),
             roster_sha256='5'*64,expires_at_ms=until,observation_window_ms=60000,receivers=recipes)},
         audit_identity={'actor':'fixture'})
     controller=CohortController(journal,row['operation_id'],owners)
