@@ -6,9 +6,9 @@ For already admitted Source and guest bodies, use the maintained
 `clusterctl.receiving_maintenance` operation. The implementation composes the
 existing Source, guest and cohort controllers and their journals; it does not
 re-enroll a body. The current Source must already expose a signed Tribe roster
-in its loaded receiving view; an unmigrated legacy group is refused with
-`receiving_maintenance_current_roster_required` and must finish its existing
-group migration first. Complete any older unfinished lifecycle through its original
+in its loaded receiving view; an unavailable or legacy group view is refused with
+`receiving_maintenance_current_roster_required`. Inspect the actual retained
+roster diagnostic before attributing a cause or continuing its owning recovery. Complete any older unfinished lifecycle through its original
 controller first. Do not import or relabel its operation as a new maintenance.
 
 Build the fixed helper closure with `python -m tools.build_receiving_maintenance`
@@ -33,7 +33,13 @@ Use one protected root-owned mode-0600 JSON spec (`cluster-receiving-maintenance
   `transaction` and existing `tooling` recipe. The bootstrap interpreter and
   closed imports are an already qualified SDK anchor, never arbitrary executables.
 - `guests`: mapping from existing job name to its actual authorized `grant`
-  path and existing `tooling` recipe. Jobs must be complete and match the grants.
+  path and existing `tooling` recipe. Jobs must match the grants and either be
+  complete or have only their final acceptance outstanding, with every earlier
+  stage complete. Their historical acceptance is never falsified by maintenance.
+- Optional `worker`: exactly `{"unit":"daimon-onboarding-worker.service"}`.
+  Required for the final-acceptance profile. Its Root journal must be the canonical
+  `/var/lib/daimon-cluster-receiving-maintenance/operations`, so a second operation
+  cannot adopt another operation's unresolved pause as an inactive baseline.
 
 Run from the qualified helper's supported interpreter/import context:
 
@@ -52,9 +58,21 @@ child references, never Source custody or a copied writable owner journal.
 
 Notify the human before `apply` interrupts Matrix services. This does not grant
 permission for global Stop, Codex/Telegram restart or unrelated service changes.
-The onboarding worker stays active: existing nonblocking job locks protect the
-selector/lifecycle effects. A collision returns `busy` (exit75); resume the **same
-spec** after that job completes. Do not pause a worker or loop/rebuild as a repair.
+With complete jobs, the onboarding worker stays active and existing nonblocking
+job locks protect selector/lifecycle effects. With a final acceptance outstanding,
+the fixed onboarding worker is paused under its selection lock before sender
+revocation. Its original state and unchanged unit definition are journaled before
+stop; an unclean drain refuses lifecycle work. `finally` restores an originally
+active worker and leaves an originally inactive worker inactive. A lost manager
+reply is reconciled from actual state. No reload, enable or harness restart occurs.
+
+After a coordinator crash, retry **the same spec**: pending worker restoration
+runs before candidate, expiry or HostConfig preflight can refuse the update. Each
+new apply attempt records a new pause cycle; another operation cannot claim an
+unresolved pause. Status reports restoration pending instead of claiming success.
+If the unchanged worker cannot be restored, preserve that uncertainty and repair
+its exact owning condition. A job collision returns `busy` (exit75); resume the
+same spec after the lock clears. Do not loop, rebuild or alter job acceptance.
 
 `apply` revokes original sender processes, applies the retained host-selector CAS,
 then completes only missing Source/guest lifecycle effects, tooling adoption and

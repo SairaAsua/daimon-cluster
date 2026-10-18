@@ -17,7 +17,7 @@ from tools.build_onboarding_code import MODULES
 # Archive-transfer upgrades change frozen export context and are a separate
 # profile; routine maintenance does not add that module to a legacy context.
 MAINTENANCE_MODULES = tuple(dict.fromkeys((*(name for name in MODULES if name != 'onboarding_transfer.py'),
-    'receiving_maintenance.py', 'onboarding_source.py', 'onboarding_peer_host.py',
+    'receiving_maintenance.py', 'receiving_worker.py', 'onboarding_source.py', 'onboarding_peer_host.py',
     'onboarding_host.py', 'onboarding_qualification.py', 'onboarding_receiving_update.py',
     'onboarding_owner_control.py', 'operation_journal.py', 'idempotency.py',
     'onboarding_intake.py', 'onboarding_progress.py', 'onboarding_managed.py',

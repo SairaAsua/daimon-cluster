@@ -36,6 +36,7 @@ FILES = (
     "clusterctl/onboarding_sdk.py",
     "clusterctl/onboarding_receiving_update.py",
     "clusterctl/receiving_maintenance.py",
+    "clusterctl/receiving_worker.py",
     "clusterctl/onboarding_owner_control.py",
     "clusterctl/onboarding_target.py",
     "clusterctl/onboarding_existing.py",

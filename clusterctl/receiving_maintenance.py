@@ -2,7 +2,8 @@
 
 The root coordinator owns only protected public selections and child references.
 Source custody, SDK and lifecycle journal remain under the receiving owner. No
-model, global Stop, worker pause or arbitrary command callback is provided.
+model, global Stop, harness restart or arbitrary command callback is provided.
+Only the explicitly bound onboarding worker can be paused with durable restoration.
 """
 from __future__ import annotations
 
@@ -21,19 +22,21 @@ from types import SimpleNamespace
 from . import being_seed, onboarding_code_successor, onboarding_release, onboarding_sdk
 from .onboarding import OnboardingError, digest, refusal_diagnostic
 from .operation_journal import OperationJournal
+from . import receiving_worker
 from .onboarding_owner_control import PUBLIC_ERRORS as OWNER_PUBLIC_ERRORS
 
 SCHEMA = 'cluster-receiving-maintenance/v1'
 MODULE = 'clusterctl.receiving_maintenance'
 
 # Disclosure is based on known public codes, never spelling of exception text.
-PUBLIC_ERRORS = OWNER_PUBLIC_ERRORS | frozenset({
+PUBLIC_ERRORS = OWNER_PUBLIC_ERRORS | receiving_worker.PUBLIC_ERRORS | frozenset({
     'receiving_maintenance_binding_required', 'receiving_maintenance_child_conflict',
     'receiving_maintenance_owner_required', 'receiving_maintenance_preparation_required',
     'receiving_maintenance_preservation_required', 'receiving_maintenance_action_required',
     'receiving_maintenance_owner_refused', 'receiving_maintenance_root_required',
     'receiving_maintenance_completed_job_required', 'receiving_maintenance_host_changed',
-    'receiving_maintenance_current_roster_required',
+    'receiving_maintenance_current_roster_required', 'receiving_maintenance_worker_binding_required',
+    'receiving_maintenance_admitted_job_required',
     'qualified_receiving_observer_required', 'receiving_source_configuration_changed',
     'receiving_source_owner_binding_required', 'receiving_required_cohort_changed',
     'receiving_cohort_predecessor_changed', 'receiving_sender_precondition_changed',
@@ -64,13 +67,16 @@ def _artifact(value: dict) -> tuple[Path, str]:
 
 
 def validate(spec: dict) -> dict:
-    if (not isinstance(spec, dict) or set(spec) != {'schema', 'name', 'journal', 'host_config',
+    if (not isinstance(spec, dict) or set(spec) - {'worker'} != {'schema', 'name', 'journal', 'host_config',
             'candidate', 'observer', 'source', 'guests'} or spec['schema'] != SCHEMA
             or not isinstance(spec['name'], str) or re.fullmatch('[a-z0-9][a-z0-9-]{0,63}', spec['name']) is None
             or not isinstance(spec['guests'], dict) or not 1 <= len(spec['guests']) <= 64
             or any(re.fullmatch('[a-z0-9][a-z0-9-]{0,30}', name) is None or name == 'source'
                    for name in spec['guests'])):
         raise OnboardingError('receiving_maintenance_binding_required')
+    if 'worker' in spec and (spec['worker'] != {'unit': receiving_worker.UNIT}
+            or spec['journal'] != str(receiving_worker.JOURNAL)):
+        raise OnboardingError('receiving_maintenance_worker_binding_required')
     candidate = spec['candidate']
     if (not isinstance(candidate, dict) or set(candidate) != {'code', 'code_digest',
             'manifest_path', 'manifest_digest', 'expires_at_ms'}
@@ -100,6 +106,18 @@ def validate(spec: dict) -> dict:
     for profile in (source, *spec['guests'].values()):
         validate_tooling_recipe(profile['tooling'])
     return copy.deepcopy(spec)
+
+
+def needs_worker_pause(job: dict, spec: dict) -> bool:
+    from .onboarding import STAGES
+    if job['state'] == 'complete':
+        return False
+    if (job['stage'] != 'acceptance'
+            or any(job['steps'][stage]['state'] != 'complete' for stage in STAGES if stage != 'acceptance')):
+        raise OnboardingError('receiving_maintenance_admitted_job_required')
+    if 'worker' not in spec:
+        raise OnboardingError('receiving_maintenance_worker_binding_required')
+    return True
 
 
 def current_roster(observed: dict) -> str:
@@ -396,6 +414,7 @@ class ReceivingMaintenance:
     def __init__(self, spec: dict):
         from .onboarding_host import HostBackend, HostConfig
         self.spec = validate(spec)
+        receiving_worker.recover_before_preflight(self.spec)
         self.config_path = _path(spec['host_config'])
         self.backend = HostBackend(HostConfig.load(self.config_path))
         if self.backend.config.code is None:
@@ -405,6 +424,7 @@ class ReceivingMaintenance:
         self.body = _artifact({key: spec['candidate'][key] for key in ('code', 'code_digest')})
         self.observer = _artifact(spec['observer'])
         self.plans = {}
+        self.pause_worker = False
         from .onboarding import JobStore
         store = JobStore(self.backend.config.jobs)
         for name, profile in spec['guests'].items():
@@ -413,8 +433,9 @@ class ReceivingMaintenance:
                 raise OnboardingError('receiving_maintenance_binding_required')
             plan = being_seed._read(grant)['plan']
             job = store._load(name)
-            if job['state'] != 'complete' or job['plan'] != plan or not self.backend.authorize(plan, digest(plan)):
+            if job['plan'] != plan or not self.backend.authorize(plan, digest(plan)):
                 raise OnboardingError('receiving_maintenance_completed_job_required')
+            self.pause_worker = needs_worker_pause(job, self.spec) or self.pause_worker
             self.plans[name] = plan
         for code, fingerprint in (self.body, self.observer):
             onboarding_code_successor.verify(code, fingerprint, self.backend.config.code,
@@ -583,47 +604,61 @@ class ReceivingMaintenance:
             return self.status()
 
     def apply(self) -> dict:
+        with self.journal.mutation_lock(self.operation_id):
+            if getattr(self, 'pause_worker', False):
+                from .onboarding_service import selection_lock
+                manager = receiving_worker.WorkerManager()
+                with selection_lock(manager.unit):
+                    pause = receiving_worker.WorkerPause(self.journal, self.operation_id, digest(self.spec), manager)
+                    try:
+                        pause.pause()
+                        self._apply()
+                    finally:
+                        pause.restore()
+                return self.status()
+            return self._apply()
+
+    def _apply(self) -> dict:
         from .onboarding_host import HostBackend, HostConfig
         from .onboarding_receiving_update import CohortController, GuestBootstrapController
-        with self.journal.mutation_lock(self.operation_id):
-            effects = self._effects()
-            if 'cohort' not in effects:
-                raise OnboardingError('receiving_maintenance_preparation_required')
-            cohort_id = effects['cohort']['operation_id']
-            # The original-process barrier must be consumed before replacement.
-            if 'host-selected' not in effects:
-                controller = CohortController(self.journal, cohort_id, self._owners(effects['before']))
-                controller.revoke_senders()
-                self._record('host-selected', controller.apply_host_selection(self.config_path))
-            # Resume may follow a separately changed selector. Check the whole
-            # retained result before ANY lifecycle effect, not at the first guest.
-            from .onboarding_host import RUNTIME_SELECTION_KEYS
-            cohort = self.journal.get(cohort_id)
-            if cohort is None:
-                raise OnboardingError('receiving_maintenance_child_conflict')
-            original = cohort['expected_precondition']['host_configuration']
-            selected = {**{key: value for key, value in original.items() if key not in RUNTIME_SELECTION_KEYS},
-                        **cohort['intended_transition']['host_runtime']}
-            if being_seed._read(self.config_path) != selected:
-                raise OnboardingError('receiving_maintenance_host_changed')
-            self.backend = HostBackend(HostConfig.load(self.config_path))
-            if 'loaded:source' not in self._effects():
-                self._record('loaded:source', self.source.call('execute')['loaded'])
-            for name in self.plans:
-                if 'loaded:' + name in self._effects():
-                    continue
-                reference = self._effects()['child:' + name]
-                lifecycle = GuestBootstrapController(self.journal, reference['operation_id'], self.backend, name)
-                self._record('loaded:' + name, lifecycle.execute(timeout_seconds=60))
-            loaded = {name: self._effects()['loaded:' + name] for name in ('source', *self.plans)}
-            controller = CohortController(self.journal, cohort_id, self._owners(loaded))
-            controller.reconcile_tooling()
-            # activate owns partial/full selection reconciliation; never replay
-            # its preparation/revoke barrier after a positive selection.
-            result = controller.activate()
-            if 'receiving-selected' not in self._effects():
-                self._record('receiving-selected', result)
-            return self.status()
+        effects = self._effects()
+        if 'cohort' not in effects:
+            raise OnboardingError('receiving_maintenance_preparation_required')
+        cohort_id = effects['cohort']['operation_id']
+        # The original-process barrier must be consumed before replacement.
+        if 'host-selected' not in effects:
+            controller = CohortController(self.journal, cohort_id, self._owners(effects['before']))
+            controller.revoke_senders()
+            self._record('host-selected', controller.apply_host_selection(self.config_path))
+        # Resume may follow a separately changed selector. Check the whole
+        # retained result before ANY lifecycle effect, not at the first guest.
+        from .onboarding_host import RUNTIME_SELECTION_KEYS
+        cohort = self.journal.get(cohort_id)
+        if cohort is None:
+            raise OnboardingError('receiving_maintenance_child_conflict')
+        original = cohort['expected_precondition']['host_configuration']
+        selected = {**{key: value for key, value in original.items() if key not in RUNTIME_SELECTION_KEYS},
+                    **cohort['intended_transition']['host_runtime']}
+        if being_seed._read(self.config_path) != selected:
+            raise OnboardingError('receiving_maintenance_host_changed')
+        self.backend = HostBackend(HostConfig.load(self.config_path))
+        if 'loaded:source' not in self._effects():
+            self._record('loaded:source', self.source.call('execute')['loaded'])
+        for name in self.plans:
+            if 'loaded:' + name in self._effects():
+                continue
+            reference = self._effects()['child:' + name]
+            lifecycle = GuestBootstrapController(self.journal, reference['operation_id'], self.backend, name)
+            self._record('loaded:' + name, lifecycle.execute(timeout_seconds=60))
+        loaded = {name: self._effects()['loaded:' + name] for name in ('source', *self.plans)}
+        controller = CohortController(self.journal, cohort_id, self._owners(loaded))
+        controller.reconcile_tooling()
+        # activate owns partial/full selection reconciliation; never replay
+        # its preparation/revoke barrier after a positive selection.
+        result = controller.activate()
+        if 'receiving-selected' not in self._effects():
+            self._record('receiving-selected', result)
+        return self.status()
 
     def status(self) -> dict:
         effects = self._effects()
@@ -631,7 +666,7 @@ class ReceivingMaintenance:
             phase='receiving-selected' if 'receiving-selected' in effects else 'prepared' if 'cohort' in effects else 'preparing',
             loaded=sorted(name.removeprefix('loaded:') for name in effects if name.startswith('loaded:')),
             prepared_receivers=sorted(name.removeprefix('guest:') for name in effects if name.startswith('guest:')),
-            communication='unobserved', worker_paused=False)
+            communication='unobserved', worker_paused=None if receiving_worker.restoration_pending(self.spec) else False)
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -670,15 +705,23 @@ def main(argv=None) -> int:
             else:
                 operation = ReceivingMaintenance(spec)
                 result = operation.prepare() if args.action == 'prepare' else operation.apply()
+        if args.spec is not None and receiving_worker.restoration_pending(spec):
+            result.update(worker_paused=None, worker_restoration_pending=True)
         print(json.dumps(result))
         return 0
     except Exception as error:
         code = public_error(error)
         if args.spec is not None:
             busy = code == 'seed_operation_in_progress'
+            pending = None
+            if 'spec' in locals():
+                try:
+                    pending = receiving_worker.restoration_pending(spec)
+                except Exception:
+                    pass  # Unreadable retained state is unknown, never restored.
             print(json.dumps(dict(phase='busy' if busy else 'uncertain', code=code,
                 operation_id=None if operation is None else operation.operation_id,
-                resume='same-spec', worker_paused=False)))
+                resume='same-spec', worker_paused=False if pending is False else None)))
             return 75 if busy else 1
         print(json.dumps({'error': code}), file=sys.stderr)
         return 1

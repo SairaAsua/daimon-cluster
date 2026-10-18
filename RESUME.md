@@ -30,7 +30,11 @@ from historical qualification below. No autonomous peer model attention is added
 
 Continue through [the maintained receiving update runbook](docs/runbooks/tribu-sdk-successor.md)
 from the next missing retained effect. Reuse unchanged qualification and reviews.
-Never run dated trial scripts as the normal deployment interface. Notify the
+PR277 supplies the maintained prepare/apply/status coordinator. Complete jobs
+leave the worker active; retained final-acceptance jobs require its scoped
+fixed-worker pause with original-state restoration and same-spec crash recovery.
+No historical job acceptance is fabricated. Never run dated trial scripts as
+the normal deployment interface. Notify the
 human before real service interruption; each global Stop needs fresh explicit
 human consent. No global Stop or native Codex/Telegram restart is authorized by
 the maintenance goal.
