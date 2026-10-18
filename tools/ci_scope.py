@@ -526,7 +526,8 @@ def owner_diagnostics_only(root: Path, base: str) -> bool:
 
 def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
     host = {'clusterctl/onboarding_host.py', 'tests/test_onboarding_host.py'}
-    if ({'clusterctl/receiving_maintenance.py', 'tests/test_receiving_maintenance.py'} <= set(changed)
+    if (({'clusterctl/receiving_maintenance.py', 'tests/test_receiving_maintenance.py'} <= set(changed)
+            or {'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_cohort_control.py'} <= set(changed))
             and set(changed) <= MAINTENANCE_FILES | host | CI_FILES | RUNBOOK_DOCS
             and all((root / name).is_file() for name in MAINTENANCE_TESTS)
             and ('clusterctl/onboarding_host.py' not in changed or owner_diagnostics_only(root, base))):

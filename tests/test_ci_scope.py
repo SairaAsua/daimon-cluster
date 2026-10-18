@@ -881,3 +881,12 @@ def test_maintenance_composition_keeps_changed_contracts_and_exact_host_delta(mo
     monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *_a, **_k:
         subprocess.CompletedProcess([], 0, previous + b'\n# unrelated change\n'))
     assert select(changed, ROOT, base='a' * 40) == ('full', ['tests'])
+
+
+def test_cohort_correction_reuses_maintained_controller_coverage():
+    from tools import ci_scope
+    changed = ['clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_cohort_control.py',
+        'tools/ci_scope.py', 'tests/test_ci_scope.py', 'docs/runbooks/tribu-sdk-successor.md']
+    assert select(changed, ROOT) == ('peer', list(ci_scope.MAINTENANCE_TESTS))
+    for extra in ('requirements-weave.txt', 'clusterctl/onboarding_admission.py', 'unknown.py'):
+        assert select([*changed, extra], ROOT) == ('full', ['tests'])
