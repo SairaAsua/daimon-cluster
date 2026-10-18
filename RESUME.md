@@ -6,38 +6,42 @@ Current selections below supersede the explicitly historical qualification.
 
 ## Current receiving maintenance — 2026-10-18
 
-The three VPS bodies (CompAII, Eko and Oliva) have accepted Matrix
-`9b2b8ec2c455d3bf316bc00dc9e1bac44e9d5094`, SDK `53c4ee01` and receiving
-code `422e79c6`. All six native copies, automatic signed completions and data
-ACKs, and three public echoes are observed. The proof deliberately reuses four
-already successful peer legs and adds only a distinct Source verification after
-its external Telegram path correction. The earlier uncertain Source publication
-is retained, never replayed or retroactively confirmed.
+CompAII, Eko and Oliva now load receiving helper `6dffe887` with unchanged
+Matrix `9b2b8ec2c455d3bf316bc00dc9e1bac44e9d5094`, SDK `53c4ee01` and
+wheel `5137b7a7`. Root coordinator `2c883c9f` supplies the maintained update
+and activation-only recovery; its version is separate from body/observer code.
+Matrix PR364 merged as `76596f9`; Cluster PR276–280 merged through `ed78705f`.
 
-[Actual proof](https://github.com/AlterMundi/daimon-matrix/issues/363#issuecomment-6240871838)
-and exact installed [435-case qualification](https://github.com/AlterMundi/daimon-matrix/actions/runs/39065681258)
-are valid evidence. Matrix PR364 merged this deployed stack atomically into main as `76596f9`;
-the active maintenance goal addresses Cluster #270 and #273 and one
-maintained resumable update operation. Cluster PR272's managed-successor recovery
-is already merged. Preserve original start receipts; missing observations do not
-authorize lifecycle replay.
+The supported operation completed actual controlled loads, native tooling and
+positive selection on all three VPS bodies. Parent `077e3756` follows explicit
+cohort `080a445c`, preserving failed cohorts, original host CAS and expiry. The
+scoped onboarding worker is restored active. A new native group message
+`dfafe493-0ceb-41e8-91f5-e0b893cb33d9` has both Eko/Oliva intake ACKs and automatic
+signed delivered receipts, Source's authored copy, and one confirmed Tribu echo.
+Three unavailable siblings remain explicit; no model or uncertain-message replay
+was used. [Current receiving and communication evidence](https://github.com/AlterMundi/daimon-matrix/issues/374#issuecomment-6251542792).
+
+The unchanged SDK reuses its accepted six native/semantic/ACK legs, three echoes
+and exact installed 435-case qualification 39065681258. Root maintenance/recovery
+CI 39138465505 passed 538 cases/2 skips. The compatible old-body/new-observer
+composition and prior valid restart/rollback proof are retained. No production
+backward cutover, obsolete authority or historical journal restoration occurred.
+
+Follow [the maintained runbook](docs/runbooks/tribu-sdk-successor.md), not dated
+phase scripts. Preparation leaves services active; apply resumes missing effects
+and restores the bound worker's original state. A fenced activation uses a linked
+`reassess` successor with current empty gates, original lifecycle/tooling evidence,
+unchanged artifacts/authority/provenance and original expiry/window. Never reset
+failed intent, repeat a body lifecycle to recover observation, or remint messages.
+New bounded Source/guest diagnostics distinguish timeout from launch failure; the
+earlier generic failure's original class remains unknown. Cold native/tooling
+observations still have variable cost; no instantaneous-cutover claim is made.
 
 Broader Matrix milestone6/#336, I/O acceptance, external bodies and complete
 future-member admission remain separate unfinished work. Cluster PR265 and Matrix
-PR369 are parked; deployed generic owner APIs do not claim their end-to-end
-acceptance. Do not restore the old pair-default architecture or select a runtime
-from historical qualification below. No autonomous peer model attention is added.
-
-Continue through [the maintained receiving update runbook](docs/runbooks/tribu-sdk-successor.md)
-from the next missing retained effect. Reuse unchanged qualification and reviews.
-PR277 supplies the maintained prepare/apply/status coordinator. Complete jobs
-leave the worker active; retained final-acceptance jobs require its scoped
-fixed-worker pause with original-state restoration and same-spec crash recovery.
-No historical job acceptance is fabricated. Never run dated trial scripts as
-the normal deployment interface. Notify the
-human before real service interruption; each global Stop needs fresh explicit
-human consent. No global Stop or native Codex/Telegram restart is authorized by
-the maintenance goal.
+PR369 are parked. No autonomous peer attention, global Stop or native
+Codex/Telegram restart follows from this maintenance result. Warn the human
+before actual service interruption; each global Stop needs fresh explicit consent.
 
 ## Historical qualification checkpoint — 2026-10-07
 
