@@ -842,6 +842,8 @@ def prepare_source_bootstrap(source, *, home: Path, code: Path, code_digest: str
     for path in (home, code, config, manifest_path, transaction):
         if not path.is_absolute() or '..' in path.parts:
             raise OnboardingError('receiving_bootstrap_binding_conflict')
+    if transaction.parent != source.root.parent or transaction == source.root:
+        raise OnboardingError('receiving_bootstrap_binding_conflict')
     if being_seed._read(config) != source.settings:
         raise OnboardingError('receiving_bootstrap_binding_conflict')
     onboarding_release.regular(code / 'clusterctl/onboarding_source.py', uid=code_uid)
