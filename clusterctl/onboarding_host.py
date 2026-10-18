@@ -306,7 +306,11 @@ class HostBackend:
             options: dict = {} if input_data is None else {'input': input_data}
             result = subprocess.run(["incus", *argv], capture_output=True, text=True,
                                     timeout=timeout, check=False, **options)
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired) as error:
+            if timeout_seconds is not None and argv[0] == 'exec' and 'clusterctl.onboarding_owner_control' in argv:
+                code = ('receiving_host_deadline_expired' if isinstance(error, subprocess.TimeoutExpired)
+                    else 'receiving_host_launch_failed')
+                raise OnboardingError(code) from None
             raise OnboardingError("onboarding_host_operation_failed") from None
         if result.returncode:
             if argv[0] == 'exec' and 'clusterctl.onboarding_owner_control' in argv:

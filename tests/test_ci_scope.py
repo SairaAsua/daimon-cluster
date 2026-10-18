@@ -890,3 +890,18 @@ def test_cohort_correction_reuses_maintained_controller_coverage():
     assert select(changed, ROOT) == ('peer', list(ci_scope.MAINTENANCE_TESTS))
     for extra in ('requirements-weave.txt', 'clusterctl/onboarding_admission.py', 'unknown.py'):
         assert select([*changed, extra], ROOT) == ('full', ['tests'])
+
+
+def test_exact_owner_transport_diagnostic_keeps_maintenance_coverage(monkeypatch):
+    import subprocess
+    from tools import ci_scope
+    host = 'clusterctl/onboarding_host.py'
+    current = (ROOT/host).read_bytes()
+    assert current.count(ci_scope.OWNER_TRANSPORT_DIAGNOSTIC) == 1
+    previous = current.replace(ci_scope.OWNER_TRANSPORT_DIAGNOSTIC, ci_scope.OWNER_TRANSPORT_ORIGINAL, 1)
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *a, **kw: subprocess.CompletedProcess([],0,previous))
+    changed = ['clusterctl/receiving_maintenance.py','tests/test_receiving_maintenance.py',host,
+        'tests/test_onboarding_host.py','tools/ci_scope.py','tests/test_ci_scope.py']
+    assert select(changed, ROOT, base='a'*40) == ('peer',list(ci_scope.MAINTENANCE_TESTS))
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *a, **kw: subprocess.CompletedProcess([],0,previous+b'\n# other change\n'))
+    assert select(changed, ROOT, base='a'*40) == ('full',['tests'])
