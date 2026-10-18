@@ -97,13 +97,16 @@ def test_unresolved_pause_belongs_to_its_original_operation_and_new_retry_gets_n
     assert manager.stops == manager.starts == 2
 
 
-def test_same_spec_recovers_before_failed_constructor_preflight(tmp_path, monkeypatch):
+@pytest.mark.parametrize('bad_transaction', [False, True])
+def test_same_spec_recovers_before_failed_constructor_preflight(tmp_path, monkeypatch, bad_transaction):
     from clusterctl.receiving_maintenance import ReceivingMaintenance
     root = tmp_path / 'journal'
     monkeypatch.setattr(worker, 'JOURNAL', root)
     spec = spec_fixture(tmp_path)
     spec['journal'] = str(root)
     spec['worker'] = {'unit': worker.UNIT}
+    if bad_transaction:
+        spec['source']['transaction'] = str(tmp_path / 'elsewhere' / 'transaction')
     journal = OperationJournal(root)
     row = plan_update(journal, target='receiving-maintenance:' + spec['name'] + ':' + digest(spec),
         manifest_digest=spec['candidate']['manifest_digest'],
@@ -111,9 +114,10 @@ def test_same_spec_recovers_before_failed_constructor_preflight(tmp_path, monkey
     manager = Manager(tmp_path)
     pause = worker.WorkerPause(journal, row['operation_id'], digest(spec), manager)
     pause.pause()  # A prior coordinator died after stop; no finally was reached.
-    monkeypatch.setattr(worker, 'WorkerManager', lambda: manager)
+    monkeypatch.setattr(worker, 'WorkerManager', lambda **kwargs: manager)
     assert worker.restoration_pending(spec)
-    with pytest.raises(FileNotFoundError):
+    expected = OnboardingError if bad_transaction else FileNotFoundError
+    with pytest.raises(expected):
         ReceivingMaintenance(spec)  # HostConfig is deliberately absent.
     assert manager.state['state'] == 'active' and manager.stops == manager.starts == 1
     assert not worker.restoration_pending(spec)
@@ -176,6 +180,14 @@ def test_native_inspect_keeps_static_command_and_separates_execution_metadata(tm
     assert manager.inspect()['definition'] == active['definition']
     command[1] = ['/usr/bin/python3', '-m', 'different']
     assert manager.inspect()['definition'] != active['definition']
+    manager.config_path = tmp_path / 'host.json'
+    command[1] = ['/usr/bin/python3', '-m', 'clusterctl.onboarding_worker', '--config', str(manager.config_path)]
+    manager.inspect()
+    for override in ('--config=/different/jobs.json', '--conf=/different/jobs.json'):
+        command[1].append(override)
+        with pytest.raises(OnboardingError, match='worker_binding_required'):
+            manager.inspect()
+        command[1].pop()
 
 
 def test_crash_before_claim_publication_does_not_reserve_the_next_cycle(tmp_path, monkeypatch):
@@ -220,3 +232,55 @@ def test_external_stop_before_owned_intent_is_not_undone(tmp_path, monkeypatch):
             pause.restore()
     assert manager.stops == manager.starts == 0 and manager.state['state'] == 'inactive'
     assert pause.row['runtime_observation']['restored'] == {'no_owned_effect': True}
+
+
+def test_busy_real_job_refuses_before_any_worker_stop_intent(tmp_path):
+    from clusterctl import being_seed
+    jobs = tmp_path / 'jobs'
+    jobs.mkdir(mode=0o700)
+    (jobs / 'eko').mkdir(mode=0o700)
+    (jobs / 'eko' / 'job.json').write_text('{}')
+    journal = OperationJournal(tmp_path / 'journal')
+    manager = Manager(tmp_path)
+    pause = worker.WorkerPause(journal, 'parent', 'b' * 64, manager)
+    with being_seed._locked(jobs / 'eko'):
+        with pytest.raises(being_seed.SeedError, match='seed_operation_in_progress'):
+            with worker.job_drain_barrier(jobs):
+                pause.pause()
+    assert pause.row is None and manager.stops == 0 and manager.starts == 0
+
+
+def test_worker_stop_owns_all_jobs_but_lifecycle_and_restoration_do_not(tmp_path, monkeypatch):
+    from clusterctl import being_seed
+    jobs = tmp_path / 'jobs'
+    jobs.mkdir(mode=0o700)
+    for name in ('eko', 'oliva'):
+        (jobs / name).mkdir(mode=0o700)
+        (jobs / name / 'job.json').write_text('{}')
+    paths = [jobs, jobs / 'eko', jobs / 'oliva']
+    journal = OperationJournal(tmp_path / 'journal')
+    manager = Manager(tmp_path)
+    original_stop, original_start = manager.stop, manager.start
+    def stop():
+        for path in paths:
+            with pytest.raises(being_seed.SeedError, match='seed_operation_in_progress'):
+                with being_seed._locked(path):
+                    pytest.fail('worker stop without drain ownership')
+        original_stop()
+    def assert_free():
+        for path in paths:
+            with being_seed._locked(path):
+                pass
+    def start():
+        assert_free()
+        original_start()
+    monkeypatch.setattr(manager, 'stop', stop)
+    monkeypatch.setattr(manager, 'start', start)
+    pause = worker.WorkerPause(journal, 'parent', 'b' * 64, manager)
+    try:
+        with worker.job_drain_barrier(jobs):
+            pause.pause()
+        assert_free()  # The real lifecycle acquires these itself.
+    finally:
+        pause.restore()
+    assert manager.stops == manager.starts == 1

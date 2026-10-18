@@ -6,6 +6,7 @@ operation cannot mistake an earlier outstanding pause for an inactive baseline.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager, ExitStack
 import hashlib
 import json
 import os
@@ -29,10 +30,11 @@ PUBLIC_ERRORS = frozenset({'receiving_worker_binding_required', 'receiving_worke
 
 
 class WorkerManager:
-    def __init__(self):
+    def __init__(self, *, config_path: Path | None = None):
         if os.geteuid() != 0:
             raise OnboardingError('receiving_worker_binding_required')
         self.unit = Path('/etc/systemd/system') / UNIT
+        self.config_path = config_path
 
     def _run(self, *arguments: str, bus: bool = False) -> str:
         try:
@@ -76,12 +78,23 @@ class WorkerManager:
                         or type(row[2]) is not bool for row in rows)):
                 raise ValueError
             static_commands = [row[:3] for row in rows]
+            if self.config_path is not None:
+                arguments = rows[0][1]
+                if (len(rows) != 1 or len(arguments) not in {5, 7}
+                        or arguments[0] != rows[0][0]
+                        or arguments[1:4] != ['-m', 'clusterctl.onboarding_worker', '--config']
+                        or arguments[4] != str(self.config_path)
+                        or len(arguments) == 7 and (arguments[5] != '--home-placements'
+                            or not Path(arguments[6]).is_absolute() or '..' in Path(arguments[6]).parts)):
+                    raise OnboardingError('receiving_worker_binding_required')
             environment_files = json.loads(self._run('--system', '--json=short', 'get-property',
                 'org.freedesktop.systemd1',
                 '/org/freedesktop/systemd1/unit/daimon_2donboarding_2dworker_2eservice',
                 'org.freedesktop.systemd1.Service', 'EnvironmentFiles', bus=True))
             if environment_files != {'type': 'a(sb)', 'data': []}:
                 raise OnboardingError('receiving_worker_binding_required')
+        except OnboardingError:
+            raise
         except (ValueError, KeyError, TypeError):
             raise OnboardingError('receiving_worker_manager_unavailable') from None
         # Retain only hashes, never raw command/environment text.
@@ -246,3 +259,21 @@ def restoration_pending(spec: dict) -> bool:
     selected = {} if claim is None else (claim['runtime_observation'] or {})
     row = journal.get(selected['cycle_id']) if 'cycle_id' in selected else None
     return row is not None and 'restored' not in (row['runtime_observation'] or {})
+
+
+@contextmanager
+def job_drain_barrier(jobs: Path):
+    """Exclude pending ticks/home-provider calls only until clean worker stop.
+
+    The installed worker resolves both backend routes after these same job
+    locks. Nonblocking contention has no stop intent and is safe to resume.
+    Release before lifecycle/host selector effects and before worker restoration.
+    """
+    from . import being_seed
+    from .onboarding import JobStore, private_directory
+    store = JobStore(jobs)
+    with ExitStack() as locks:
+        locks.enter_context(being_seed._locked(private_directory(jobs)))
+        for name in sorted(store.names()):
+            locks.enter_context(being_seed._locked(private_directory(store.directory(name))))
+        yield

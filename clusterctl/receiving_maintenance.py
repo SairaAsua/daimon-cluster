@@ -36,7 +36,8 @@ PUBLIC_ERRORS = OWNER_PUBLIC_ERRORS | receiving_worker.PUBLIC_ERRORS | frozenset
     'receiving_maintenance_owner_refused', 'receiving_maintenance_root_required',
     'receiving_maintenance_completed_job_required', 'receiving_maintenance_host_changed',
     'receiving_maintenance_current_roster_required', 'receiving_maintenance_worker_binding_required',
-    'receiving_maintenance_admitted_job_required',
+    'receiving_maintenance_admitted_job_required', 'receiving_maintenance_source_transaction_required',
+    'receiving_bootstrap_binding_conflict',
     'qualified_receiving_observer_required', 'receiving_source_configuration_changed',
     'receiving_source_owner_binding_required', 'receiving_required_cohort_changed',
     'receiving_cohort_predecessor_changed', 'receiving_sender_precondition_changed',
@@ -415,6 +416,10 @@ class ReceivingMaintenance:
         from .onboarding_host import HostBackend, HostConfig
         self.spec = validate(spec)
         receiving_worker.recover_before_preflight(self.spec)
+        source = self.spec['source']
+        if (_path(source['transaction']).parent != _path(source['root']).parent
+                or _path(source['transaction']) == _path(source['root'])):
+            raise OnboardingError('receiving_maintenance_source_transaction_required')
         self.config_path = _path(spec['host_config'])
         self.backend = HostBackend(HostConfig.load(self.config_path))
         if self.backend.config.code is None:
@@ -607,11 +612,12 @@ class ReceivingMaintenance:
         with self.journal.mutation_lock(self.operation_id):
             if getattr(self, 'pause_worker', False):
                 from .onboarding_service import selection_lock
-                manager = receiving_worker.WorkerManager()
+                manager = receiving_worker.WorkerManager(config_path=self.config_path)
                 with selection_lock(manager.unit):
                     pause = receiving_worker.WorkerPause(self.journal, self.operation_id, digest(self.spec), manager)
                     try:
-                        pause.pause()
+                        with receiving_worker.job_drain_barrier(self.backend.config.jobs):
+                            pause.pause()
                         self._apply()
                     finally:
                         pause.restore()

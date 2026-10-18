@@ -30,7 +30,9 @@ Use one protected root-owned mode-0600 JSON spec (`cluster-receiving-maintenance
   candidate for a compatible backward software selection.
 - `source`: non-root `uid`, `gid`, `home`, `config`, `config_sha256`, `unit`,
   `root`, `socket`, `bootstrap_venv`, `bootstrap_imports`, owner-local `journal`,
-  `transaction` and existing `tooling` recipe. The bootstrap interpreter and
+  `transaction` and existing `tooling` recipe. The transaction must be a sibling
+  of `root`, with a different name; the coordinator refuses an invalid location
+  before preparing or revoking any sender. The bootstrap interpreter and
   closed imports are an already qualified SDK anchor, never arbitrary executables.
 - `guests`: mapping from existing job name to its actual authorized `grant`
   path and existing `tooling` recipe. Jobs must match the grants and either be
@@ -41,12 +43,14 @@ Use one protected root-owned mode-0600 JSON spec (`cluster-receiving-maintenance
   `/var/lib/daimon-cluster-receiving-maintenance/operations`, so a second operation
   cannot adopt another operation's unresolved pause as an inactive baseline.
 
-Run from the qualified helper's supported interpreter/import context:
+Run from the qualified helper's supported interpreter/import context. Preserve
+`-B` (or `PYTHONDONTWRITEBYTECODE=1`) for every helper or diagnostic import:
+compiled cache files inside a sealed generation correctly invalidate its inventory.
 
 ```sh
-python -m clusterctl.receiving_maintenance --spec "$maintenance_spec" prepare
-python -m clusterctl.receiving_maintenance --spec "$maintenance_spec" apply
-python -m clusterctl.receiving_maintenance --spec "$maintenance_spec" status
+python -B -m clusterctl.receiving_maintenance --spec "$maintenance_spec" prepare
+python -B -m clusterctl.receiving_maintenance --spec "$maintenance_spec" apply
+python -B -m clusterctl.receiving_maintenance --spec "$maintenance_spec" status
 ```
 
 `prepare` installs only missing immutable SDK generations, prepares readonly
@@ -61,7 +65,11 @@ permission for global Stop, Codex/Telegram restart or unrelated service changes.
 With complete jobs, the onboarding worker stays active and existing nonblocking
 job locks protect selector/lifecycle effects. With a final acceptance outstanding,
 the fixed onboarding worker is paused under its selection lock before sender
-revocation. Its original state and unchanged unit definition are journaled before
+revocation. Its actual `--config` must match this HostConfig. Hold the jobs-parent
+and all existing job locks only through confirmed clean stop, then release them
+before lifecycle effects and restoration. The pinned worker resolves ordinary
+ticks and home-provider effects under these same locks; a busy lock returns75
+before stop intent, without killing a running backend call. Its original state and unchanged unit definition are journaled before
 stop; an unclean drain refuses lifecycle work. `finally` restores an originally
 active worker and leaves an originally inactive worker inactive. A lost manager
 reply is reconciled from actual state. No reload, enable or harness restart occurs.
@@ -70,6 +78,12 @@ After a coordinator crash, retry **the same spec**: pending worker restoration
 runs before candidate, expiry or HostConfig preflight can refuse the update. Each
 new apply attempt records a new pause cycle; another operation cannot claim an
 unresolved pause. Status reports restoration pending instead of claiming success.
+A rejected historical Source transaction may already have retained revocations.
+Use its original cohort `reconcile_reassessment` to finish exact empty selections
+before freezing a corrected operation. Retain the original failed intent and
+reason, current loaded bodies/HostConfig and original expiry; never edit its
+vectors or renew authority to conceal the failure.
+
 If the unchanged worker cannot be restored, preserve that uncertainty and repair
 its exact owning condition. A job collision returns `busy` (exit75); resume the
 same spec after the lock clears. Do not loop, rebuild or alter job acceptance.

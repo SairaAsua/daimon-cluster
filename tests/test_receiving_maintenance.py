@@ -314,3 +314,23 @@ def test_unmigrated_group_view_is_an_explicit_supported_profile_refusal(roster):
     assert maintenance.public_error(OnboardingError('receiving_maintenance_current_roster_required')) == 'receiving_maintenance_current_roster_required'
     assert maintenance.current_roster({'runtime_status': {'receiving': {'rosters': {'tribe': {
         'schema': 'dm.runtime.tribe-roster/v1', 'roster_sha256': 'a' * 64}}}}}) == 'a' * 64
+
+
+@pytest.mark.parametrize('different_parent', [False, True])
+def test_invalid_source_transaction_is_refused_before_any_prepare_or_effect(tmp_path, different_parent):
+    spec = spec_fixture(tmp_path)
+    spec['source']['transaction'] = (str(tmp_path / 'elsewhere' / 'transaction')
+        if different_parent else spec['source']['root'])
+    with pytest.raises(OnboardingError, match='source_transaction_required'):
+        maintenance.ReceivingMaintenance(spec)
+    assert not (tmp_path / 'root-journal').exists()
+
+
+def test_source_preparation_checks_real_root_transaction_before_sdk_staging(tmp_path, monkeypatch):
+    from clusterctl import onboarding_receiving_update as updates
+    source = SimpleNamespace(root=tmp_path / 'package' / 'runtime')
+    monkeypatch.setattr(updates, 'prepare_sdk', lambda *a, **kw: pytest.fail('staged SDK before binding check'))
+    with pytest.raises(OnboardingError, match='receiving_bootstrap_binding_conflict'):
+        updates.prepare_source_bootstrap(source,home=tmp_path,code=tmp_path,code_digest='a'*64,
+            config=tmp_path/'config',manifest_path=tmp_path/'manifest',manifest_digest='b'*64,
+            transaction=tmp_path/'wrong-parent',expires_at_ms=1)
