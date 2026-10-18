@@ -222,6 +222,35 @@ def test_reassessment_tip_cannot_be_replaced_by_another_request(tmp_path, monkey
     with pytest.raises(OnboardingError, match='child_conflict'):
         operation.reassess(path.with_name('another.json'), digest(manifest), previous)
     assert operation._cohort_tip(operation._effects()) == tip
+    assert operation.status()['cohort_operation_id'] == tip
+
+
+def test_unpublished_child_rejects_same_bytes_at_a_different_manifest_path(tmp_path, monkeypatch):
+    from clusterctl import being_seed
+    operation, _, path, manifest, previous = reassessment_fixture(tmp_path, monkeypatch)
+    original = operation._prepare_reassessment
+    def lose(*args):
+        original(*args)
+        raise OSError('lost child reply')
+    monkeypatch.setattr(operation, '_prepare_reassessment', lose)
+    with pytest.raises(OSError):
+        operation.reassess(path, digest(manifest), previous)
+    another = path.with_name('alternate.json')
+    being_seed._write(another, manifest)
+    with pytest.raises(OnboardingError, match='child_conflict'):
+        operation.reassess(another, digest(manifest), previous)
+    assert operation._cohort_tip(operation._effects()) == previous
+
+
+def test_reassessment_requires_prior_native_tooling_instead_of_reinstalling(tmp_path, monkeypatch):
+    operation, _, path, manifest, previous = reassessment_fixture(tmp_path, monkeypatch)
+    row = operation.journal.get(previous)
+    row['intended_transition']['cohort_activation']['receivers']['eko']['tooling'] = {'profile':'codex'}
+    original = operation.journal.get
+    monkeypatch.setattr(operation.journal, 'get', lambda identifier:
+        row if identifier == previous else original(identifier))
+    with pytest.raises(OnboardingError, match='native_tooling_unobserved'):
+        operation.reassess(path, digest(manifest), previous)
 
 
 def test_reassessment_preserves_expiry_and_refuses_after_horizon(tmp_path, monkeypatch):

@@ -40,6 +40,7 @@ PUBLIC_ERRORS = OWNER_PUBLIC_ERRORS | receiving_worker.PUBLIC_ERRORS | frozenset
     'receiving_bootstrap_binding_conflict',
     'receiving_host_deadline_expired', 'receiving_host_launch_failed',
     'receiving_maintenance_reassessment_required',
+    'receiving_native_tooling_unobserved',
     'qualified_receiving_observer_required', 'receiving_source_configuration_changed',
     'receiving_source_owner_binding_required', 'receiving_required_cohort_changed',
     'receiving_cohort_predecessor_changed', 'receiving_sender_precondition_changed',
@@ -544,6 +545,13 @@ class ReceivingMaintenance:
             if (set(repairs) != set(plan['receivers']) or
                     any(item.get('state') not in {'disabled', 'observed-disabled'} for item in repairs.values())):
                 raise OnboardingError('receiving_maintenance_reassessment_required')
+            native = (previous['runtime_observation'] or {}).get('native_tooling', {})
+            for name, recipe in plan['receivers'].items():
+                if recipe['tooling']['profile'] == 'codex':
+                    accepted = native.get(name)
+                    if (not isinstance(accepted, dict) or accepted.get('schema') != 'cluster-native-chat-tooling/v1'
+                            or accepted.get('status') != 'configured'):
+                        raise OnboardingError('receiving_native_tooling_unobserved')
             target = 'receiving:maintenance-reassessment:' + digest(dict(parent=self.operation_id, previous=previous_id))
             retained = self.journal.latest_for_idempotency_key('receiving-update:' + target + ':' + manifest_digest)
             if retained is not None:
@@ -552,6 +560,8 @@ class ReceivingMaintenance:
                 if (retained['operation'] != 'receiving-update' or retained['target'] != target
                         or retained['expected_precondition'].get('maintenance_parent') != self.operation_id
                         or retained['expected_precondition'].get('previous_cohort') != previous_id
+                        or retained['intended_transition'].get('cohort_activation', {}).get('manifest_path') != str(manifest_path)
+                        or retained['intended_transition']['cohort_activation'].get('manifest_uid') != 0
                         or retained['intent']['runtime_call'] != dict(manifest_digest=manifest_digest,
                             precondition_digest=digest(retained['expected_precondition']),
                             transition_digest=digest(retained['intended_transition']))):
@@ -559,7 +569,6 @@ class ReceivingMaintenance:
                 child = retained
             else:
                 child = self._prepare_reassessment(previous, plan, manifest_path, manifest_digest, selections, target)
-            native = (previous['runtime_observation'] or {}).get('native_tooling', {})
             observed = dict(child['runtime_observation'] or {})
             if 'native_tooling' not in observed:
                 observed['native_tooling'] = native
@@ -793,6 +802,7 @@ class ReceivingMaintenance:
     def status(self) -> dict:
         effects = self._effects()
         return dict(operation_id=self.operation_id,
+            cohort_operation_id=self._cohort_tip(effects) if 'cohort' in effects else None,
             phase='receiving-selected' if 'receiving-selected' in effects else 'prepared' if 'cohort' in effects else 'preparing',
             loaded=sorted(name.removeprefix('loaded:') for name in effects if name.startswith('loaded:')),
             prepared_receivers=sorted(name.removeprefix('guest:') for name in effects if name.startswith('guest:')),
@@ -838,6 +848,7 @@ def main(argv=None) -> int:
                 if row is not None:
                     effects = (row['runtime_observation'] or {}).get('maintenance', {})
                     result.update(operation_id=row['operation_id'],
+                        cohort_operation_id=ReceivingMaintenance._cohort_tip(effects) if 'cohort' in effects else None,
                         phase='receiving-selected' if 'receiving-selected' in effects else
                               'prepared' if 'cohort' in effects else 'preparing')
             else:
