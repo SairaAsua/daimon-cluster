@@ -2514,6 +2514,21 @@ class CohortController:
                     raise OnboardingError('receiving_cohort_predecessor_changed')
             row = self._activation_barrier(row, plan, records, observations)
             now = time.time_ns() // 1_000_000
+            if any(item['reader']['expires_at_ms'] <= now for item in records.values()):
+                raise OnboardingError('receiving_cohort_observation_expired')
+            if any(now - item['observed_at_ms'] > plan['observation_window_ms'] for item in records.values()):
+                # First-time replacement controls can consume the observation
+                # window. Observe once more, without renewing the reader vector
+                # or replaying acknowledged controls. A stale second round fails.
+                fresh: dict = {}
+                refreshed = self._adoption_round(plan, manifest, observations=fresh)
+                for name, current in refreshed.items():
+                    if ({key: val for key, val in current.items() if key not in {'observed_at_ms', 'observed_at_ns'}} !=
+                            {key: val for key, val in records[name].items() if key not in {'observed_at_ms', 'observed_at_ns'}}):
+                        raise OnboardingError('receiving_cohort_activation_changed')
+                records = refreshed
+                row = self._activation_barrier(row, plan, records, fresh)
+                now = time.time_ns() // 1_000_000
             if any(now - item['observed_at_ms'] > plan['observation_window_ms']
                    or item['reader']['expires_at_ms'] <= now for item in records.values()):
                 raise OnboardingError('receiving_cohort_observation_expired')
@@ -2632,6 +2647,24 @@ class CohortController:
                     or replacement['lifecycle_operation_id'] != recipe['lifecycle_operation_id']
                     or replacement['exit_sha256'] != digest(exited)):
                 raise OnboardingError('receiving_sender_replacement_changed')
+            if 'accepted' in replacement:
+                accepted = replacement['accepted']
+                command = replacement['command']
+                if (not isinstance(accepted, dict) or not isinstance(command, dict)
+                        or any(accepted.get(key) != current[key] for key in ('process', 'server', 'gate'))
+                        or accepted.get('command_sha256') != digest(command)
+                        or current['gate'].get('request_sha256') != accepted.get('request_sha256')
+                        or command.get('process_instance_id') != current['gate'].get('process_instance_id')
+                        or command.get('channel_id') != 'tribe' or command.get('operation_id') != control_id
+                        or command.get('release_digest') != release or command.get('phase') != 'revoke'
+                        or command.get('readers') != [] or current['gate'].get('phase') != 'revoke'
+                        or current['gate'].get('readers') != [] or current['gate'].get('operation_id') != control_id
+                        or current['gate'].get('release_digest') != release):
+                    raise OnboardingError('receiving_sender_replacement_changed')
+                # This fresh adoption round already proves the exact retained
+                # ACK. Do not spend its finite freshness repeating owner RPCs
+                # and durable writes. An unacknowledged request still retries.
+                continue
             path = owner.root / 'receiving-control' / (control_id + '-replacement-revoke.json')
             result = owner.prepare_apply_control(replacement['command'], path)
             accepted = {key: result[key] for key in ('server', 'process', 'gate', 'request_sha256', 'command_sha256')}

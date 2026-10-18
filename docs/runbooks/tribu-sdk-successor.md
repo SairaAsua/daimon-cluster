@@ -97,6 +97,17 @@ preparation. Complete HostConfig drift refuses before resumed lifecycle dispatch
 After uncertainty, inspect retained status and resume the same operation; never
 remint messages, renew horizons or replace operations to hide missing evidence.
 
+An acknowledged replacement revoke is reused only when fresh adoption proves
+the same process, server and gate, bound to its exact command, request, release
+and lifecycle exit. Do not repeat its owner RPC or durable journal write. An
+unacknowledged request retains its existing exact retry. If first-time barrier
+controls consume observation freshness, perform one new all-required observation
+round, compare the records excluding only their timestamps and recheck those
+exact accepted gates. Persist the real new observation times; never extend the
+reader expiry. A changed gate/vector, expired reader or stale second round
+refuses activation. This host-coordinator correction can observe the unchanged
+prepared candidate; it does not require another body restart or SDK installation.
+
 `receiving-selected` records observed adoption, not communication. The command
 sends no messages and starts no models. Preserve actual communication receipts
 separately; reused evidence remains valid only while relevant conditions match.
