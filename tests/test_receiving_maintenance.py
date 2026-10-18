@@ -303,3 +303,14 @@ def test_coordinator_uses_real_cohort_resume_without_repreparing_selection(tmp_p
     effects = {name: owner.effects for name, owner in owners.items()}
     assert controller.apply()['phase'] == 'receiving-selected'
     assert {name: owner.effects for name, owner in owners.items()} == effects
+
+
+@pytest.mark.parametrize('roster', [None, {}, {'schema': 'old'},
+    {'schema': 'dm.runtime.tribe-roster/v1', 'roster_sha256': 'not-a-digest'}])
+def test_unmigrated_group_view_is_an_explicit_supported_profile_refusal(roster):
+    observed = {'runtime_status': {'receiving': {'rosters': {'tribe': roster}}}}
+    with pytest.raises(OnboardingError, match='receiving_maintenance_current_roster_required'):
+        maintenance.current_roster(observed)
+    assert maintenance.public_error(OnboardingError('receiving_maintenance_current_roster_required')) == 'receiving_maintenance_current_roster_required'
+    assert maintenance.current_roster({'runtime_status': {'receiving': {'rosters': {'tribe': {
+        'schema': 'dm.runtime.tribe-roster/v1', 'roster_sha256': 'a' * 64}}}}}) == 'a' * 64

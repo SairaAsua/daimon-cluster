@@ -5,7 +5,10 @@
 For already admitted Source and guest bodies, use the maintained
 `clusterctl.receiving_maintenance` operation. The implementation composes the
 existing Source, guest and cohort controllers and their journals; it does not
-re-enroll a body. Complete any older unfinished lifecycle through its original
+re-enroll a body. The current Source must already expose a signed Tribe roster
+in its loaded receiving view; an unmigrated legacy group is refused with
+`receiving_maintenance_current_roster_required` and must finish its existing
+group migration first. Complete any older unfinished lifecycle through its original
 controller first. Do not import or relabel its operation as a new maintenance.
 
 Build the fixed helper closure with `python -m tools.build_receiving_maintenance`

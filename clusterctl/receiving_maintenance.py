@@ -33,6 +33,7 @@ PUBLIC_ERRORS = OWNER_PUBLIC_ERRORS | frozenset({
     'receiving_maintenance_preservation_required', 'receiving_maintenance_action_required',
     'receiving_maintenance_owner_refused', 'receiving_maintenance_root_required',
     'receiving_maintenance_completed_job_required', 'receiving_maintenance_host_changed',
+    'receiving_maintenance_current_roster_required',
     'qualified_receiving_observer_required', 'receiving_source_configuration_changed',
     'receiving_source_owner_binding_required', 'receiving_required_cohort_changed',
     'receiving_cohort_predecessor_changed', 'receiving_sender_precondition_changed',
@@ -99,6 +100,16 @@ def validate(spec: dict) -> dict:
     for profile in (source, *spec['guests'].values()):
         validate_tooling_recipe(profile['tooling'])
     return copy.deepcopy(spec)
+
+
+def current_roster(observed: dict) -> str:
+    """Routine preservation requires the already migrated signed group view."""
+    roster = observed.get('runtime_status', {}).get('receiving', {}).get('rosters', {}).get('tribe')
+    if (not isinstance(roster, dict) or roster.get('schema') != 'dm.runtime.tribe-roster/v1'
+            or not isinstance(roster.get('roster_sha256'), str)
+            or re.fullmatch('[0-9a-f]{64}', roster['roster_sha256']) is None):
+        raise OnboardingError('receiving_maintenance_current_roster_required')
+    return roster['roster_sha256']
 
 
 def _sdk(code: Path, fingerprint: str) -> tuple[dict, dict]:
@@ -513,6 +524,7 @@ class ReceivingMaintenance:
                 originals = {name: owner.status() for name, owner in self._base_owners(observer=True).items()}
                 self._record('before', originals)
             originals = self._effects()['before']
+            roster = current_roster(originals['source'])
             owners = self._owners(originals)
             tribe = originals['source']['runtime_status']['loaded_application']['tribe']['policy']['tribe_ref']
             senders = freeze_senders(owners, tribe_ref=tribe)
@@ -520,7 +532,6 @@ class ReceivingMaintenance:
             actual = {(row['being_ref'], row['server']['embodiment_id']) for row in senders}
             if required != actual or len(required) != len(owners):
                 raise OnboardingError('receiving_required_cohort_changed')
-            roster = originals['source']['runtime_status']['receiving']['rosters']['tribe']['roster_sha256']
             settings = being_seed._read(self.config_path)
             runtime = {key: value for key, value in settings.items() if key in RUNTIME_SELECTION_KEYS}
             # Other bodies/future admission retain their existing global default.
