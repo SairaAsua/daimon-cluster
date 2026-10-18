@@ -539,6 +539,14 @@ def owner_diagnostics_only(root: Path, base: str) -> bool:
 
 
 def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
+    closeout_files = {'tools/close_completed_onboarding.py', 'tests/test_onboarding_closeout.py',
+                      'docs/operations/onboarding-closeout.md'}
+    closeout_tests = ['tests/test_onboarding_closeout.py', 'tests/test_onboarding.py',
+                      'tests/test_onboarding_progress.py', 'tests/test_receiving_worker.py',
+                      'tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    if (set(changed) & closeout_files and set(changed) <= closeout_files | CI_FILES
+            and all((root / name).is_file() for name in closeout_tests)):
+        return 'peer', closeout_tests
     host = {'clusterctl/onboarding_host.py', 'tests/test_onboarding_host.py'}
     if (({'clusterctl/receiving_maintenance.py', 'tests/test_receiving_maintenance.py'} <= set(changed)
             or {'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_cohort_control.py'} <= set(changed))

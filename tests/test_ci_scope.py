@@ -6,6 +6,17 @@ from tools.ci_scope import ONBOARDING_CONTRACTS, select
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_closeout_operator_keeps_job_worker_and_progress_contracts(tmp_path):
+    changed = ['tools/close_completed_onboarding.py', 'tests/test_onboarding_closeout.py',
+               'docs/operations/onboarding-closeout.md', 'tools/ci_scope.py', 'tests/test_ci_scope.py']
+    profile, tests = select(changed, ROOT)
+    assert profile == 'peer'
+    assert {'tests/test_onboarding_closeout.py', 'tests/test_onboarding.py',
+            'tests/test_receiving_worker.py', 'tests/test_onboarding_progress.py'} <= set(tests)
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    assert select([*changed, 'clusterctl/onboarding_host.py'], ROOT) == ('full', ['tests'])
+
+
 def test_owner_tooling_and_maintained_runbook_keep_owner_coverage(tmp_path):
     from tools.ci_scope import OWNER_CLIENT_TESTS
     changed = [
