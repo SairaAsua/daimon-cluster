@@ -219,6 +219,9 @@ def test_source_control_cli_refuses_invalid_modes_before_owner_state(tmp_path, m
 
 @pytest.mark.parametrize('action,arguments', [
     ('observe', ['--require-loaded']),
+    ('running', ['--current-native', '--require-loaded', '--observation-timeout-seconds', '5']),
+    ('admitted-running', ['--current-native', '--observation-timeout-seconds', '5']),
+    ('admitted-running', ['--current-native', '--require-loaded']),
     ('receiving-control-prepare', ['--control-file', 'revoke.json']),
     ('receiving-control-apply', ['--control-file', 'revoke.json', '--control-command', 'command.json']),
     ('running', ['--control-file', 'revoke.json']),
@@ -336,3 +339,103 @@ def test_exit_observation_rejects_invalid_bound_without_signal(timeout):
         finally:
             left.close()
             right.close()
+
+
+@pytest.mark.parametrize('fault', [None, 'base-process', 'base-runtime', 'application', 'loaded-bundle',
+                                  'binding', 'bundle', 'group', 'socket', 'expired'])
+def test_current_maintenance_observation_never_reconstructs_birth_or_pair_history(tmp_path, monkeypatch, fault):
+    """Authenticated RPC seam; real protected files, socket inodes and parent pin.
+
+    Existing owner-client tests cover HMAC/credential validity. This checks that
+    their composition preserves process/public selections without old custody.
+    """
+    import copy
+    import hashlib
+    from types import SimpleNamespace
+    from clusterctl import being_seed, onboarding_peer, onboarding_receiving_update as updates
+    from clusterctl.onboarding import OnboardingError, digest
+    from clusterctl.onboarding_target import Target
+    from daimon_matrix.canonical import canonical_bytes
+    target = Target.__new__(Target)
+    target.plan, target.genesis = {'name': 'fixture'}, {'synthetic': True}
+    target.root = tmp_path / 'matrix'
+    target.package = target.root / 'package'
+    root = target.package / 'runtime'
+    root.mkdir(parents=True, mode=0o700)
+    target.package.chmod(0o700)
+    target.root.chmod(0o700)
+    being_seed._write(target.root / 'plan.json', target._binding())
+    bundle = {'synthetic-public-bundle': True}
+    being_seed._write(root / 'runtime.json', bundle)
+    process = dict(uid=os.geteuid(), pid=os.getpid(),
+        start_ticks=int(Path('/proc/self/stat').read_text().rpartition(')')[2].split()[19]),
+        boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip())
+    loaded = dict(runtime_id='runtime:fixture', qualified_startup={'sdk': 'exact'},
+        runtime_bundle_sha256=digest(bundle), process_id=process['pid'])
+    application = dict(loaded_base_sha256=hashlib.sha256(canonical_bytes(loaded)).hexdigest())
+    current = dict(process=process, server={'body': 'fixture'}, identity={'admitted': True},
+        verified_identity=dict(runtime_bundle_sha256=digest(bundle)),
+        runtime_status=dict(loaded_runtime=loaded, loaded_application=application))
+    native = copy.deepcopy(current)
+    selected = dict(channel_id='tribe', socket=str(root / 'tribe.sock'))
+    checks = []
+    monkeypatch.setattr(onboarding_peer, 'observed_group', lambda *_: copy.deepcopy(selected))
+    target.observe = lambda: pytest.fail('maintenance reopened birth/custody/pair history')
+    class Owner:
+        def __init__(self, _root, path, **options):
+            assert options['deadline_ns'] > time.monotonic_ns()
+            self.path = path
+            self._observer = SimpleNamespace(verify=lambda: checks.append('verified'))
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def qualified_identity(self, **options):
+            assert options['require_admitted'] is True
+            assert options['expires_at_ms'] > time.time_ns() // 1_000_000
+            return copy.deepcopy(current)
+        def base_status(self):
+            if fault == 'binding':
+                being_seed._write(target.root / 'plan.json', {'changed': True})
+            if fault == 'bundle':
+                being_seed._write(root / 'runtime.json', {'changed': True})
+            if fault == 'group':
+                selected['changed'] = True
+            if fault == 'socket':
+                (root / 'tribe.sock').unlink()
+                replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                replacement.bind(str(root / 'tribe.sock'))
+                listeners.append(replacement)
+            if fault == 'expired':
+                monkeypatch.setattr(time, 'monotonic_ns', lambda: deadline + 1)
+            return copy.deepcopy(native)
+    monkeypatch.setattr(updates, 'OwnerGroupClient', Owner)
+    if fault == 'base-process':
+        native['process']['start_ticks'] += 1
+    if fault == 'base-runtime':
+        native['runtime_status']['loaded_runtime']['runtime_id'] = 'different'
+    if fault == 'application':
+        current['runtime_status']['loaded_application']['loaded_base_sha256'] = 'wrong'
+    if fault == 'loaded-bundle':
+        # The base/group can agree on B while the captured selection is A.
+        current['runtime_status']['loaded_runtime']['runtime_bundle_sha256'] = 'different'
+        native['runtime_status']['loaded_runtime'] = copy.deepcopy(current['runtime_status']['loaded_runtime'])
+        current['runtime_status']['loaded_application']['loaded_base_sha256'] = hashlib.sha256(
+            canonical_bytes(current['runtime_status']['loaded_runtime'])).hexdigest()
+    listeners = []
+    deadline = time.monotonic_ns() + 5_000_000_000
+    try:
+        for name in ('matrix.sock', 'tribe.sock'):
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(str(root / name))
+            listeners.append(listener)
+        if fault:
+            with pytest.raises(OnboardingError):
+                target.current_running(deadline_ns=deadline)
+        else:
+            result = target.current_running(deadline_ns=deadline)
+            assert result['admission_parent']['pid'] == os.getppid()
+            assert result['runtime_sha256'] == digest(bundle)
+            assert result['group'] == selected and result['receiving_readiness'] == 'unobserved'
+            assert checks == ['verified', 'verified']
+    finally:
+        for listener in listeners:
+            listener.close()

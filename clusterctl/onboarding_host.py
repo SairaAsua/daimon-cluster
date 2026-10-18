@@ -952,6 +952,7 @@ class HostBackend:
                      candidate: tuple[Path, str] | None = None,
                      observation_timeout_seconds: float | None = None,
                      require_loaded: bool = False,
+                     current_native: bool = False,
                      bootstrap_request: dict | None = None,
                      bootstrap_ready_sha256: str | None = None,
                      bootstrap_timeout_seconds: float | None = None,
@@ -965,6 +966,9 @@ class HostBackend:
         A host timeout is uncertain observation, never proof of guest exit.
         """
         deadline_ns = None
+        if current_native and (action != 'admitted-running' or not require_loaded
+                or candidate is None or observation_timeout_seconds is None):
+            raise OnboardingError('qualified_onboarding_target_observer_required')
         bootstrapping = action in {'receiving-bootstrap-freeze', 'receiving-bootstrap-stage', 'receiving-bootstrap-publish'}
         controlling = action in {'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
         if native_tooling is not None and (action != 'receiving-identity' or not isinstance(native_tooling, dict)):
@@ -1044,6 +1048,8 @@ class HostBackend:
             *peer_args, *(['--public-profile-json', json.dumps(profile, separators=(',', ':'))] if profile is not None else [])]
         if require_loaded:
             arguments += ['--require-loaded']
+        if current_native:
+            arguments += ['--current-native']
         if control_file is not None:
             arguments += ['--control-file', str(control_file)]
         if control_command is not None:

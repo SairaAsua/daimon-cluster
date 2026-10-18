@@ -6,9 +6,11 @@ The original readable-presentation increment is retained under
 [Matrix #287](https://github.com/AlterMundi/daimon-matrix/issues/287).
 Matrix owns signed messaging and presentation; Cluster selects the exact
 executable SDK and receiving helpers on the existing bodies.
-The current source candidate pins Matrix `0dc0b555939b16a1150a220a366a6911a5ae9c28`.
-The three-body production selection remains its separately recorded predecessor
-until receiving adoption succeeds.
+The accepted three-VPS selection is Matrix `9b2b8ec` / SDK `53c4ee01` /
+receiving code `422e79c6`; see [the current deployment record](../../RESUME.md)
+and its six-leg native/semantic/ACK proof. Main integration and maintenance
+improvements (#270/#273) do not invalidate unchanged installed qualification.
+Broader I/O and future-admission acceptance remain separate.
 
 ## Execute from the next missing effect
 
@@ -672,3 +674,48 @@ limited to recovery before the first retained `controlled_loaded`; later process
 replacement remains a separate lifecycle operation. Restore any paused workers
 on both successful and contained-failure paths. Keep the initial startup failure
 separate from the recovery outcome; a generic refusal is not its diagnosis.
+
+## Current admitted maintenance observation (#270)
+
+The qualified helper's explicit `admitted-running --require-loaded
+--current-native` path composes the existing authenticated base status, group
+qualified identity, current admission and kernel child/parent observations. It
+validates the current protected target binding and bundle plus the signed group
+selection without reopening custody or reconstructing archived pair onboarding.
+It retains a finite deadline and rejects changed socket inodes, public inputs,
+processes or loaded bundle/application associations. A successful observation
+alone still reports receiving readiness as unobserved. The controller's frozen
+SDK, origin, group, visibility, service manager and original start checks remain
+mandatory and unchanged.
+
+Use the newly qualified helper candidate to observe a still-running predecessor.
+An older helper does not support the new flag: do not dispatch it against an old
+candidate or fall back to historical reconstruction. This code-only observer
+selection does not require a body restart. Initial enrollment retains its original
+ceremony verification; this path qualifies maintenance of admitted bodies only.
+
+## Durable SDK publication without per-file barriers (#273)
+
+Preparation still verifies every wheel, the complete import inventory, ownership
+and final permissions before acknowledging immutable imports. On Linux 5.8 or
+newer it retains a directory descriptor opened on the existing generation parent
+before creating the temporary tree. A capability probe selects support before
+staging; the final `syncfs` uses that same descriptor's writeback-error cursor.
+The staged tree must remain on the descriptor's filesystem. Only after the flush
+succeeds is the tree atomically renamed and its parent synced.
+
+This flush includes unrelated pending writes on the same filesystem. Measure
+preparation independently from cutover; do not call it during a receiving-read
+budget or use it to flush the machine's other filesystems. It changes no mounts,
+global cache settings, dependency representation or selected generation. Older
+or unrecognized kernels and unsupported filesystems keep the original per-writer
+`flush`/`fsync` before close and deepest-first directory sync. Actual I/O errors,
+including a late unsupported/error result, refuse publication; reopening files
+or a fresh directory descriptor cannot erase an earlier writeback error.
+
+A failed unpublished attempt is removed through its existing private temporary
+cleanup. Exact retry reuses a fully validated published tree/receipt without
+rewriting or flushing it. Failed receipt publication remains distinguishable
+from completed preparation. Existing loaded-startup, no-site/bytecode, inventory
+and source-origin checks remain unchanged; the runtime never imports an SDK on
+installation-receipt authority alone.

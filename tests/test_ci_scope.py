@@ -838,3 +838,24 @@ def test_storage_retention_keeps_its_coverage_and_unknown_changes_stay_full(tmp_
     assert select(files, tmp_path) == ('full', ['tests'])
     for extra in ['clusterctl/onboarding_host.py', 'requirements.txt', 'unknown.py']:
         assert select([*files, extra], ROOT) == ('full', ['tests'])
+
+
+def test_current_native_host_observer_requires_exact_additive_delta(tmp_path, monkeypatch):
+    import subprocess
+    from tools.ci_scope import host_observation_only
+    parent = b'def preserved_host():\n    return "unchanged administration and custody"\n'
+    additions = (b'                     current_native: bool = False,\n'
+        b"        if current_native and (action != 'admitted-running' or not require_loaded\n"
+        b"                or candidate is None or observation_timeout_seconds is None):\n"
+        b"            raise OnboardingError('qualified_onboarding_target_observer_required')\n"
+        b"        if current_native:\n            arguments += ['--current-native']\n")
+    path = tmp_path / 'clusterctl/onboarding_host.py'
+    path.parent.mkdir()
+    path.write_bytes(parent + additions)
+    monkeypatch.setattr('tools.ci_scope.subprocess.run', lambda *args, **kwargs:
+        subprocess.CompletedProcess([], 0, parent))
+    assert host_observation_only(tmp_path, 'a' * 40)
+    path.write_bytes(parent.replace(b'unchanged administration', b'changed administration') + additions)
+    assert not host_observation_only(tmp_path, 'a' * 40)
+    path.write_bytes(parent + additions.replace(b"action != 'admitted-running'", b"action != 'running'"))
+    assert not host_observation_only(tmp_path, 'a' * 40)

@@ -126,6 +126,7 @@ def fixture(tmp_path, monkeypatch):
                     self.done.add('publish')
                 return self.lose('publish', {'runtime_sha256': '6' * 64})
             assert action == 'admitted-running' and self.active and options['require_loaded']
+            assert options['current_native'] is True
             startup = dict(code_digest=selected['runtime_digest'], matrix_commit=checked['matrix_revision'],
                 sdk_digest=checked['sdk_digest'], matrix_wheel_sha256=checked['matrix_wheel_sha256'],
                 reader=checked['reader'], process_id=new_process['pid'], startup_instance_id='synthetic-startup')
