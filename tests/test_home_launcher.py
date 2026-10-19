@@ -281,6 +281,7 @@ def test_paired_apps_resolve_receiver_without_author_fallback(system):
     assert not selected('one')['available']
     app.authority.bot=lambda home:{'username':'BotOne' if home=='one' else 'BotTwo'}
     assert selected('two')['receivers'][0]['bot']=='BotTwo'
+    assert selected('two')['capability']=='sessions'
     # Verified login, not the author's visited home, selects the visitor pair.
     original=app.authority.paired_human
     app.authority.paired_human=lambda home:'visitor' if home=='two' else 'other'

@@ -60,7 +60,7 @@
     byId('empty').hidden=shown.length>0;
     byId('empty').textContent=term?'No hay coincidencias. Probá otro nombre.':favoritesOnly?'Tocá ☆ en una app para guardarla acá.':'Todavía no hay aplicaciones publicadas.';
   }
-  function matchesAttention(entry){return Boolean(attention && ((entry.application_mode==='paired'&&entry.receiver_bot&&entry.receiver_bot===attention.bot_username)|| (attention.app_url?sameApp(entry.url,attention.app_url):entry.application_mode!=='paired'&&/^sessions$/i.test(entry.title))));}
+  function matchesAttention(entry){return Boolean(attention && entry.available!==false && ((entry.application_mode==='paired'&&entry.capability==='sessions'&&entry.receiver_bot&&entry.receiver_bot===attention.bot_username)|| (attention.app_url?sameApp(entry.url,attention.app_url):entry.application_mode!=='paired'&&/^sessions$/i.test(entry.title))));}
 
   function sameApp(left,right){
     try{const a=new URL(left),b=new URL(right);return a.origin===b.origin&&a.pathname.toLowerCase()===b.pathname.toLowerCase();}catch{return false;}

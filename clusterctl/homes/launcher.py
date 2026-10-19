@@ -128,6 +128,7 @@ def catalog(app, home, subject, vpn, *, local_only=False):
                          'title': entry['title'], 'summary': entry.get('summary', ''),
                          'url': url, 'author': app.homes[ref]['name'],
                          'launch': launch, 'application_mode': mode, 'available': available,
+                         'capability':published_app.get('capability') if published_app else None,
                          'dependency': published_app.get('dependency', '') if published_app else '',
                          'receiver_bot':receiver_bot(receiver) if mode == 'paired' else None,
                          'receivers': [{'home': r, 'name': app.homes[r]['name'], 'bot':receiver_bot(r), 'url': receivers[r][published_app['capability']]}
