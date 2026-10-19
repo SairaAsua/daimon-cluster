@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import threading
 from urllib.parse import parse_qsl, urlsplit
+from .applications import application, paired_receiver
 
 ASSETS = Path(__file__).parent / 'launcher'
 CAPACITY = threading.BoundedSemaphore(4)
@@ -94,22 +95,35 @@ def catalog(app, home, subject, vpn, *, local_only=False):
         results = list(pool.map(read, selected))
     apps, seen, unavailable = [], set(), 0 if local_only else len(homes) - len(selected)
     owner_url = owner_app_url(app)
+    receivers = getattr(app, 'miniapp_receivers', {})
+    receiver = paired_receiver(app, home, subject)
     for ref, entries, available in results:
         unavailable += not available
         for entry in entries:
             url = entry.get('url')
             owner_app = owner_url is not None and url == owner_url
-            if entry.get('kind') != 'link' or not (owner_app or app_url(url)):
+            published_app = application(entry)
+            if entry.get('kind') != 'link' or not (published_app or owner_app or app_url(url)):
                 continue
             # Private links are never collapsed into a public author's entry.
             key = (entry['url'], ref)
             if key in seen:
                 continue
             seen.add(key)
+            mode = published_app['mode'] if published_app else 'shared' if owner_app else 'legacy-author'
+            available = True
+            if mode == 'paired':
+                selected_url = receivers.get(receiver, {}).get(published_app['capability'])
+                available = selected_url is not None
+                url = selected_url or url
+            launch = 'telegram' if urlsplit(url).hostname == 't.me' else 'web'
             apps.append({'id': ref + ':' + entry['artifact_ref'],
                          'title': entry['title'], 'summary': entry.get('summary', ''),
-                         'url': entry['url'], 'author': app.homes[ref]['name'],
-                         'launch': 'web' if owner_app else 'telegram',
+                         'url': url, 'author': app.homes[ref]['name'],
+                         'launch': launch, 'application_mode': mode, 'available': available,
+                         'dependency': published_app.get('dependency', '') if published_app else '',
+                         'receivers': [{'home': r, 'name': app.homes[r]['name'], 'url': receivers[r][published_app['capability']]}
+                                       for r in selected if mode == 'paired' and published_app['capability'] in receivers.get(r, {})] if mode == 'paired' and receiver is None else [],
                          'source': app.homes[ref]['public_url'] + '/view/' + entry['artifact_ref'],
                          'version_ref': entry['version_ref']})
             if len(apps) == 256:
@@ -136,10 +150,12 @@ def page(app, home, subject, vpn):
     cards = []
     esc = html.escape
     for e in initial['apps']:
-        cards.append('<li class="app"><a class="app-link" href="'+esc(e['url'],quote=True)+'">'
+        target = ' href="'+esc(e['url'],quote=True)+'"' if e['available'] else ' aria-disabled="true"'
+        cards.append('<li class="app"><a class="app-link"'+target+'>'
                      '<span class="app-icon" aria-hidden="true">↗</span>'
                      '<span class="app-title">'+esc(e['title'])+'</span>'
-                     '<span class="app-summary">'+esc(e['summary'])+'</span>'
+                     '<span class="app-summary">'+esc(e['summary'] if e['available'] else 'Todavía no disponible para tu pareja.')+'</span>'
+                     + ('<span class="app-author">Depende del daimon autor: '+esc(e['dependency'])+'</span>' if e['application_mode'] == 'author' else '<span class="app-author">Enlace al bot del autor</span>' if e['application_mode'] == 'legacy-author' else '') +
                      '<span class="app-author">'+esc(e['author'])+' ↗</span></a></li>')
     source = source.replace('<ul id="apps" class="apps" aria-label="Aplicaciones"></ul>',
                             '<ul id="apps" class="apps" aria-label="Aplicaciones">'+''.join(cards)+'</ul>')

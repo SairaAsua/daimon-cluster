@@ -201,10 +201,12 @@ class Backend:
 
 
 class Application:
-    def __init__(self, config, authority, sessions, *, backends=None, passkey_rp_id=None, client_example=False, style_provider=None, auth_origin=None, google_client=None, homemaker_source=None, homemaker_state=None, homemaker_home=None, homemaker_returns=(), miniapp_routes=None):
+    def __init__(self, config, authority, sessions, *, backends=None, passkey_rp_id=None, client_example=False, style_provider=None, auth_origin=None, google_client=None, homemaker_source=None, homemaker_state=None, homemaker_home=None, homemaker_returns=(), miniapp_routes=None, miniapp_receivers=None):
         self.styles = StyleConsumer(style_provider, authority, config["homes"]) if style_provider else None
         from .launcher import validate_launch_routes
         self.miniapp_routes=validate_launch_routes(miniapp_routes)
+        from .applications import receiver_routes
+        self.miniapp_receivers=receiver_routes(miniapp_receivers, config["homes"])
         self.sso = None
         self.designs = None
         self.client_example = client_example
@@ -1262,6 +1264,7 @@ def main():
     parser.add_argument('--homemaker-home', help='Registered home serving the owner-operated multi-pair application')
     parser.add_argument('--homemaker-return', action='append', default=[], help='Additional exact registered consumer return URL')
     parser.add_argument('--miniapp-routes', help='Operator-selected public same-origin destination map JSON')
+    parser.add_argument('--miniapp-receivers', help='Verified same-origin per-pair application routes JSON')
     args = parser.parse_args()
     from daimon_matrix.messaging_config import protected_read
 
@@ -1279,7 +1282,8 @@ def main():
                       auth_origin=args.auth_origin, google_client=args.google_client,
                       homemaker_source=args.homemaker_source, homemaker_state=args.homemaker_state,
                       homemaker_home=args.homemaker_home, homemaker_returns=args.homemaker_return,
-                      miniapp_routes=json.loads(protected_read(Path(args.miniapp_routes))) if args.miniapp_routes else None)
+                      miniapp_routes=json.loads(protected_read(Path(args.miniapp_routes))) if args.miniapp_routes else None,
+                      miniapp_receivers=json.loads(protected_read(Path(args.miniapp_receivers))) if args.miniapp_receivers else None)
     servers = [
         ThreadingHTTPServer(("127.0.0.1", config[key]), handler(app, owner=owner))
         for key, owner in (("viewer_port", False), ("owner_port", True))
