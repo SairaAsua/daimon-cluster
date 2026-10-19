@@ -97,6 +97,13 @@ def catalog(app, home, subject, vpn, *, local_only=False):
     owner_url = owner_app_url(app)
     receivers = getattr(app, 'miniapp_receivers', {})
     receiver = paired_receiver(app, home, subject)
+    def receiver_bot(ref):
+        try:
+            value = app.authority.bot(ref) if ref and hasattr(app.authority, 'bot') else None
+            return value['username'] if value else None
+        except (ValueError, OSError):
+            return None
+
     for ref, entries, available in results:
         unavailable += not available
         for entry in entries:
@@ -122,7 +129,8 @@ def catalog(app, home, subject, vpn, *, local_only=False):
                          'url': url, 'author': app.homes[ref]['name'],
                          'launch': launch, 'application_mode': mode, 'available': available,
                          'dependency': published_app.get('dependency', '') if published_app else '',
-                         'receivers': [{'home': r, 'name': app.homes[r]['name'], 'url': receivers[r][published_app['capability']]}
+                         'receiver_bot':receiver_bot(receiver) if mode == 'paired' else None,
+                         'receivers': [{'home': r, 'name': app.homes[r]['name'], 'bot':receiver_bot(r), 'url': receivers[r][published_app['capability']]}
                                        for r in selected if mode == 'paired' and published_app['capability'] in receivers.get(r, {})] if mode == 'paired' and receiver is None else [],
                          'source': app.homes[ref]['public_url'] + '/view/' + entry['artifact_ref'],
                          'version_ref': entry['version_ref']})

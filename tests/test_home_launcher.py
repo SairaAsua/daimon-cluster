@@ -277,13 +277,16 @@ def test_paired_apps_resolve_receiver_without_author_fallback(system):
     target=app.homes['two']['public_url']+'/sessions/'
     app.miniapp_receivers=receiver_routes({'two':{'sessions':target}},app.homes)
     assert not selected('two')['available']
-    assert selected('two')['receivers']==[{'home':'two','name':app.homes['two']['name'],'url':target}]
+    assert selected('two')['receivers']==[{'home':'two','name':app.homes['two']['name'],'bot':None,'url':target}]
     assert not selected('one')['available']
+    app.authority.bot=lambda home:{'username':'BotOne' if home=='one' else 'BotTwo'}
+    assert selected('two')['receivers'][0]['bot']=='BotTwo'
     # Verified login, not the author's visited home, selects the visitor pair.
     original=app.authority.paired_human
     app.authority.paired_human=lambda home:'visitor' if home=='two' else 'other'
     try:
         assert selected('one',Actor('visitor','human','revision','Visitor'))['url']==target
+        assert selected('one',Actor('visitor','human','revision','Visitor'))['receiver_bot']=='BotTwo'
         assert not selected('one',Actor('unpaired','human','revision','Unpaired'))['available']
     finally:app.authority.paired_human=original
     for bad in ({'unknown':{'sessions':target}}, {'two':{'sessions':'https://other.example.test/sessions/'}}, {'two':{'sessions':target+'?token=value'}}):
