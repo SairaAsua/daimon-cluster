@@ -104,6 +104,8 @@ class Registry:
                 or entry.get("kind") not in ("link", "artifact")
             ):
                 raise ValueError("invalid_home_resource_metadata")
+            from .applications import application
+            application(entry)
             reference = entry.get("artifact_ref")
             if (
                 not isinstance(reference, str)

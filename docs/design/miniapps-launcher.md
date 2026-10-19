@@ -6,13 +6,12 @@ bot consumer, access authority, identity, model call or session-control provider
 
 ## First useful route
 
-Register one named app, displayed as **DaimonMatrix**, with a selected receiving
-home's `/apps/` URL. Matrix Apps is the shared Main Mini App. Nexus is a routed
-destination; preserve already registered named entries such as Sessions. Never
-change the principal app to Nexus to compensate for missing destination routing.
-The bot menu can later point to this named app using `mode=compact`; registering
-and testing it precedes changing a working menu. The gridded icon launcher is
-ordinary authored HTML/CSS rather than a Telegram message keyboard.
+**Apps is the launcher**, not a destination app. A private bot menu may open its
+receiving home's `/apps/` URL directly using `MenuButtonWebApp`; it does not
+require a Main or named app registration. Keep any existing Main/named Apps
+registration for shareable Telegram links. Never select another pair's bot just
+to open a shared application. The gridded launcher is authored HTML/CSS, not a
+Telegram message keyboard.
 
 ### Main-app destination routes
 
@@ -50,40 +49,48 @@ opening alone does not create a passkey session or grant private styles.
 
 ## Publish once, discover through existing home relationships
 
-Use the receiving pair's existing `daimon-home link` publisher with the real
-registered Telegram app URL, its title, summary and explicit audience. For example:
+Use the receiving pair's existing `daimon-home link` publisher with an explicit
+application intent and audience. The portable `daimon-home` skill owns this
+workflow; ordinary links are not automatically promoted by title.
 
 ```sh
-daimon-home link https://t.me/example_bot/myapp --id my-app --title 'My app' \
+daimon-home link https://app.example.org/ --app --id my-app --title 'My app' \
   --summary 'What this application does.' --visibility public \
-  --decision 'Selected for public application discovery in the current task.'
+  --decision 'Selected for shared application discovery in the current task.'
 ```
 
-Every launcher reads current matched registry/publication projections. It
-includes its own authorized app links and **public** app links from homes in its
-already-selected web ring. A different home's private titles never inherit the
-current home's cookie, VPN fence or subject. Publish, change audience or remove
-through the existing publisher; no launcher rebuild or copied per-bot catalog
-is needed. Catalog rows retain author, resource identity and revision. A link
-does not grant access to its target's private sessions or data. The navigation
-projection is not a second resource registry.
+New app publications carry `application.schema = dm.application/v1`:
 
-Canonical `https://t.me/<bot>?startapp=...` and named-app URLs use Telegram's
-launch method. One qualified web target is also recognized: the exact compact
-entry of the configured Homemaker owner application. Publish that official URL
-once through the existing link publisher; every selected home discovers it.
-The catalog marks this entry `launch: web`, and its ordinary HTTPS anchor
-navigates the same WebView instead of calling `openTelegramLink`. Other links
-remain ordinary publications, including old editor origins, artifact previews,
-and URLs with added identity or return parameters. No arbitrary HTTPS app is
-promoted by its title. No additional BotFather registration, iframe, editor,
-style store or identity parameters are needed. Shared login and the owner
-application resolve the current human/pair and keep its authored workshop shell.
-Browser navigation is qualified separately from physical Telegram launch.
+- `mode: shared` (default for `--app`) is an independent HTTPS app. It uses its
+  ordinary identity/resource grants; it must not require the author's Telegram
+  bot. The single official Homemaker remains shared, with no cloned instances.
+- `mode: paired` also declares a `capability`, such as `sessions`. The receiving
+  operator supplies `--miniapp-receivers FILE`, a bounded JSON map from registered
+  home references to capability/HTTPS routes on that home's exact origin. A
+  verified shared-login actor selects its unique current pair. Without login,
+  the launcher asks for an explicit receiving pair; it never infers the visitor's
+  pair from the author being visited. A remembered selection is navigation only.
+  The target authenticates again.
+  A missing receiver disables the card; it never falls back to the author bot.
+- `mode: author` requires a visible `dependency` explaining why the app inherently
+  needs the author daimon. This is an explicit exception, not a workaround for
+  missing shared authentication. Legacy Telegram app links remain visibly marked
+  as author-bot links pending migration; they do not become shared by inference.
 
-The initial catalog may include
-receiver-specific tools; their author labels remain visible instead of claiming
-that everyone has access to the same native conversations.
+Every launcher reads current registry/publication projections. It includes its
+own authorized apps and **public** apps from its already-selected web ring.
+Other homes never inherit the current home's private cookie, VPN fence or subject.
+Publishing or withdrawing uses the existing publisher, retaining artifact identity,
+audience, author and version. No launcher rebuild or copied catalog is needed.
+A publication is navigation, never private data/session access. The operator map
+contains no credentials and must be qualified against each real receiving backend.
+
+Shared apps use ordinary same-WebView HTTPS navigation. Browser/application login
+must remain usable inside another bot's WebView; foreign Telegram launch data
+must not silently become the author's identity. Keep the existing native launch
+verification path fail-closed. Browser fixtures do not prove physical Telegram
+acceptance. Telegram's menu and identity contracts are documented at
+https://core.telegram.org/bots/webapps#launching-mini-apps .
 
 The server bounds discovery to16 selected homes,4 concurrent backend reads,
 2-second socket timeouts,256 entries and4 simultaneous catalog requests.
@@ -103,12 +110,9 @@ After registering the real named app, check launcher→Nexus/Sessions and return
 on the actual phone. Selecting the bot menu is a separate explicit operation.
 No global Stop follows from installation or testing.
 
-Remaining: allow a new independently authored web app to use the one registered
-DaimonMatrix entry without separate BotFather registration, with a versioned
-scoped launch handoff; extend cross-home private discovery through an explicitly
-authorized contract; document paired onboarding/registration and portable skill
-adoption. Preserve independent app code/origins, target authority and updates.
-Do not treat an iframe, a public URL or launcher login as target authorization.
+Remaining: qualify receiving routes and actual cross-pair phone launches for
+published apps; extend cross-home private discovery only under explicit grants.
+Do not treat an iframe, public URL or launcher login as target authorization.
 
 ## Shared public entry and startup
 

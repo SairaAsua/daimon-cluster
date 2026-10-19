@@ -236,3 +236,69 @@ def test_operator_launch_routes_are_bounded_same_origin_paths(system):
     html=page(app,'one',None,False).decode()
     assert 'id="miniapp-routes"' in html and '/apps/launch.js?v=' in html
     subprocess.run(['node','--test','tests/js/miniapp-launch.cjs'],cwd=Path(__file__).resolve().parents[1],check=True)
+
+
+def test_declared_shared_web_apps_are_discoverable_from_another_pair(system):
+    from clusterctl.homes.applications import application
+    app,_=system
+    states=populated(app)
+    app.homes['two']['ring']=[{'name':'one','url':app.homes['one']['public_url']}]
+    entry=publish_owner_link(app,states,'https://service.example.test/shared/')
+    entry['application']={'schema':'dm.application/v1','mode':'shared'}
+    entry['version_ref']=version_digest(entry)
+    app.registry.register(home='one',owner='owner',state=states['one'],expected_revision=2,
+                         known_actor=app.authority.actor,known_tribe=lambda _:False)
+    result=catalog(app,'two',None,False)
+    shared=next(e for e in result['apps'] if e['id'].endswith(entry['artifact_ref']))
+    assert shared['url']=='https://service.example.test/shared/'
+    assert shared['launch']=='web' and shared['application_mode']=='shared' and shared['available']
+    assert application(entry)['mode']=='shared'
+    entry['url']='https://service.example.test:invalid/shared/'
+    with pytest.raises(ValueError):application(entry)
+    entry['url']='https://service.example.test:65536/shared/'
+    with pytest.raises(ValueError):application(entry)
+    entry['url']='https://t.me/example_bot/matrix'
+    with pytest.raises(ValueError,match='author_bot'):application(entry)
+
+
+def test_paired_apps_resolve_receiver_without_author_fallback(system):
+    from clusterctl.homes.policy import Actor
+    from clusterctl.homes.applications import receiver_routes
+    app,_=system;states=populated(app)
+    app.homes['two']['ring']=[{'name':'one','url':app.homes['one']['public_url']}]
+    entry=publish_owner_link(app,states,'https://service.example.test/sessions/')
+    entry['application']={'schema':'dm.application/v1','mode':'paired','capability':'sessions'}
+    entry['version_ref']=version_digest(entry)
+    app.registry.register(home='one',owner='owner',state=states['one'],expected_revision=2,
+                         known_actor=app.authority.actor,known_tribe=lambda _:False)
+    def selected(home,subject=None):
+        return next(e for e in catalog(app,home,subject,False)['apps'] if e['id'].endswith(entry['artifact_ref']))
+    assert not selected('two')['available']
+    target=app.homes['two']['public_url']+'/sessions/'
+    app.miniapp_receivers=receiver_routes({'two':{'sessions':target}},app.homes)
+    assert not selected('two')['available']
+    assert selected('two')['receivers']==[{'home':'two','name':app.homes['two']['name'],'url':target}]
+    assert not selected('one')['available']
+    # Verified login, not the author's visited home, selects the visitor pair.
+    original=app.authority.paired_human
+    app.authority.paired_human=lambda home:'visitor' if home=='two' else 'other'
+    try:
+        assert selected('one',Actor('visitor','human','revision','Visitor'))['url']==target
+        assert not selected('one',Actor('unpaired','human','revision','Unpaired'))['available']
+    finally:app.authority.paired_human=original
+    for bad in ({'unknown':{'sessions':target}}, {'two':{'sessions':'https://other.example.test/sessions/'}}, {'two':{'sessions':target+'?token=value'}}):
+        with pytest.raises(ValueError):receiver_routes(bad,app.homes)
+
+
+def test_author_dependent_apps_require_a_declared_reason(system):
+    from clusterctl.homes.applications import application
+    app,_=system;states=populated(app)
+    entry=publish_owner_link(app,states,'https://t.me/example_bot/tool')
+    entry['application']={'schema':'dm.application/v1','mode':'author','dependency':'Requires the author daemon hardware.'}
+    entry['version_ref']=version_digest(entry)
+    app.registry.register(home='one',owner='owner',state=states['one'],expected_revision=2,
+                         known_actor=app.authority.actor,known_tribe=lambda _:False)
+    result=next(e for e in catalog(app,'one',None,False)['apps'] if e['id'].endswith(entry['artifact_ref']))
+    assert result['application_mode']=='author' and result['dependency']==entry['application']['dependency']
+    entry['application']['dependency']=' '
+    with pytest.raises(ValueError):application(entry)

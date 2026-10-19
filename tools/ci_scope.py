@@ -351,7 +351,7 @@ LOADED_STARTUP_TESTS = ('tests/test_onboarding_sdk.py', 'tests/test_onboarding_c
     'tests/test_matrix_host_process.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
 
 
-HOME_FILES = {'clusterctl/homes/__init__.py', 'clusterctl/homes/policy.py',
+HOME_FILES = {'clusterctl/homes/applications.py', 'clusterctl/homes/__init__.py', 'clusterctl/homes/policy.py',
     'clusterctl/homes/launcher.py', 'clusterctl/homes/launcher/index.html',
     'clusterctl/homes/launcher/launcher.js', 'clusterctl/homes/launcher/launcher.css',
     'clusterctl/homes/launcher/launch.js', 'tests/js/miniapp-launch.cjs',
