@@ -98,7 +98,8 @@ def test_remote_transport_rejects_untrusted_clients_and_nonlocal_plain_http(app,
         request = urllib.request.Request(origin + '/agenda-operation', data=b'{}', method='POST')
         with pytest.raises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(request)
-        assert error.value.code == 403
+        with error.value:
+            assert error.value.code == 403
         value = json.loads(config.read_text())
         value['origin'] = 'http://192.0.2.1:9999'
         config.write_text(json.dumps(value))
