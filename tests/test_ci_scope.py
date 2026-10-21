@@ -21,6 +21,17 @@ def test_agenda_adapter_uses_home_coverage_and_preserves_native_boundaries():
         assert select([*changed,extra],ROOT)==('full',['tests'])
 
 
+def test_closeout_operator_keeps_job_worker_and_progress_contracts(tmp_path):
+    changed = ['tools/close_completed_onboarding.py', 'tests/test_onboarding_closeout.py',
+               'docs/operations/onboarding-closeout.md', 'tools/ci_scope.py', 'tests/test_ci_scope.py']
+    profile, tests = select(changed, ROOT)
+    assert profile == 'peer'
+    assert {'tests/test_onboarding_closeout.py', 'tests/test_onboarding.py',
+            'tests/test_receiving_worker.py', 'tests/test_onboarding_progress.py'} <= set(tests)
+    assert select(changed, tmp_path) == ('full', ['tests'])
+    assert select([*changed, 'clusterctl/onboarding_host.py'], ROOT) == ('full', ['tests'])
+
+
 def test_owner_tooling_and_maintained_runbook_keep_owner_coverage(tmp_path):
     from tools.ci_scope import OWNER_CLIENT_TESTS
     changed = [
@@ -812,3 +823,111 @@ def test_short_owner_control_keeps_affected_receiving_contracts_only(tmp_path):
     assert select(changed,ROOT)==('peer',list(OWNER_CONTROL_TESTS))
     assert select(changed,tmp_path)==('full',['tests'])
     assert select([*changed,'clusterctl/admission.py'],ROOT)==('full',['tests'])
+
+
+def test_managed_start_recovery_keeps_receiving_host_and_access_coverage(monkeypatch):
+    import subprocess
+    from tools import ci_scope
+    from types import SimpleNamespace
+    original, current = b'original host route', b'explicit qualified Root recovery route'
+    sha256 = ci_scope.hashlib.sha256
+    monkeypatch.setattr(ci_scope.hashlib, 'sha256', lambda raw:
+        SimpleNamespace(hexdigest=lambda: 'cc1e19f193e69cc67c08d121243067813f6ae6b56bbbb358cf5888be2909c216')
+        if raw == original else SimpleNamespace(hexdigest=lambda: 'afb3f1f78e151f6cdb078903bb8856d401172dc5f677dba05908cca7b6051732')
+        if raw == current else sha256(raw))
+    read = Path.read_bytes
+    monkeypatch.setattr(Path, 'read_bytes', lambda path:
+        current if path == ROOT/'clusterctl/onboarding_host.py' else read(path))
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *a, **k:
+        subprocess.CompletedProcess(a, 0, original))
+    changed = ['clusterctl/onboarding_host.py', 'tests/test_onboarding_host.py',
+        'clusterctl/onboarding_service.py', 'tests/test_guest_service_bootstrap.py',
+        'clusterctl/onboarding_receiving_update.py', 'tests/test_guest_bootstrap_controller.py',
+        'docs/runbooks/tribu-sdk-successor.md', 'tools/ci_scope.py', 'tests/test_ci_scope.py']
+    profile, tests = select(changed, ROOT, base='a'*40)
+    assert profile == 'peer' and set(ci_scope.LOADED_STARTUP_TESTS) <= set(tests)
+    assert {'tests/test_onboarding_host.py', 'tests/test_onboarding_host_ownership.py',
+        'tests/test_onboarding_managed.py', 'tests/test_onboarding_peer_host.py'} <= set(tests)
+    assert len(tests) == len(set(tests))
+    assert select([*changed, 'clusterctl/onboarding_custody.py'], ROOT, base='a'*40)[0] == 'full'
+    monkeypatch.setattr(Path, 'read_bytes', lambda path:
+        current + b'\n# another delta' if path == ROOT/'clusterctl/onboarding_host.py' else read(path))
+    assert select(changed, ROOT, base='a'*40)[0] == 'full'
+
+
+def test_storage_retention_keeps_its_coverage_and_unknown_changes_stay_full(tmp_path):
+    files = ['tools/storage_hygiene.py', 'tests/test_storage_hygiene.py',
+             'docs/operations/host-storage-hygiene.md', 'tools/ci_scope.py',
+             'tests/test_ci_scope.py']
+    assert select(files, ROOT) == ('peer', ['tests/test_storage_hygiene.py',
+        'tests/test_ci_scope.py', 'tests/test_ci_workflow.py'])
+    assert select(files, tmp_path) == ('full', ['tests'])
+    for extra in ['clusterctl/onboarding_host.py', 'requirements.txt', 'unknown.py']:
+        assert select([*files, extra], ROOT) == ('full', ['tests'])
+
+
+def test_current_native_host_observer_requires_exact_additive_delta(tmp_path, monkeypatch):
+    import subprocess
+    from tools.ci_scope import host_observation_only
+    parent = b'def preserved_host():\n    return "unchanged administration and custody"\n'
+    additions = (b'                     current_native: bool = False,\n'
+        b"        if current_native and (action != 'admitted-running' or not require_loaded\n"
+        b"                or candidate is None or observation_timeout_seconds is None):\n"
+        b"            raise OnboardingError('qualified_onboarding_target_observer_required')\n"
+        b"        if current_native:\n            arguments += ['--current-native']\n")
+    path = tmp_path / 'clusterctl/onboarding_host.py'
+    path.parent.mkdir()
+    path.write_bytes(parent + additions)
+    monkeypatch.setattr('tools.ci_scope.subprocess.run', lambda *args, **kwargs:
+        subprocess.CompletedProcess([], 0, parent))
+    assert host_observation_only(tmp_path, 'a' * 40)
+    path.write_bytes(parent.replace(b'unchanged administration', b'changed administration') + additions)
+    assert not host_observation_only(tmp_path, 'a' * 40)
+    path.write_bytes(parent + additions.replace(b"action != 'admitted-running'", b"action != 'running'"))
+    assert not host_observation_only(tmp_path, 'a' * 40)
+
+
+def test_maintenance_composition_keeps_changed_contracts_and_exact_host_delta(monkeypatch):
+    import subprocess
+    from tools import ci_scope
+    host = 'clusterctl/onboarding_host.py'
+    current = (ROOT / host).read_bytes()
+    assert current.count(ci_scope.OWNER_DIAGNOSTIC_ADDITION) == 1
+    previous = current.replace(ci_scope.OWNER_DIAGNOSTIC_ADDITION, b'', 1)
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *_a, **_k:
+        subprocess.CompletedProcess([], 0, previous))
+    changed = sorted(ci_scope.MAINTENANCE_FILES | {host, 'tests/test_onboarding_host.py',
+        'tools/ci_scope.py', 'tests/test_ci_scope.py', 'docs/runbooks/tribu-sdk-successor.md'})
+    profile, tests = select(changed, ROOT, base='a' * 40)
+    assert profile == 'peer' and set(tests) == set(ci_scope.MAINTENANCE_TESTS)
+    assert select(changed, ROOT) == ('full', ['tests'])
+    for extra in ('requirements-weave.txt', 'clusterctl/onboarding_custody.py',
+                  'clusterctl/onboarding_admission.py', 'unknown.py'):
+        assert select([*changed, extra], ROOT, base='a' * 40) == ('full', ['tests'])
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *_a, **_k:
+        subprocess.CompletedProcess([], 0, previous + b'\n# unrelated change\n'))
+    assert select(changed, ROOT, base='a' * 40) == ('full', ['tests'])
+
+
+def test_cohort_correction_reuses_maintained_controller_coverage():
+    from tools import ci_scope
+    changed = ['clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_cohort_control.py',
+        'tools/ci_scope.py', 'tests/test_ci_scope.py', 'docs/runbooks/tribu-sdk-successor.md']
+    assert select(changed, ROOT) == ('peer', list(ci_scope.MAINTENANCE_TESTS))
+    for extra in ('requirements-weave.txt', 'clusterctl/onboarding_admission.py', 'unknown.py'):
+        assert select([*changed, extra], ROOT) == ('full', ['tests'])
+
+
+def test_exact_owner_transport_diagnostic_keeps_maintenance_coverage(monkeypatch):
+    import subprocess
+    from tools import ci_scope
+    host = 'clusterctl/onboarding_host.py'
+    current = (ROOT/host).read_bytes()
+    assert current.count(ci_scope.OWNER_TRANSPORT_DIAGNOSTIC) == 1
+    previous = current.replace(ci_scope.OWNER_TRANSPORT_DIAGNOSTIC, ci_scope.OWNER_TRANSPORT_ORIGINAL, 1)
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *a, **kw: subprocess.CompletedProcess([],0,previous))
+    changed = ['clusterctl/receiving_maintenance.py','tests/test_receiving_maintenance.py',host,
+        'tests/test_onboarding_host.py','tools/ci_scope.py','tests/test_ci_scope.py']
+    assert select(changed, ROOT, base='a'*40) == ('peer',list(ci_scope.MAINTENANCE_TESTS))
+    monkeypatch.setattr(ci_scope.subprocess, 'run', lambda *a, **kw: subprocess.CompletedProcess([],0,previous+b'\n# other change\n'))
+    assert select(changed, ROOT, base='a'*40) == ('full',['tests'])

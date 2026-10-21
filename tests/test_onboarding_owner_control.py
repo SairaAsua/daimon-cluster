@@ -312,3 +312,32 @@ def test_short_identity_socket_change_during_catalog_refuses(tmp_path,monkeypatc
                 deadline_ns=owner.deadline_ns,code=tmp_path,require_admitted=False,native_tooling={'accepted':True})
     finally:
         listener.close()
+
+
+@pytest.mark.parametrize('wrong', [False, True])
+def test_observer_catalog_uses_actual_body_sdk_not_observer_sdk(tmp_path, monkeypatch, wrong):
+    import hashlib
+    from daimon_matrix.canonical import canonical_bytes
+    owner, _, expected, _, _, state, calls, listener = identity_fixture(tmp_path, monkeypatch)
+    observer = tmp_path / ('a' * 64) / 'venv'
+    body = tmp_path / ('b' * 64) / 'venv'
+    state['runtime_status']['loaded_runtime']['qualified_startup']['sdk_digest'] = 'b' * 64
+    state['runtime_status']['loaded_application']['loaded_base_sha256'] = hashlib.sha256(
+        canonical_bytes(state['runtime_status']['loaded_runtime'])).hexdigest()
+    monkeypatch.setattr(control.sys, 'prefix', str(observer))
+    selected = tmp_path / ('c' * 64) / 'venv' if wrong else body
+    try:
+        if wrong:
+            with pytest.raises(OnboardingError, match='receiving_control_binding_conflict'):
+                control.qualified_identity(owner, expected=expected, expires_at_ms=time.time_ns() // 1_000_000 + 10000,
+                    deadline_ns=owner.deadline_ns, code=tmp_path, require_admitted=False,
+                    native_tooling={'accepted': 'actual body'}, body_venv=selected)
+            assert not any(isinstance(call, tuple) and call[0] == 'existing-catalog' for call in calls)
+        else:
+            control.qualified_identity(owner, expected=expected, expires_at_ms=time.time_ns() // 1_000_000 + 10000,
+                deadline_ns=owner.deadline_ns, code=tmp_path, require_admitted=False,
+                native_tooling={'accepted': 'actual body'}, body_venv=selected)
+            catalog = next(call for call in calls if isinstance(call, tuple) and call[0] == 'existing-catalog')
+            assert catalog[2]['venv'] == body and catalog[2]['venv'] != observer
+    finally:
+        listener.close()

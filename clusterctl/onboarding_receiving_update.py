@@ -379,7 +379,7 @@ class GuestGroupClient:
         return result
 
     def status(self) -> dict:
-        value = self._call('admitted-running', require_loaded=True)
+        value = self._call('admitted-running', require_loaded=True, current_native=True)
         status = value.get('group_runtime_status')
         gate = None if not isinstance(status, dict) else status.get('receiving', {}).get('channels', {}).get('tribe')
         if (value.get('responder_association') != 'same-connection'
@@ -842,6 +842,8 @@ def prepare_source_bootstrap(source, *, home: Path, code: Path, code_digest: str
     for path in (home, code, config, manifest_path, transaction):
         if not path.is_absolute() or '..' in path.parts:
             raise OnboardingError('receiving_bootstrap_binding_conflict')
+    if transaction.parent != source.root.parent or transaction == source.root:
+        raise OnboardingError('receiving_bootstrap_binding_conflict')
     if being_seed._read(config) != source.settings:
         raise OnboardingError('receiving_bootstrap_binding_conflict')
     onboarding_release.regular(code / 'clusterctl/onboarding_source.py', uid=code_uid)
@@ -1774,6 +1776,32 @@ class GuestBootstrapController:
             pass
         return str(uuid.uuid5(uuid.NAMESPACE_URL, 'cluster-guest-bootstrap:' + self.operation_id))
 
+    def _observation_vector(self, row: dict, body: tuple[Path, str]) -> tuple[Path, str]:
+        """Use a frozen newer observer without relabeling the selected body.
+
+        An older rollback body need not understand the observer CLI. Only
+        authenticated observation uses this vector; lifecycle/publication and
+        all _loaded comparisons continue to consume the actual body candidate.
+        """
+        from . import onboarding_code_successor
+        observer = row['expected_precondition'].get('receiving_observer')
+        if observer is None:
+            return body
+        if (not isinstance(observer, dict) or set(observer) != {'code', 'code_digest'}
+                or not isinstance(observer['code'], str) or not Path(observer['code']).is_absolute()
+                or '..' in Path(observer['code']).parts
+                or re.fullmatch('[0-9a-f]{64}', observer.get('code_digest', '')) is None):
+            raise OnboardingError('qualified_receiving_observer_required')
+        code = Path(observer['code'])
+        frozen = row['expected_precondition']['guest_bootstraps'][self.name]
+        onboarding_code_successor.verify(code, observer['code_digest'], self.backend.config.code,
+            frozen['plan']['release_digest'], uid=os.geteuid())
+        parameters = onboarding_code_successor.sdk_parameters(code, uid=os.geteuid())
+        if not parameters:
+            raise OnboardingError('qualified_receiving_observer_required')
+        onboarding_sdk.verify(code, uid=os.geteuid(), **parameters)
+        return code, observer['code_digest']
+
     def _row(self) -> tuple[dict, dict, dict]:
         row = self.journal.get(self.operation_id)
         if (row is None or row['operation'] != 'receiving-update'
@@ -1873,6 +1901,8 @@ class GuestBootstrapController:
                 self._record('candidate_validated', root_call('bootstrap-validate'))
             if 'controlled_loaded' in effects:
                 return self._loaded(frozen, candidate, vector, timeout_seconds)
+            if any(key.startswith('start_recovery_request:') for key in effects):
+                raise OnboardingError('receiving_guest_bootstrap_start_recovery_required')
             if 'quiesced' not in effects:
                 current = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
                     timeout_seconds=timeout_seconds)
@@ -1939,13 +1969,93 @@ class GuestBootstrapController:
             self._record('controlled_loaded', loaded)
             return loaded
 
-    def _loaded(self, frozen: dict, candidate: dict, vector: tuple[Path, str], timeout_seconds: float) -> dict:
-        observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=vector,
-            observation_timeout_seconds=timeout_seconds, require_loaded=True)
+    def recover_start(self, recovery_id: str, *, implementation: tuple[Path, str],
+                      timeout_seconds: float = 30) -> dict:
+        """Adopt an exact managed successor before load; no stop/start or renewal."""
+        from .onboarding_host import HostConfig
+        if str(uuid.UUID(recovery_id)) != recovery_id:
+            raise OnboardingError('receiving_guest_start_recovery_required')
+        with ExitStack() as locks:
+            locks.enter_context(self.journal.mutation_lock(self.operation_id))
+            row, frozen, candidate = self._row()
+            jobs = private_directory(self.backend.config.jobs)
+            locks.enter_context(being_seed._locked(jobs))
+            store = JobStore(jobs)
+            for name in store.names():
+                locks.enter_context(being_seed._locked(private_directory(store.directory(name))))
+            row, frozen, candidate = self._row()
+            if self.backend.config != HostConfig.load(Path(row['expected_precondition']['host_config'])):
+                raise OnboardingError('receiving_guest_bootstrap_binding_conflict')
+            effects = (row['runtime_observation'] or {}).get('guest_bootstraps', {}).get(self.name, {})
+            if 'controlled_loaded' in effects or any(key not in effects for key in
+                    ('candidate_validated', 'quiesced', 'unit_selected', 'started')):
+                raise OnboardingError('receiving_guest_start_recovery_required')
+            if candidate['expires_at_ms'] <= time.time_ns() // 1_000_000:
+                raise OnboardingError('receiving_guest_bootstrap_authorization_expired')
+            vector = (Path(candidate['runtime_code']), candidate['runtime_digest'])
+            checked = preflight(vector[0], vector[1], Path(candidate['manifest_path']),
+                row['intent']['runtime_call']['manifest_digest'], being_ref=frozen['owner']['being_ref'],
+                embodiment_id=frozen['owner']['origin']['embodiment_id'],
+                code_uid=candidate['code_uid'], manifest_uid=candidate['manifest_uid'])
+            if checked != candidate['prepared']:
+                raise OnboardingError('receiving_guest_bootstrap_candidate_changed')
+            observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=self._observation_vector(row, vector),
+                observation_timeout_seconds=timeout_seconds, require_loaded=True, current_native=True)
+            root = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
+                timeout_seconds=timeout_seconds, owner_observation={key: observed[key]
+                    for key in ('process', 'admission_parent')})
+            previous = {**frozen['owner']['predecessor'],
+                'service': frozen['root']['service'], 'scope': frozen['root']['scope']}
+            bootstrap = dict(schema='cluster-guest-service-bootstrap/v1', operation_id=self._native_operation_id(),
+                plan_digest=digest(frozen['plan']), predecessor=previous, argv=candidate['argv'])
+            request = dict(schema='cluster-guest-start-recovery/v1', operation_id=recovery_id,
+                bootstrap=bootstrap, started_sha256=digest(effects['started']),
+                successor={**{key: observed[key] for key in ('process', 'admission_parent')}, 'service': root['service']},
+                implementation_sha256=implementation[1], expires_at_ms=candidate['expires_at_ms'])
+            self._record('start_recovery_request:' + recovery_id, request)
+            receipt = self.backend._guest_service_call(frozen['plan'], 'bootstrap-recover-start',
+                candidate=vector, timeout_seconds=timeout_seconds, request=request, implementation=implementation)
+            if (receipt.get('schema') != 'cluster-guest-start-successor/v1'
+                    or receipt.get('recovery_operation_id') != recovery_id
+                    or receipt.get('recovery_sha256') != digest(request)
+                    or receipt.get('bootstrap_sha256') != digest(bootstrap)
+                    or receipt.get('started_sha256') != digest(effects['started'])
+                    or receipt.get('implementation_sha256') != implementation[1]
+                    or receipt.get('predecessor_parent') != effects['started']['admission_parent']
+                    or receipt.get('predecessor_exited') is not True
+                    or receipt.get('manager') != root['service']['manager']
+                    or receipt.get('scope') != root['scope']
+                    or receipt.get('unit_sha256') != effects['unit_selected']['selected_sha256']):
+                raise OnboardingError('receiving_guest_start_recovery_conflict')
+            self._record('start_recovery_receipt:' + recovery_id, receipt)
+            loaded = self._loaded(frozen, candidate, vector, timeout_seconds,
+                observed=observed, start_recovery_id=recovery_id)
+            self._record('controlled_loaded', loaded)
+            return loaded
+
+    def _loaded(self, frozen: dict, candidate: dict, vector: tuple[Path, str], timeout_seconds: float,
+                *, observed: dict | None = None, start_recovery_id: str | None = None) -> dict:
+        if observed is None:
+            row = self._row()[0]
+            observed = self.backend._target_call(frozen['plan'], 'admitted-running', candidate=self._observation_vector(row, vector),
+                observation_timeout_seconds=timeout_seconds, require_loaded=True, current_native=True)
         root = self.backend._guest_service_call(frozen['plan'], 'bootstrap-inspect', candidate=vector,
             timeout_seconds=timeout_seconds, owner_observation={key: observed[key]
                 for key in ('process', 'admission_parent')})
         effects = self._row()[0]['runtime_observation']['guest_bootstraps'][self.name]
+        if start_recovery_id is None:
+            start_recovery_id = effects.get('controlled_loaded', {}).get('start_recovery_operation_id')
+        manager = effects['started']['manager']
+        if start_recovery_id is not None:
+            request = effects.get('start_recovery_request:' + start_recovery_id)
+            receipt = effects.get('start_recovery_receipt:' + start_recovery_id)
+            if (not isinstance(request, dict) or not isinstance(receipt, dict)
+                    or receipt.get('recovery_sha256') != digest(request)
+                    or receipt.get('started_sha256') != digest(effects['started'])
+                    or receipt.get('scope') != root['scope']
+                    or receipt.get('manager') != root['service']['manager']):
+                raise OnboardingError('receiving_guest_start_recovery_conflict')
+            manager = receipt['manager']
         expected_runtime, _ = bootstrap_effects(effects, source=False, mode=frozen['owner'].get('mode', 'issue'))
         loaded = observed['runtime_status']['loaded_runtime']
         startup = loaded['qualified_startup']
@@ -1955,7 +2065,7 @@ class GuestBootstrapController:
                 or root['scope']['admission_parent'] != observed['admission_parent']
                 or root['service']['unit_sha256'] != effects['unit_selected']['selected_sha256']
                 or root['service'].get('dropins', {}) != frozen['root']['service'].get('dropins', {})
-                or root['service']['manager'] != effects['started']['manager']
+                or root['service']['manager'] != manager
                 or any(startup.get(key) != value for key, value in dict(
                     code_digest=candidate['runtime_digest'], matrix_commit=candidate['prepared']['matrix_revision'],
                     sdk_digest=candidate['prepared']['sdk_digest'], reader=candidate['prepared']['reader'],
@@ -1978,6 +2088,8 @@ class GuestBootstrapController:
             startup_instance_id=startup['startup_instance_id'],
             loaded_runtime=loaded, loaded_application={key: value for key, value in application.items() if key != 'reader_gates'},
             group_sha256=frozen['owner']['group_sha256'], receiving_readiness='unobserved')
+        if start_recovery_id is not None:
+            result['start_recovery_operation_id'] = start_recovery_id
         if effects.get('controlled_loaded', result) != result:
             raise OnboardingError('receiving_guest_bootstrap_loaded_conflict')
         return result
@@ -2402,6 +2514,21 @@ class CohortController:
                     raise OnboardingError('receiving_cohort_predecessor_changed')
             row = self._activation_barrier(row, plan, records, observations)
             now = time.time_ns() // 1_000_000
+            if any(item['reader']['expires_at_ms'] <= now for item in records.values()):
+                raise OnboardingError('receiving_cohort_observation_expired')
+            if any(now - item['observed_at_ms'] > plan['observation_window_ms'] for item in records.values()):
+                # First-time replacement controls can consume the observation
+                # window. Observe once more, without renewing the reader vector
+                # or replaying acknowledged controls. A stale second round fails.
+                fresh: dict = {}
+                refreshed = self._adoption_round(plan, manifest, observations=fresh)
+                for name, current in refreshed.items():
+                    if ({key: val for key, val in current.items() if key not in {'observed_at_ms', 'observed_at_ns'}} !=
+                            {key: val for key, val in records[name].items() if key not in {'observed_at_ms', 'observed_at_ns'}}):
+                        raise OnboardingError('receiving_cohort_activation_changed')
+                records = refreshed
+                row = self._activation_barrier(row, plan, records, fresh)
+                now = time.time_ns() // 1_000_000
             if any(now - item['observed_at_ms'] > plan['observation_window_ms']
                    or item['reader']['expires_at_ms'] <= now for item in records.values()):
                 raise OnboardingError('receiving_cohort_observation_expired')
@@ -2520,6 +2647,24 @@ class CohortController:
                     or replacement['lifecycle_operation_id'] != recipe['lifecycle_operation_id']
                     or replacement['exit_sha256'] != digest(exited)):
                 raise OnboardingError('receiving_sender_replacement_changed')
+            if 'accepted' in replacement:
+                accepted = replacement['accepted']
+                command = replacement['command']
+                if (not isinstance(accepted, dict) or not isinstance(command, dict)
+                        or any(accepted.get(key) != current[key] for key in ('process', 'server', 'gate'))
+                        or accepted.get('command_sha256') != digest(command)
+                        or current['gate'].get('request_sha256') != accepted.get('request_sha256')
+                        or command.get('process_instance_id') != current['gate'].get('process_instance_id')
+                        or command.get('channel_id') != 'tribe' or command.get('operation_id') != control_id
+                        or command.get('release_digest') != release or command.get('phase') != 'revoke'
+                        or command.get('readers') != [] or current['gate'].get('phase') != 'revoke'
+                        or current['gate'].get('readers') != [] or current['gate'].get('operation_id') != control_id
+                        or current['gate'].get('release_digest') != release):
+                    raise OnboardingError('receiving_sender_replacement_changed')
+                # This fresh adoption round already proves the exact retained
+                # ACK. Do not spend its finite freshness repeating owner RPCs
+                # and durable writes. An unacknowledged request still retries.
+                continue
             path = owner.root / 'receiving-control' / (control_id + '-replacement-revoke.json')
             result = owner.prepare_apply_control(replacement['command'], path)
             accepted = {key: result[key] for key in ('server', 'process', 'gate', 'request_sha256', 'command_sha256')}

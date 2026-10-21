@@ -1,14 +1,163 @@
 # Receiver-compatible Matrix updates
 
+## Supported routine maintenance command
+
+For already admitted Source and guest bodies, use the maintained
+`clusterctl.receiving_maintenance` operation. The implementation composes the
+existing Source, guest and cohort controllers and their journals; it does not
+re-enroll a body. The current Source must already expose a signed Tribe roster
+in its loaded receiving view; an unavailable or legacy group view is refused with
+`receiving_maintenance_current_roster_required`. Inspect the actual retained
+roster diagnostic before attributing a cause or continuing its owning recovery. Complete any older unfinished lifecycle through its original
+controller first. Do not import or relabel its operation as a new maintenance.
+
+Build the fixed helper closure with `python -m tools.build_receiving_maintenance`
+(`--base`, `--base-digest`, `--sdk`, `--matrix-commit`,
+`--matrix-wheel-sha256`, `--output`). This wraps the existing immutable successor
+builder. Keep the original base, qualified SDK, previous body and selected native
+tooling. Qualify the exact captured helper, then publish it under root-owned
+non-writable public code storage; building does not qualify or select it.
+
+Use one protected root-owned mode-0600 JSON spec (`cluster-receiving-maintenance/v1`):
+
+- `name`, `journal`, `host_config`: stable operation label, Root OperationJournal
+  directory and existing host configuration. Keep the exact spec for retries.
+- `candidate`: `code`, `code_digest`, `manifest_path`, `manifest_digest`,
+  `expires_at_ms`. The approved release manifest names **all** required current
+  receivers, their exact predecessor selections, SDK and candidate helper.
+- `observer`: separately qualified `code` and `code_digest`. It contains the
+  current native observer/control implementation and can differ from the body
+  candidate for a compatible backward software selection.
+- `source`: non-root `uid`, `gid`, `home`, `config`, `config_sha256`, `unit`,
+  `root`, `socket`, `bootstrap_venv`, `bootstrap_imports`, owner-local `journal`,
+  `transaction` and existing `tooling` recipe. The transaction must be a sibling
+  of `root`, with a different name; the coordinator refuses an invalid location
+  before preparing or revoking any sender. The bootstrap interpreter and
+  closed imports are an already qualified SDK anchor, never arbitrary executables.
+- `guests`: mapping from existing job name to its actual authorized `grant`
+  path and existing `tooling` recipe. Jobs must match the grants and either be
+  complete or have only their final acceptance outstanding, with every earlier
+  stage complete. Their historical acceptance is never falsified by maintenance.
+- Optional `worker`: exactly `{"unit":"daimon-onboarding-worker.service"}`.
+  Required for the final-acceptance profile. Its Root journal must be the canonical
+  `/var/lib/daimon-cluster-receiving-maintenance/operations`, so a second operation
+  cannot adopt another operation's unresolved pause as an inactive baseline.
+
+Run from the qualified helper's supported interpreter/import context. Preserve
+`-B` (or `PYTHONDONTWRITEBYTECODE=1`) for every helper or diagnostic import:
+compiled cache files inside a sealed generation correctly invalidate its inventory.
+
+```sh
+python -B -m clusterctl.receiving_maintenance --spec "$maintenance_spec" prepare
+python -B -m clusterctl.receiving_maintenance --spec "$maintenance_spec" apply
+python -B -m clusterctl.receiving_maintenance --spec "$maintenance_spec" status
+```
+
+`prepare` installs only missing immutable SDK generations, prepares readonly
+mounts, preflights each receiver and freezes the original processes and child
+operations. It does not stop services, change active selectors or revoke senders.
+Source private SDK/config/journal access occurs only after dropping to its actual
+UID/GID with supplementary groups cleared. Root retains public selections and
+child references, never Source custody or a copied writable owner journal.
+
+Notify the human before `apply` interrupts Matrix services. This does not grant
+permission for global Stop, Codex/Telegram restart or unrelated service changes.
+With complete jobs, the onboarding worker stays active and existing nonblocking
+job locks protect selector/lifecycle effects. With a final acceptance outstanding,
+the fixed onboarding worker is paused under its selection lock before sender
+revocation. Its actual `--config` must match this HostConfig. Hold the jobs-parent
+and all existing job locks only through confirmed clean stop, then release them
+before lifecycle effects and restoration. The pinned worker resolves ordinary
+ticks and home-provider effects under these same locks; a busy lock returns75
+before stop intent, without killing a running backend call. Its original state and unchanged unit definition are journaled before
+stop; an unclean drain refuses lifecycle work. `finally` restores an originally
+active worker and leaves an originally inactive worker inactive. A lost manager
+reply is reconciled from actual state. No reload, enable or harness restart occurs.
+
+After a coordinator crash, retry **the same spec**: pending worker restoration
+runs before candidate, expiry or HostConfig preflight can refuse the update. Each
+new apply attempt records a new pause cycle; another operation cannot claim an
+unresolved pause. Status reports restoration pending instead of claiming success.
+A rejected historical Source transaction may already have retained revocations.
+Use its original cohort `reconcile_reassessment` to finish exact empty selections
+before freezing a corrected operation. Retain the original failed intent and
+reason, current loaded bodies/HostConfig and original expiry; never edit its
+vectors or renew authority to conceal the failure.
+
+If the unchanged worker cannot be restored, preserve that uncertainty and repair
+its exact owning condition. A job collision returns `busy` (exit75); resume the
+same spec after the lock clears. Do not loop, rebuild or alter job acceptance.
+
+`apply` revokes original sender processes, applies the retained host-selector CAS,
+then completes only missing Source/guest lifecycle effects, tooling adoption and
+positive all-required reader selection. A lost Source start reply goes directly
+to the original start observation, without another stop/publication. A partial
+positive selection resumes through `activate`, without repeating its revoke
+preparation. Complete HostConfig drift refuses before resumed lifecycle dispatch.
+After uncertainty, inspect retained status and resume the same operation; never
+remint messages, renew horizons or replace operations to hide missing evidence.
+
+An acknowledged replacement revoke is reused only when fresh adoption proves
+the same process, server and gate, bound to its exact command, request, release
+and lifecycle exit. Do not repeat its owner RPC or durable journal write. An
+unacknowledged request retains its existing exact retry. If first-time barrier
+controls consume observation freshness, perform one new all-required observation
+round, compare the records excluding only their timestamps and recheck those
+exact accepted gates. Persist the real new observation times; never extend the
+reader expiry. A changed gate/vector, expired reader or stale second round
+refuses activation. This host-coordinator correction can observe the unchanged
+prepared candidate; it does not require another body restart or SDK installation.
+
+If activation retained `cohort_reassessment`, its old positive requests stay
+fenced. Complete its original `reconcile_reassessment` until every sender is
+observed disabled. Prepare a linked activation-only successor through the same
+maintenance spec:
+
+```sh
+python -B -m clusterctl.receiving_maintenance --spec "$maintenance_spec" reassess \
+  --previous-cohort "$failed_cohort" --manifest "$assessment_manifest" \
+  --manifest-digest "$assessment_manifest_digest"
+python -B -m clusterctl.receiving_maintenance --spec "$maintenance_spec" apply
+```
+
+The exact protected release can change only predecessor selection hashes to
+the already loaded current candidate. Contract, candidate artifacts, authority,
+provenance, original expiry and observation window stay fixed. Preparation
+requires current empty gates on the retained loaded processes and completed
+predecessor fencing. It links original lifecycle and tooling evidence without
+claiming another installation; normal fresh native qualification still runs.
+The immutable child/tip is published before any control. Exact retry finds that
+child before freezing again. Apply follows explicit links under the parent lock,
+preserving the original host CAS and all failed intents; it performs no SDK or
+body lifecycle replay. A forked tip, changed vector or expired horizon refuses.
+
+Bounded Source/guest owner subprocess failures retain separate closed timeout
+and launch-failure codes. Neither code proves that a submitted native effect did
+or did not complete. Never infer that cause from older generic failures or expose
+raw stderr, argv or exception text to obtain it.
+
+`receiving-selected` records observed adoption, not communication. The command
+sends no messages and starts no models. Preserve actual communication receipts
+separately; reused evidence remains valid only while relevant conditions match.
+A compatible backward body update is a **new exact transition** from current
+state, using the new observer but comparing the actual loaded **body** pins.
+Never restore old authority, data, reader sets, request IDs or expired horizons.
+Keep uncertain publications and original histories intact.
+
+
 Current coordination: [Matrix #336](https://github.com/AlterMundi/daimon-matrix/issues/336),
 [Cluster #232](https://github.com/nicoechaniz/daimon-cluster/issues/232).
 The original readable-presentation increment is retained under
 [Matrix #287](https://github.com/AlterMundi/daimon-matrix/issues/287).
 Matrix owns signed messaging and presentation; Cluster selects the exact
 executable SDK and receiving helpers on the existing bodies.
-The current source candidate pins Matrix `0dc0b555939b16a1150a220a366a6911a5ae9c28`.
-The three-body production selection remains its separately recorded predecessor
-until receiving adoption succeeds.
+The current three-VPS selection is Matrix `9b2b8ec` / SDK `53c4ee01` /
+body/observer code `6dffe887`, with Root coordinator `2c883c9f`; see
+[the current deployment record](../../RESUME.md). The earlier accepted `422e79c6`
+body and six-leg native/semantic/ACK proof remain retained, alongside the new
+actual selection and native-tool communication receipts. Main integration and maintenance
+improvements (#270/#273) do not invalidate unchanged installed qualification.
+Broader I/O and future-admission acceptance remain separate.
 
 ## Execute from the next missing effect
 
@@ -611,8 +760,9 @@ diagnostic sidecars carry observations without granting transmission authority.
 
 ## Membership group default — 2026-10-13
 
-Matrix #151/#198 and merged #330/#332 own the conversation contract. Current
-deployed SDK source: `a1a70b6420692d19f85ad0edb945cba00c3f5459`. CompAII, Eko and Oliva
+Matrix #151/#198 and merged #330/#332 own the conversation contract. At that increment the
+deployed SDK source was `a1a70b6420692d19f85ad0edb945cba00c3f5459`; the current
+selection is recorded above. CompAII, Eko and Oliva
 share one signed group, with authenticated receipts for the three VPS bodies.
 One message freezes all active Root bodies, including unavailable siblings; one
 Tribu publication represents that message. A transport ACK is not delivery.
@@ -641,3 +791,79 @@ After accepted membership/governance changes, recovery finishes forward through
 compatible group artifacts. Old terminated memberships/grants and archived pair
 defaults are not an operational rollback. Historical messages remain readable;
 exact expired retries return their retained outcome without new transmission.
+
+## Managed restart before the first loaded receipt
+
+A successful StartUnit receipt names one manager invocation. If systemd replaces
+that invocation before `controlled_loaded` is retained, `bootstrap-start` correctly
+refuses to reuse its old proof. Do not overwrite that receipt, relax manager
+comparison or restart a valid successor merely to satisfy the observer.
+
+Use `GuestBootstrapController.recover_start(recovery_id, implementation=...)`.
+The exact recovery ID freezes the original bootstrap/start digest, original
+horizon and freshly authenticated successor. Its root `bootstrap-recover-start`
+action proves the original parent exited, pins the current child and parent,
+binds them to the unchanged selected unit/drop-ins/cgroup and retains a separate
+immutable successor receipt. It never stops, starts, selects or reloads a service.
+The host then runs every existing loaded SDK, identity, application and gate check
+and stores the explicit recovery reference through the normal journal CAS.
+
+The qualified control-plane implementation can be newer than the already running
+body candidate. Both content-addressed code generations are independently
+verified and mounted read-only; the recovery CLI binds its executing module to
+`--implementation-code` and its digest while `--runtime-code` still identifies
+the unchanged target. This never substitutes a maintenance helper for a body's
+loaded-code evidence or executes that body's private SDK as root.
+
+An uncertain recovery resumes the same frozen request and revalidates that exact
+live successor. A changed successor needs a distinct recovery request. Pending
+recovery prevents `execute` from replaying the original start. Initial support is
+limited to recovery before the first retained `controlled_loaded`; later process
+replacement remains a separate lifecycle operation. Restore any paused workers
+on both successful and contained-failure paths. Keep the initial startup failure
+separate from the recovery outcome; a generic refusal is not its diagnosis.
+
+## Current admitted maintenance observation (#270)
+
+The qualified helper's explicit `admitted-running --require-loaded
+--current-native` path composes the existing authenticated base status, group
+qualified identity, current admission and kernel child/parent observations. It
+validates the current protected target binding and bundle plus the signed group
+selection without reopening custody or reconstructing archived pair onboarding.
+It retains a finite deadline and rejects changed socket inodes, public inputs,
+processes or loaded bundle/application associations. A successful observation
+alone still reports receiving readiness as unobserved. The controller's frozen
+SDK, origin, group, visibility, service manager and original start checks remain
+mandatory and unchanged.
+
+Use the newly qualified helper candidate to observe a still-running predecessor.
+An older helper does not support the new flag: do not dispatch it against an old
+candidate or fall back to historical reconstruction. This code-only observer
+selection does not require a body restart. Initial enrollment retains its original
+ceremony verification; this path qualifies maintenance of admitted bodies only.
+
+## Durable SDK publication without per-file barriers (#273)
+
+Preparation still verifies every wheel, the complete import inventory, ownership
+and final permissions before acknowledging immutable imports. On Linux 5.8 or
+newer it retains a directory descriptor opened on the existing generation parent
+before creating the temporary tree. A capability probe selects support before
+staging; the final `syncfs` uses that same descriptor's writeback-error cursor.
+The staged tree must remain on the descriptor's filesystem. Only after the flush
+succeeds is the tree atomically renamed and its parent synced.
+
+This flush includes unrelated pending writes on the same filesystem. Measure
+preparation independently from cutover; do not call it during a receiving-read
+budget or use it to flush the machine's other filesystems. It changes no mounts,
+global cache settings, dependency representation or selected generation. Older
+or unrecognized kernels and unsupported filesystems keep the original per-writer
+`flush`/`fsync` before close and deepest-first directory sync. Actual I/O errors,
+including a late unsupported/error result, refuse publication; reopening files
+or a fresh directory descriptor cannot erase an earlier writeback error.
+
+A failed unpublished attempt is removed through its existing private temporary
+cleanup. Exact retry reuses a fully validated published tree/receipt without
+rewriting or flushing it. Failed receipt publication remains distinguishable
+from completed preparation. Existing loaded-startup, no-site/bytecode, inventory
+and source-origin checks remain unchanged; the runtime never imports an SDK on
+installation-receipt authority alone.

@@ -301,6 +301,23 @@ OWNER_CONTROL_TESTS = ('tests/test_onboarding_owner_control.py',
     'tests/test_receiving_cohort_control.py', 'tests/test_receiving_process_observation.py',
     'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
 
+# Routine receiving maintenance composes controllers without changing SDK,
+# authority, custody or the native model. Unknown deltas retain wider coverage.
+MAINTENANCE_FILES = {'clusterctl/receiving_maintenance.py', 'tests/test_receiving_maintenance.py',
+    'clusterctl/receiving_worker.py', 'tests/test_receiving_worker.py',
+    'tools/build_receiving_maintenance.py', 'tools/check_rc_types.py',
+    'clusterctl/onboarding_owner_control.py', 'tests/test_onboarding_owner_control.py', 'tests/test_receiving_cohort_control.py',
+    'clusterctl/onboarding_owner_client.py', 'tests/test_onboarding_owner_client.py',
+    'clusterctl/onboarding_receiving_update.py', 'tests/test_guest_bootstrap_controller.py'}
+MAINTENANCE_TESTS = ('tests/test_receiving_worker.py', 'tests/test_receiving_maintenance.py', 'tests/test_onboarding_owner_control.py',
+    'tests/test_source_bootstrap.py', 'tests/test_source_owner_adapter.py',
+    'tests/test_guest_bootstrap_controller.py', 'tests/test_receiving_cohort_control.py',
+    'tests/test_receiving_host_selection.py', 'tests/test_receiving_update_journal.py',
+    'tests/test_receiving_process_observation.py', 'tests/test_onboarding_owner_client.py',
+    'tests/test_onboarding_host.py', 'tests/test_onboarding_host_ownership.py',
+    'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
+
+
 LOADED_STARTUP_FILES = {'RESUME.md', 'clusterctl/onboarding_sdk.py', 'clusterctl/onboarding_target.py',
     'clusterctl/onboarding_code_successor.py',
     'clusterctl/onboarding_service.py', 'tests/test_source_bootstrap.py',
@@ -334,7 +351,7 @@ LOADED_STARTUP_TESTS = ('tests/test_onboarding_sdk.py', 'tests/test_onboarding_c
     'tests/test_matrix_host_process.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')
 
 
-HOME_FILES = {'clusterctl/homes/__init__.py', 'clusterctl/homes/policy.py',
+HOME_FILES = {'clusterctl/homes/applications.py', 'clusterctl/homes/__init__.py', 'clusterctl/homes/policy.py',
     'clusterctl/homes/agenda.py', 'clusterctl/homes/agenda_calendar.py',
     'clusterctl/homes/agenda_assets/index.html', 'clusterctl/homes/agenda_assets/agenda.js',
     'clusterctl/homes/agenda_assets/agenda.css', 'tests/test_home_agenda.py',
@@ -416,10 +433,34 @@ def host_observation_only(root: Path, base: str) -> bool:
     new=b"set(value) - {'group', 'receiving_controller'} != {\"phase\", \"request\", \"receipt\"}"
     if original.count(old)==1 and original.replace(old,new,1)==current:
         return True
+    # This observer opt-in changes no provisioning, custody, mounts or service
+    # code. Prove the exact additive transformation instead of pinning another
+    # pair of whole-file hashes for each unrelated main merge.
+    observer_additions = (
+        b'                     current_native: bool = False,\n',
+        b"        if current_native and (action != 'admitted-running' or not require_loaded\n"
+        b"                or candidate is None or observation_timeout_seconds is None):\n"
+        b"            raise OnboardingError('qualified_onboarding_target_observer_required')\n",
+        b"        if current_native:\n            arguments += ['--current-native']\n",
+    )
+    stripped = current
+    for addition in observer_additions:
+        if stripped.count(addition) != 1:
+            break
+        stripped = stripped.replace(addition, b'', 1)
+    else:
+        if stripped == original:
+            return True
     if (hashlib.sha256(original).hexdigest(), hashlib.sha256(current).hexdigest()) == (
         'cf3878966677401d094410595541f3f5395b0964d28910057299443c9b86a1a5',
         'cc1e19f193e69cc67c08d121243067813f6ae6b56bbbb358cf5888be2909c216'):
         # Extend the existing prepared-SDK entry to the three bootstrap verbs.
+        return True
+    if (hashlib.sha256(original).hexdigest(), hashlib.sha256(current).hexdigest()) == (
+        'cc1e19f193e69cc67c08d121243067813f6ae6b56bbbb358cf5888be2909c216',
+        'afb3f1f78e151f6cdb078903bb8856d401172dc5f677dba05908cca7b6051732'):
+        # Explicit managed-start recovery uses a separately qualified Root helper.
+        # Keep every loaded-startup and host route/access contract below.
         return True
     return (hashlib.sha256(original).hexdigest() in {
         '742fb3e396d4619369152cde4c3811c22df18504e504d7012e99c99772040c59',
@@ -462,7 +503,70 @@ def receiving_support_only(root: Path, base: str, names: set[str]) -> bool:
     return True
 
 
+OWNER_DIAGNOSTIC_ADDITION = b"""            if argv[0] == 'exec' and 'clusterctl.onboarding_owner_control' in argv:
+                from .onboarding_owner_control import PUBLIC_ERRORS
+                for line in result.stderr.splitlines():
+                    try:
+                        detail = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (isinstance(detail, dict) and set(detail) == {'error'}
+                            and isinstance(detail.get('error'), str)
+                            and detail.get('error') in PUBLIC_ERRORS):
+                        raise OnboardingError(detail['error'])
+"""
+
+OWNER_TRANSPORT_ORIGINAL = b'''        except (OSError, subprocess.TimeoutExpired):
+            raise OnboardingError("onboarding_host_operation_failed") from None
+'''
+OWNER_TRANSPORT_DIAGNOSTIC = b'''        except (OSError, subprocess.TimeoutExpired) as error:
+            if timeout_seconds is not None and argv[0] == 'exec' and 'clusterctl.onboarding_owner_control' in argv:
+                code = ('receiving_host_deadline_expired' if isinstance(error, subprocess.TimeoutExpired)
+                    else 'receiving_host_launch_failed')
+                raise OnboardingError(code) from None
+            raise OnboardingError("onboarding_host_operation_failed") from None
+'''
+
+
+def owner_diagnostics_only(root: Path, base: str) -> bool:
+    """Accept only the closed owner-control diagnostic addition to HostBackend."""
+    if not re.fullmatch(r'[0-9a-f]{40}', base):
+        return False
+    name = 'clusterctl/onboarding_host.py'
+    before = subprocess.run(['git', 'show', base + ':' + name], cwd=root,
+        capture_output=True, check=False)
+    if before.returncode:
+        return False
+    current = (root / name).read_bytes()
+    if (current.count(OWNER_TRANSPORT_DIAGNOSTIC) == 1 and
+            current.replace(OWNER_TRANSPORT_DIAGNOSTIC, OWNER_TRANSPORT_ORIGINAL, 1) == before.stdout):
+        return True
+    return current.count(OWNER_DIAGNOSTIC_ADDITION) == 1 and current.replace(
+        OWNER_DIAGNOSTIC_ADDITION, b'', 1) == before.stdout
+
+
 def select(changed: list[str], root: Path, *, base: str = '') -> tuple[str, list[str]]:
+    closeout_files = {'tools/close_completed_onboarding.py', 'tests/test_onboarding_closeout.py',
+                      'docs/operations/onboarding-closeout.md'}
+    closeout_tests = ['tests/test_onboarding_closeout.py', 'tests/test_onboarding.py',
+                      'tests/test_onboarding_progress.py', 'tests/test_receiving_worker.py',
+                      'tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    if (set(changed) & closeout_files and set(changed) <= closeout_files | CI_FILES
+            and all((root / name).is_file() for name in closeout_tests)):
+        return 'peer', closeout_tests
+    host = {'clusterctl/onboarding_host.py', 'tests/test_onboarding_host.py'}
+    if (({'clusterctl/receiving_maintenance.py', 'tests/test_receiving_maintenance.py'} <= set(changed)
+            or {'clusterctl/onboarding_receiving_update.py', 'tests/test_receiving_cohort_control.py'} <= set(changed))
+            and set(changed) <= MAINTENANCE_FILES | host | CI_FILES | RUNBOOK_DOCS
+            and all((root / name).is_file() for name in MAINTENANCE_TESTS)
+            and ('clusterctl/onboarding_host.py' not in changed or owner_diagnostics_only(root, base))):
+        return 'peer', list(MAINTENANCE_TESTS)
+    storage_files = {'tools/storage_hygiene.py', 'tests/test_storage_hygiene.py',
+                     'docs/operations/host-storage-hygiene.md'}
+    storage_tests = ['tests/test_storage_hygiene.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py']
+    if (set(changed) & storage_files and set(changed) <= storage_files | CI_FILES
+            and all((root / name).is_file() for name in storage_tests)):
+        return 'peer', storage_tests
     if (set(changed) & (OWNER_CONTROL_FILES - {'tools/check_rc_types.py'})
             and set(changed) <= OWNER_CONTROL_FILES | CI_FILES | RUNBOOK_DOCS
             and all((root / name).is_file() for name in OWNER_CONTROL_TESTS)):

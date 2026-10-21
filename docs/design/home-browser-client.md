@@ -96,3 +96,18 @@ consumer contract in the component phase, retaining authored layouts, explicit
 styles, recipe/version history and a readable last-valid fallback. Do not copy
 its catalog or make another style editor. Do not regenerate applications or
 wake models merely to propagate a selected-style change.
+
+## Trusted application identity
+
+A trusted application mounted on a registered home origin can reuse its current
+`__Host-home` HttpOnly session. Its backend sends that cookie to the same home's
+`GET /access/identity`. The `dm.home-session/v1` response contains only the
+verified current human actor, revision, name and exact home origin. Anonymous,
+VPN and bearer requests are refused. Existing session ancestry, expiry and
+revocation remain authoritative; the application revalidates before private
+operations and enforces its own receiving grants. No login token is returned.
+
+Use the existing same-origin `DaimonHomeAccess.createClient().signIn()` for
+sign-in and exact-path return through the configured common auth service.
+This adapter requires a trusted application mount, not an isolated artifact
+or a cross-origin credential bridge.

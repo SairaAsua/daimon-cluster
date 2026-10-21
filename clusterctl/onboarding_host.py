@@ -152,11 +152,11 @@ class HostConfig:
             telegram_code, telegram_digest = Path(value['telegram_code']), value['telegram_digest']
             onboarding_code_successor.verify(telegram_code, telegram_digest, code,
                                              value['release_digest'], uid=path.stat().st_uid)
-            from .onboarding_telegram import artifact, COMMIT, RETAINED_CURRENT_COMMIT
+            from .onboarding_telegram import artifact, COMMIT, RETAINED_CURRENT_COMMIT, RETAINED_SESSIONS_COMMIT
             # A Matrix successor preserves an already-qualified independent
             # Telegram selection; it does not require replacing that consumer.
             if artifact(telegram_code, uid=path.stat().st_uid)['commit'] not in {
-                    COMMIT, RETAINED_CURRENT_COMMIT}:
+                    COMMIT, RETAINED_CURRENT_COMMIT, RETAINED_SESSIONS_COMMIT}:
                 raise OnboardingError('qualified_telegram_successor_required')
         runtime_by_name = None
         if "runtime_by_name" in value:
@@ -306,9 +306,24 @@ class HostBackend:
             options: dict = {} if input_data is None else {'input': input_data}
             result = subprocess.run(["incus", *argv], capture_output=True, text=True,
                                     timeout=timeout, check=False, **options)
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired) as error:
+            if timeout_seconds is not None and argv[0] == 'exec' and 'clusterctl.onboarding_owner_control' in argv:
+                code = ('receiving_host_deadline_expired' if isinstance(error, subprocess.TimeoutExpired)
+                    else 'receiving_host_launch_failed')
+                raise OnboardingError(code) from None
             raise OnboardingError("onboarding_host_operation_failed") from None
         if result.returncode:
+            if argv[0] == 'exec' and 'clusterctl.onboarding_owner_control' in argv:
+                from .onboarding_owner_control import PUBLIC_ERRORS
+                for line in result.stderr.splitlines():
+                    try:
+                        detail = json.loads(line)
+                    except ValueError:
+                        continue
+                    if (isinstance(detail, dict) and set(detail) == {'error'}
+                            and isinstance(detail.get('error'), str)
+                            and detail.get('error') in PUBLIC_ERRORS):
+                        raise OnboardingError(detail['error'])
             raise OnboardingError("onboarding_host_operation_failed")
         return result.stdout
 
@@ -952,6 +967,7 @@ class HostBackend:
                      candidate: tuple[Path, str] | None = None,
                      observation_timeout_seconds: float | None = None,
                      require_loaded: bool = False,
+                     current_native: bool = False,
                      bootstrap_request: dict | None = None,
                      bootstrap_ready_sha256: str | None = None,
                      bootstrap_timeout_seconds: float | None = None,
@@ -965,6 +981,9 @@ class HostBackend:
         A host timeout is uncertain observation, never proof of guest exit.
         """
         deadline_ns = None
+        if current_native and (action != 'admitted-running' or not require_loaded
+                or candidate is None or observation_timeout_seconds is None):
+            raise OnboardingError('qualified_onboarding_target_observer_required')
         bootstrapping = action in {'receiving-bootstrap-freeze', 'receiving-bootstrap-stage', 'receiving-bootstrap-publish'}
         controlling = action in {'receiving-control-prepare', 'receiving-control-apply', 'receiving-control-prepare-apply'}
         if native_tooling is not None and (action != 'receiving-identity' or not isinstance(native_tooling, dict)):
@@ -1044,6 +1063,8 @@ class HostBackend:
             *peer_args, *(['--public-profile-json', json.dumps(profile, separators=(',', ':'))] if profile is not None else [])]
         if require_loaded:
             arguments += ['--require-loaded']
+        if current_native:
+            arguments += ['--current-native']
         if control_file is not None:
             arguments += ['--control-file', str(control_file)]
         if control_command is not None:
@@ -1106,16 +1127,18 @@ class HostBackend:
 
     def _guest_service_call(self, plan: dict, action: str, *, candidate: tuple[Path, str],
                             timeout_seconds: float, request: dict | None = None,
-                            owner_observation: dict | None = None) -> dict:
+                            owner_observation: dict | None = None,
+                            implementation: tuple[Path, str] | None = None) -> dict:
         """Named-unit root effects execute public Cluster code, never owner SDK.
 
         The caller holds the host operation/job locks and records uncertainty.
         This method does not create mounts or authorize a live interruption.
         """
-        if (action not in {'bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce', 'bootstrap-select', 'bootstrap-start'}
+        if (action not in {'bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce', 'bootstrap-select', 'bootstrap-start', 'bootstrap-recover-start'}
                 or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 60
                 or (action == 'bootstrap-inspect') != (request is None)
-                or action != 'bootstrap-inspect' and owner_observation is not None):
+                or action != 'bootstrap-inspect' and owner_observation is not None
+                or (action == 'bootstrap-recover-start') != (implementation is not None)):
             raise OnboardingError('receiving_guest_service_request_required')
         deadline_ns = time.monotonic_ns() + int(timeout_seconds * 1_000_000_000)
         if not self._ceremony(plan).authorize(plan):
@@ -1127,6 +1150,17 @@ class HostBackend:
             raise OnboardingError('qualified_onboarding_candidate_mount_required')
         arguments = ['--action', action, '--code', str(base), *runtime_args,
             '--plan', '/home/agent/.onboarding-input/plan.json']
+        if implementation is not None:
+            # Updating this control-plane implementation does not select or
+            # restart the target body's already running receiving code.
+            if self.config.code is None:
+                raise OnboardingError('qualified_guest_service_implementation_required')
+            onboarding_code_successor.selection(implementation[0], implementation[1],
+                self.config.code, self.config.release_digest, uid=os.geteuid())
+            code, _, implementation_mounts = self._runtime_paths(plan, base, candidate=implementation)
+            if not self._mounted(plan, implementation_mounts, deadline_ns=deadline_ns):
+                raise OnboardingError('qualified_onboarding_candidate_mount_required')
+            arguments += ['--implementation-code', str(code), '--implementation-digest', implementation[1]]
         for flag, value, limit in (('--bootstrap-request-json', request, 65536),
                                    ('--owner-observation-json', owner_observation, 2 * 1024**2)):
             if value is not None:

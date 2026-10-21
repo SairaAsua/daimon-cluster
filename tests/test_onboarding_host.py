@@ -1,6 +1,8 @@
 """Typed substrate commands preserve foreign bodies and reconcile partial creation."""
 import copy
 import json
+import os
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +28,21 @@ def test_only_typed_context_install_has_the_large_archive_deadline(monkeypatch):
     HostBackend._run(['exec', 'dm-fixture', '--', 'python3', 'execute', 'memory', '--home', '/home/agent'])
     HostBackend._run(['list', '--format=json'])
     assert calls == [7200, 1800, 1800]
+
+
+@pytest.mark.parametrize('timeout', [False, True])
+def test_bounded_owner_transport_distinguishes_timeout_from_launch_failure(monkeypatch, timeout):
+    from clusterctl import onboarding_host
+    def fail(*args, **kwargs):
+        if timeout:
+            raise onboarding_host.subprocess.TimeoutExpired('private argv', 1, stderr='private credential')
+        raise OSError('private path or credential')
+    monkeypatch.setattr(onboarding_host.subprocess, 'run', fail)
+    code = 'receiving_host_deadline_expired' if timeout else 'receiving_host_launch_failed'
+    with pytest.raises(OnboardingError, match='^' + code + '$'):
+        HostBackend._run(['exec', 'dm-fixture', '--', 'clusterctl.onboarding_owner_control'], timeout_seconds=1)
+    with pytest.raises(OnboardingError, match='^onboarding_host_operation_failed$'):
+        HostBackend._run(['list', '--format=json'], timeout_seconds=1)
 
 
 class IncusFixture:
@@ -309,13 +326,14 @@ def candidate_call_fixture(tmp_path, monkeypatch):
     return backend, value, run, candidate, calls
 
 
-def test_host_probes_exact_mounted_candidate_without_selecting_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize('current_native', [False, True])
+def test_host_probes_exact_mounted_candidate_without_selecting_it(tmp_path, monkeypatch, current_native):
     backend, value, _, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
     config = backend.config
     original = {path: path.read_bytes() for path in candidate[0].rglob('*') if path.is_file()}
     monkeypatch.setattr(backend, '_runtime_selection', lambda _: pytest.fail('active selection used for candidate'))
     result = backend._target_call(value, 'admitted-running', candidate=candidate,
-        observation_timeout_seconds=5, require_loaded=True)
+        observation_timeout_seconds=5, require_loaded=True, current_native=current_native)
     assert result == {'observed': True} and backend.config is config
     assert len(calls) == 1
     argv, options = calls[0]
@@ -328,6 +346,7 @@ def test_host_probes_exact_mounted_candidate_without_selecting_it(tmp_path, monk
     assert argv[argv.index('--runtime-digest') + 1] == candidate[1]
     assert argv[argv.index('--runtime-code') + 1].endswith(candidate[1])
     assert '--require-loaded' in argv
+    assert ('--current-native' in argv) is current_native
     assert 0 < float(argv[argv.index('--observation-timeout-seconds') + 1]) <= 5
     assert 0 < options['timeout_seconds'] <= 5
     assert original == {path: path.read_bytes() for path in original}
@@ -501,6 +520,46 @@ def test_host_root_service_route_never_executes_private_sdk_or_installer(tmp_pat
     assert 0 < bounds['timeout_seconds'] <= 5
 
 
+@pytest.mark.parametrize('change', [None, 'unmounted', 'changed-code', 'missing-implementation'])
+def test_managed_start_recovery_uses_qualified_root_helper_without_changing_target(tmp_path, monkeypatch, change):
+    from clusterctl import onboarding_code_successor
+    backend, value, run, candidate, calls = candidate_call_fixture(tmp_path, monkeypatch)
+    implementation_path = tmp_path / 'root-implementation'
+    shutil.copytree(candidate[0], implementation_path)
+    (implementation_path / 'clusterctl/onboarding_target.py').write_text('# qualified maintenance successor\n')
+    # Re-seal the fixture as a distinct compatible public-code generation.
+    from clusterctl import onboarding_release
+    profile = json.loads((implementation_path / 'release.json').read_bytes())['profile']
+    (implementation_path / 'release.json').unlink()
+    implementation = (implementation_path, onboarding_release.seal(implementation_path, profile))
+    onboarding_code_successor.selection(implementation_path, implementation[1],
+        backend.config.code, backend.config.release_digest, uid=os.geteuid())
+    guest_implementation = '/opt/daimon-onboarding-runtime/' + implementation[1]
+    if change != 'unmounted':
+        run.instances[0]['expanded_devices']['maintenance-helper'] = dict(type='disk',
+            source=str(implementation_path), path=guest_implementation, readonly='true', shift='true')
+    if change == 'changed-code':
+        (implementation_path / 'clusterctl/onboarding_target.py').write_text('# unqualified overwrite\n')
+    options = dict(candidate=candidate, timeout_seconds=5, request={'recovery': 'synthetic'})
+    if change != 'missing-implementation':
+        options['implementation'] = implementation
+    if change:
+        with pytest.raises(OnboardingError):
+            backend._guest_service_call(value, 'bootstrap-recover-start', **options)
+        assert not calls
+        return
+    assert backend._guest_service_call(value, 'bootstrap-recover-start', **options) == {'observed': True}
+    argv = calls[0][0]
+    assert argv[:6] == ['exec', 'dm-eko', '--user', '0', '--group', '0']
+    assert argv[argv.index('--') + 1] == '/usr/bin/python3'
+    assert argv[argv.index('--runtime-code') + 1] == '/opt/daimon-onboarding-runtime/' + candidate[1]
+    assert argv[argv.index('--runtime-digest') + 1] == candidate[1]
+    assert argv[argv.index('--implementation-code') + 1] == guest_implementation
+    assert argv[argv.index('--implementation-digest') + 1] == implementation[1]
+    assert guest_implementation in argv[:argv.index('--action')]
+    assert not any('/venv/' in part for part in argv)
+
+
 @pytest.mark.parametrize('phase', ['freeze', 'stage', 'publish'])
 def test_host_bootstrap_rejects_unqualified_or_incomplete_parameters_before_dispatch(tmp_path, phase):
     _, value, run, backend = configured(tmp_path)
@@ -562,3 +621,20 @@ def test_incus_stdin_is_bounded_and_never_routed_through_a_shell(monkeypatch):
     with pytest.raises(OnboardingError, match='invalid_receiving_control_request'):
         HostBackend._run(['exec', 'fixture'], input_data='x' * (being_seed.MAX_SELECTION + 1))
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('payload,expected', [
+    ('{"error":"receiving_control_process_changed"}', 'receiving_control_process_changed'),
+    ('{"error":"/private/credential"}', 'onboarding_host_operation_failed'),
+    ('{"error":[]}', 'onboarding_host_operation_failed'),
+    ('{"error":"receiving_control_process_changed","extra":"private"}', 'onboarding_host_operation_failed'),
+])
+def test_owner_control_transport_retains_only_closed_public_diagnostics(monkeypatch, payload, expected):
+    from types import SimpleNamespace
+    monkeypatch.setattr('clusterctl.onboarding_host.subprocess.run', lambda *args, **kwargs:
+        SimpleNamespace(returncode=1, stdout='', stderr=payload))
+    with pytest.raises(OnboardingError, match='^' + expected + '$'):
+        HostBackend._run(['exec', 'dm-fixture', '--', '/approved/python',
+                          'clusterctl.onboarding_owner_control'], timeout_seconds=1)
+    with pytest.raises(OnboardingError, match='^onboarding_host_operation_failed$'):
+        HostBackend._run(['list', '--format=json'], timeout_seconds=1)

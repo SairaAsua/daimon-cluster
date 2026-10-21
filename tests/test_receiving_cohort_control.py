@@ -274,7 +274,7 @@ def fixture(tmp_path):
     return path, original, runtime, owners, journal, row['operation_id']
 
 
-def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profile='source', assessment_fault=None, tooling_profile='matrix-only'):
+def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profile='source', assessment_fault=None, tooling_profile='matrix-only', host_configuration=None):
     """Fake RPC/import/load seams; actual protected manifest and journal."""
     from types import MethodType
     from tests.test_receiving_update_preflight import fixture as reader_fixture, call as qualify_reader
@@ -397,8 +397,10 @@ def activation_fixture(tmp_path, *, replacement=False, exit_observed=True, profi
     elif assessment_fault is not None:
         recipes['eko']['prepared']['assessment'][assessment_fault]='0'*64
     row=plan_update(journal,manifest_digest=digest(manifest),target='receiving:activation-fixture',
-        expected_precondition=dict(senders=frozen_senders,receiver_selections=before),
-        intended_transition={'cohort_activation':dict(manifest_path=str(manifest_path),manifest_uid=os.geteuid(),
+        expected_precondition=dict(senders=frozen_senders,receiver_selections=before,tribe_ref='tribe:fixture',
+            **({} if host_configuration is None else {'host_configuration':host_configuration})),
+        intended_transition={**({} if host_configuration is None else {'host_runtime':{}}),
+            'cohort_activation':dict(manifest_path=str(manifest_path),manifest_uid=os.geteuid(),
             roster_sha256='5'*64,expires_at_ms=until,observation_window_ms=60000,receivers=recipes)},
         audit_identity={'actor':'fixture'})
     controller=CohortController(journal,row['operation_id'],owners)
@@ -558,6 +560,99 @@ def test_lost_replacement_revoke_reply_reconciles_exact_request(tmp_path,monkeyp
     controller.activate()
     assert all(owner.effects==3 for owner in owners.values())
     assert journal.get(identifier)['runtime_observation']['sender_replacements']['eko']==retained['eko']
+
+
+def test_accepted_replacement_barrier_reuses_fresh_ack_without_rpc_or_write(tmp_path, monkeypatch):
+    controller, owners, journal, identifier = activation_fixture(tmp_path, replacement=True)
+    controller.prepare_activation()
+    row = journal.get(identifier)
+    plan, manifest = controller._activation(row)
+    observations = {}
+    records = controller._adoption_round(plan, manifest, observations=observations)
+    def unexpected(*args, **kwargs):
+        pytest.fail('acknowledged replacement control or journal write repeated')
+    monkeypatch.setattr(journal, 'advance', unexpected)
+    for owner in owners.values():
+        monkeypatch.setattr(owner, 'prepare_apply_control', unexpected)
+    assert controller._activation_barrier(row, plan, records, observations) == row
+
+
+@pytest.mark.parametrize('fault', ['gate', 'process', 'command', 'command-digest', 'request-digest'])
+def test_accepted_replacement_change_refuses_without_replay(tmp_path, monkeypatch, fault):
+    controller, owners, journal, identifier = activation_fixture(tmp_path, replacement=True)
+    controller.prepare_activation()
+    row = journal.get(identifier)
+    plan, manifest = controller._activation(row)
+    observations = {}
+    records = controller._adoption_round(plan, manifest, observations=observations)
+    replacement = row['runtime_observation']['sender_replacements']['eko']
+    if fault == 'gate':
+        observations['eko']['gate']['head'] = '0'*64
+    elif fault == 'process':
+        observations['eko']['process']['start_ticks'] += 1
+        records['eko']['process']['start_ticks'] += 1
+    elif fault == 'command':
+        replacement['command']['channel_id'] = 'another'
+        replacement['accepted']['command_sha256'] = digest(replacement['command'])
+    elif fault == 'command-digest':
+        replacement['accepted']['command_sha256'] = '0'*64
+    else:
+        replacement['accepted']['request_sha256'] = '0'*64
+    def unexpected(*args, **kwargs):
+        pytest.fail('changed acknowledged replacement was replayed')
+    for owner in owners.values():
+        monkeypatch.setattr(owner, 'prepare_apply_control', unexpected)
+    with pytest.raises(OnboardingError, match='replacement_changed|barrier_changed'):
+        controller._activation_barrier(row, plan, records, observations)
+
+
+@pytest.mark.parametrize('fault', [None, 'gate', 'second-stale', 'reader-expired'])
+def test_slow_replacement_barrier_refreshes_once_without_replaying_controls(tmp_path, monkeypatch, fault):
+    from clusterctl import onboarding_receiving_update as module
+    from types import SimpleNamespace
+    controller, owners, journal, identifier = activation_fixture(tmp_path, replacement=True)
+    base_ms = time.time_ns() // 1_000_000
+    elapsed = [0]
+    monkeypatch.setattr(module, 'time', SimpleNamespace(
+        time_ns=lambda:base_ms*1_000_000 + elapsed[0], monotonic_ns=lambda:elapsed[0]))
+    rounds, controls, writes = [], [], []
+    adoption = controller._adoption_round
+    def observe(*args, **kwargs):
+        rounds.append(True)
+        records = adoption(*args, **kwargs)
+        if len(rounds) == 2:
+            if fault == 'gate':
+                kwargs['observations']['eko']['gate']['head'] = '0'*64
+            elif fault == 'second-stale':
+                elapsed[0] += 60_001_000_000
+        return records
+    monkeypatch.setattr(controller, '_adoption_round', observe)
+    advance = journal.advance
+    def record_write(*args, **kwargs):
+        writes.append(len(rounds))
+        return advance(*args, **kwargs)
+    monkeypatch.setattr(journal, 'advance', record_write)
+    for name, owner in owners.items():
+        apply = owner.prepare_apply_control
+        def slow(command, path, original=apply, who=name):
+            controls.append(who)
+            result = original(command, path)
+            if len(controls) == len(owners):
+                elapsed[0] += (300_001 if fault == 'reader-expired' else 60_001)*1_000_000
+            return result
+        monkeypatch.setattr(owner, 'prepare_apply_control', slow)
+    if fault is None:
+        activation = controller.prepare_activation()
+        assert all(record['observed_at_ms'] == base_ms + 60_001 for record in activation['records'].values())
+        assert all(reader['expires_at_ms'] == journal.get(identifier)['intended_transition']['cohort_activation']['expires_at_ms']
+                   for reader in activation['readers'])
+        assert writes.count(2) == 1, 'only the final activation is written after refresh'
+    else:
+        with pytest.raises(OnboardingError, match='replacement_changed|observation_expired'):
+            controller.prepare_activation()
+        assert 2 not in writes
+    assert len(rounds) == (1 if fault == 'reader-expired' else 2)
+    assert sorted(controls) == sorted(owners)
 
 
 def test_completed_observation_window_covers_the_first_receiver_too(tmp_path,monkeypatch):

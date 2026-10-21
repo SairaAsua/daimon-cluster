@@ -394,11 +394,24 @@ def test_matching_prefix_without_qualified_startup_must_reexec_before_loading_bo
     assert commands[0][1][1:4] == ['-B', '-I', '-S']
 
 
-def test_closed_tree_publication_persists_nested_directories_before_receipt(tmp_path, monkeypatch):
+@pytest.mark.parametrize('durability', ['filesystem', 'per-file'])
+def test_closed_tree_publication_persists_nested_directories_before_receipt(tmp_path, monkeypatch, durability):
     _, _, output, result, home, _ = fixture(tmp_path)
     parameters = onboarding_code_successor.sdk_parameters(output, uid=os.geteuid())
     venv = onboarding_sdk.install(home, output, result['runtime_digest'], code_uid=os.geteuid(), **parameters)
+    if durability == 'per-file':
+        from types import SimpleNamespace
+        monkeypatch.setattr(onboarding_sdk.ctypes, 'CDLL', lambda *args, **kwargs: SimpleNamespace())
     synced = []
+    trees = []
+    sync_tree = onboarding_sdk._sync_import_tree
+    def tree_observed(path, monitor):
+        assert (path / 'daimon_matrix/__init__.py').is_file()
+        assert not (venv.parent / 'runtime-imports').exists()
+        assert not (venv.parent / 'runtime-imports.json').exists()
+        sync_tree(path, monitor)
+        trees.append(path)
+    monkeypatch.setattr(onboarding_sdk, '_sync_import_tree', tree_observed)
     fsync = onboarding_sdk.os.fsync
     def observed(descriptor):
         p = Path('/proc/self/fd/' + str(descriptor)).resolve()
@@ -407,6 +420,9 @@ def test_closed_tree_publication_persists_nested_directories_before_receipt(tmp_
         return fsync(descriptor)
     monkeypatch.setattr(onboarding_sdk.os, 'fsync', observed)
     root = onboarding_sdk.runtime_imports(venv, output, code_uid=os.geteuid(), **parameters)
-    assert any(p.name == 'daimon_matrix' for p in synced)
-    assert any(p.name.startswith('runtime-imports-') for p in synced)
+    if trees:
+        assert durability == 'filesystem' and len(trees) == 1
+    else:
+        assert any(p.name == 'daimon_matrix' for p in synced)
+        assert any(p.name.startswith('runtime-imports-') for p in synced)
     assert venv.parent in synced and (root.parent / 'runtime-imports.json').exists()

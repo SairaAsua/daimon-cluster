@@ -4,57 +4,44 @@ Architecture/profile navigation is
 [Matrix current architecture](https://github.com/AlterMundi/daimon-matrix/blob/main/docs/current-architecture.md).
 Current selections below supersede the explicitly historical qualification.
 
-## Current milestone work
+## Current receiving maintenance — 2026-10-18
 
-Matrix [milestone6 / #336](https://github.com/AlterMundi/daimon-matrix/issues/336)
-is active. Cluster [PR242](https://github.com/nicoechaniz/daimon-cluster/pull/242)
-merged the maintained Source/guest/cohort update controllers and their current
-qualification record; Matrix [PR352](https://github.com/AlterMundi/daimon-matrix/pull/352)
-contains the corresponding SDK candidate and remains draft. The Cluster merge
-and isolated forward/compatible rollback qualification are not live-selection receipts.
-The existing three-body production group below stays selected.
-The candidate SDK pin is `0dc0b555939b16a1150a220a366a6911a5ae9c28`, including owner-local #355
-recovery without rebirth; it is not the selected production SDK. Qualification
-and actual receiving adoption remain in the current PR/work record.
+CompAII, Eko and Oliva now load receiving helper `6dffe887` with unchanged
+Matrix `9b2b8ec2c455d3bf316bc00dc9e1bac44e9d5094`, SDK `53c4ee01` and
+wheel `5137b7a7`. Root coordinator `2c883c9f` supplies the maintained update
+and activation-only recovery; its version is separate from body/observer code.
+Matrix PR364 merged as `76596f9`; Cluster PR276–280 merged through `ed78705f`.
 
-Use the current operation/PR evidence and the execution procedure in
-[the receiving update runbook](docs/runbooks/tribu-sdk-successor.md).
-Continue the same retained operation from its next missing effect. Do not turn
-evidence labels into additional manual procedures, reimplement completed stages,
-replay private trial scripts, repeat valid reviews or recreate identities/fixtures
-for routine software corrections. Prepare expiring controls only when needed. Close the receiving/update/compatible rollback gap first;
-I/O, status integration and future-member admission remain in the full milestone.
-Full CI uses one Python3.13.5 job with a30-minute limit. Run38728293267 exhausted
-the former20-minute cap at75% of the fail-fast suite without reporting a test
-failure. This job budget does not change any receiving/native freshness deadline.
+The supported operation completed actual controlled loads, native tooling and
+positive selection on all three VPS bodies. Parent `077e3756` follows explicit
+cohort `080a445c`, preserving failed cohorts, original host CAS and expiry. The
+scoped onboarding worker is restored active. A new native group message
+`dfafe493-0ceb-41e8-91f5-e0b893cb33d9` has both Eko/Oliva intake ACKs and automatic
+signed delivered receipts, Source's authored copy, and one confirmed Tribu echo.
+Three unavailable siblings remain explicit; no model or uncertain-message replay
+was used. [Current receiving and communication evidence](https://github.com/AlterMundi/daimon-matrix/issues/374#issuecomment-6251542792).
 
-## Current communication target — 2026-10-13
+The unchanged SDK reuses its accepted six native/semantic/ACK legs, three echoes
+and exact installed 435-case qualification 39065681258. Root maintenance/recovery
+CI 39138465505 passed 538 cases/2 skips. The compatible old-body/new-observer
+composition and prior valid restart/rollback proof are retained. No production
+backward cutover, obsolete authority or historical journal restoration occurred.
 
-CompAII, Eko and Oliva now use one signed membership group, demonstrated with
-actual three-body semantic receipts and connected replies. Matrix PR #330 is
-merged; the selected SDK source is `a1a70b6420692d19f85ad0edb945cba00c3f5459`.
-Group selectors replace the former Source/member and temporary repair defaults.
-Admission means invitation and signed acceptance in the existing Tribe, never
-another founder/member Tribe or per-pair proxy enrollment. The maintained worker
-recognizes signed receiving group selections and reports a missing enrollment
-explicitly; it must not reconstruct archived links. Legacy directed repair is
-an explicit operator API only, outside worker execution. Current group sends
-freeze all active Root bodies and report unavailable routes honestly. Delivery
-receipts establish authenticated intake, not model reading or automatic reply.
-No model wakeup or native session restart accompanies this deployment.
+Follow [the maintained runbook](docs/runbooks/tribu-sdk-successor.md), not dated
+phase scripts. Preparation leaves services active; apply resumes missing effects
+and restores the bound worker's original state. A fenced activation uses a linked
+`reassess` successor with current empty gates, original lifecycle/tooling evidence,
+unchanged artifacts/authority/provenance and original expiry/window. Never reset
+failed intent, repeat a body lifecycle to recover observation, or remint messages.
+New bounded Source/guest diagnostics distinguish timeout from launch failure; the
+earlier generic failure's original class remains unknown. Cold native/tooling
+observations still have variable cost; no instantaneous-cutover claim is made.
 
-Matrix #332 also corrected outer-carrier intake: the group no longer signs a
-semantic receipt and then rejects its wrapper as a plain sealed envelope. Real
-three-VPS delivery now has retained recipient-intake ACKs, signed receipts and
-one confirmed Tribu speech (message795). Exact retry retains the same message
-and audience. History and compatible predecessor software remain intact.
-
-Current SDK/contract pin: `a1a70b6420692d19f85ad0edb945cba00c3f5459`, published
-by Cluster PR #228. Receiving generations preserve the original seed, context
-and old SDK. The live code successor was selected without human-service restart.
-Future portal admission into the existing group remains #227; Source I/O
-recovery remains Matrix #310 / Telecodex PR #85. No new automatic peer attention
-is selected. Current evidence reconciled 2026-10-13.
+Broader Matrix milestone6/#336, I/O acceptance, external bodies and complete
+future-member admission remain separate unfinished work. Cluster PR265 and Matrix
+PR369 are parked. No autonomous peer attention, global Stop or native
+Codex/Telegram restart follows from this maintenance result. Warn the human
+before actual service interruption; each global Stop needs fresh explicit consent.
 
 ## Historical qualification checkpoint — 2026-10-07
 

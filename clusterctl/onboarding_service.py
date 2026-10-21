@@ -18,7 +18,7 @@ from pathlib import Path
 from collections.abc import Callable
 
 from . import being_seed, onboarding_code_successor, onboarding_release
-from .onboarding import OnboardingError, private_directory, refusal_diagnostic, validate_plan
+from .onboarding import OnboardingError, digest, private_directory, refusal_diagnostic, validate_plan
 
 UNIT = 'daimon-onboarding-matrix.service'
 _selection_owners = threading.local()
@@ -355,6 +355,78 @@ class GuestServiceBootstrap:
             self.manager.bind_process(process, dict(manager=values))
             presence.verify()
         return process
+
+    def recover_start(self, recovery: dict, *, deadline_ns: int) -> dict:
+        """Observe one exact managed successor; never repeat a lifecycle effect."""
+        from .owner_process import ParentProcessPresence, observe_process_exit, validate_process
+        required = {'schema', 'operation_id', 'bootstrap', 'started_sha256', 'successor',
+                    'implementation_sha256', 'expires_at_ms'}
+        if (not isinstance(recovery, dict) or set(recovery) != required
+                or recovery['schema'] != 'cluster-guest-start-recovery/v1'
+                or str(uuid.UUID(recovery['operation_id'])) != recovery['operation_id']
+                or any(re.fullmatch('[0-9a-f]{64}', recovery[key]) is None
+                       for key in ('started_sha256', 'implementation_sha256'))
+                or type(recovery['expires_at_ms']) is not int
+                or recovery['expires_at_ms'] <= time.time_ns() // 1_000_000):
+            raise OnboardingError('receiving_guest_start_recovery_required')
+        successor = recovery['successor']
+        if not isinstance(successor, dict) or set(successor) != {'process', 'admission_parent', 'service'}:
+            raise OnboardingError('receiving_guest_start_recovery_required')
+        for key in ('process', 'admission_parent'):
+            validate_process(successor[key])
+        with selection_lock(self.manager.unit):
+            self._budget(deadline_ns)
+            root, previous, candidate = self._request(recovery['bootstrap'])
+            started, selected = self._retained(root, 'started'), self._retained(root, 'selected')
+            if (started is None or selected is None or self._retained(root, 'quiesced') is None
+                    or digest(started) != recovery['started_sha256']
+                    or selected['selected_sha256'] != hashlib.sha256(candidate).hexdigest()):
+                raise OnboardingError('receiving_guest_start_recovery_conflict')
+            old = started['admission_parent']
+            if (successor['admission_parent'] == old
+                    or successor['admission_parent']['boot_id'] != old['boot_id']
+                    or successor['admission_parent']['uid'] != old['uid']
+                    or not observe_process_exit(old)):
+                raise OnboardingError('receiving_guest_start_predecessor_not_exited')
+            with ParentProcessPresence(successor['process']) as presence:
+                current = self.manager.inspect(deadline_ns=deadline_ns)
+                values, original = current['manager'], started['manager']
+                stable = set(original) - {'MainPID', 'InvocationID', 'Result'}
+                if (presence.process != successor['admission_parent']
+                        or current != successor['service']
+                        or current['unit_sha256'] != selected['selected_sha256']
+                        or current.get('dropins', {}) != previous['service'].get('dropins', {})
+                        or values['ActiveState'] != 'active' or values['SubState'] != 'running'
+                        or set(values) != set(original)
+                        or any(values[key] != original[key] for key in stable)
+                        or not values['InvocationID'] or values['InvocationID'] == original['InvocationID']
+                        or values['MainPID'] != str(presence.process['pid'])):
+                    raise OnboardingError('receiving_guest_start_successor_changed')
+                scope = self.manager.bind_admitted_process(successor, current)
+                if (scope['process'] != successor['process']
+                        or scope['admission_parent'] != successor['admission_parent']):
+                    raise OnboardingError('receiving_guest_start_successor_changed')
+                result = dict(schema='cluster-guest-start-successor/v1',
+                    recovery_operation_id=recovery['operation_id'], recovery_sha256=digest(recovery),
+                    bootstrap_sha256=digest(recovery['bootstrap']), started_sha256=digest(started),
+                    implementation_sha256=recovery['implementation_sha256'],
+                    predecessor_parent=old, predecessor_exited=True, scope=scope,
+                    manager=values, unit_sha256=current['unit_sha256'],
+                    receiving_readiness='unobserved')
+                if (self.manager.inspect(deadline_ns=deadline_ns) != current
+                        or recovery['expires_at_ms'] <= time.time_ns() // 1_000_000):
+                    raise OnboardingError('receiving_guest_start_successor_changed')
+                presence.verify()
+                self._budget(deadline_ns)
+                directory = private_directory(root/'start-recoveries', create=True)
+                directory = private_directory(directory/recovery['operation_id'], create=True)
+                self._record(directory/'request.json', recovery)
+                result = self._record(directory/'observed.json', result)
+                presence.verify()
+                if self.manager.inspect(deadline_ns=deadline_ns) != current:
+                    raise OnboardingError('receiving_guest_start_successor_changed')
+                self._budget(deadline_ns)
+                return result
 
     def execute(self, action: str, request: dict, *, deadline_ns: int) -> dict:
         from .owner_process import PresenceError, ProcessPresence, observe_process_exit
@@ -711,9 +783,11 @@ def main(argv=None) -> int:
     parser.add_argument('--plan', type=Path, required=True)
     parser.add_argument('--runtime-code', type=Path)
     parser.add_argument('--runtime-digest')
+    parser.add_argument('--implementation-code', type=Path)
+    parser.add_argument('--implementation-digest')
     parser.add_argument('--messaging-application', type=Path)
     parser.add_argument('--action', choices=('install', 'bootstrap-inspect', 'bootstrap-validate', 'bootstrap-quiesce',
-        'bootstrap-select', 'bootstrap-start'), default='install')
+        'bootstrap-select', 'bootstrap-start', 'bootstrap-recover-start'), default='install')
     parser.add_argument('--bootstrap-request-json')
     parser.add_argument('--owner-observation-json')
     parser.add_argument('--timeout-seconds', type=float, default=30)
@@ -731,6 +805,15 @@ def main(argv=None) -> int:
         if (args.runtime_code is not None
                 and args.runtime_code != Path('/opt/daimon-onboarding-runtime') / args.runtime_digest):
             raise OnboardingError('qualified_guest_service_required')
+        if args.action == 'bootstrap-recover-start':
+            if (args.implementation_code is None or args.implementation_digest is None
+                    or args.implementation_code != Path('/opt/daimon-onboarding-runtime') / args.implementation_digest
+                    or Path(__file__).resolve().parents[1] != args.implementation_code.resolve()):
+                raise OnboardingError('qualified_guest_service_implementation_required')
+            onboarding_code_successor.selection(args.implementation_code, args.implementation_digest,
+                args.code, plan['release_digest'], uid=0)
+        elif args.implementation_code is not None or args.implementation_digest is not None:
+            raise OnboardingError('qualified_guest_service_implementation_required')
         if args.action != 'install':
             stage = args.action
             if (not math.isfinite(args.timeout_seconds) or not 0 < args.timeout_seconds <= 60
@@ -749,10 +832,15 @@ def main(argv=None) -> int:
                         or len(args.bootstrap_request_json.encode()) > 65536):
                     raise OnboardingError('receiving_guest_service_request_required')
                 request = json.loads(args.bootstrap_request_json)
-                from .onboarding import digest
-                if request.get('plan_digest') != digest(plan):
+                bootstrap = request.get('bootstrap', {}) if args.action == 'bootstrap-recover-start' else request
+                if bootstrap.get('plan_digest') != digest(plan):
                     raise OnboardingError('receiving_guest_service_request_required')
-                result = controller.execute(args.action.removeprefix('bootstrap-'), request, deadline_ns=deadline_ns)
+                if args.action == 'bootstrap-recover-start':
+                    if request.get('implementation_sha256') != args.implementation_digest:
+                        raise OnboardingError('qualified_guest_service_implementation_required')
+                    result = controller.recover_start(request, deadline_ns=deadline_ns)
+                else:
+                    result = controller.execute(args.action.removeprefix('bootstrap-'), request, deadline_ns=deadline_ns)
             print(json.dumps(result))
             return 0
         if args.bootstrap_request_json is not None or args.owner_observation_json is not None:

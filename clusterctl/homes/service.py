@@ -201,10 +201,12 @@ class Backend:
 
 
 class Application:
-    def __init__(self, config, authority, sessions, *, backends=None, passkey_rp_id=None, client_example=False, style_provider=None, auth_origin=None, google_client=None, homemaker_source=None, homemaker_state=None, homemaker_home=None, homemaker_returns=(), miniapp_routes=None, agenda_state=None, agenda_backend=None, agenda_google_client=None):
+    def __init__(self, config, authority, sessions, *, backends=None, passkey_rp_id=None, client_example=False, style_provider=None, auth_origin=None, google_client=None, homemaker_source=None, homemaker_state=None, homemaker_home=None, homemaker_returns=(), miniapp_routes=None, miniapp_receivers=None, agenda_state=None, agenda_backend=None, agenda_google_client=None):
         self.styles = StyleConsumer(style_provider, authority, config["homes"]) if style_provider else None
         from .launcher import validate_launch_routes
         self.miniapp_routes=validate_launch_routes(miniapp_routes)
+        from .applications import receiver_routes
+        self.miniapp_receivers=receiver_routes(miniapp_receivers, config["homes"])
         self.sso = None
         self.designs = None
         self.agenda = None
@@ -824,6 +826,23 @@ def handler(app, *, owner=False):
                         "passkeys": bool(app.passkeys) and not vpn,
                         **({'shared_login':True} if app.sso and not vpn else {}),
                     })
+                elif path == "/access/identity":
+                    # Trusted same-origin applications reuse this session. The
+                    # receiving application still authorizes its own operations.
+                    if vpn or self.headers.get("Authorization") or not subject or subject.kind != 'human':
+                        self.respond(401, {"detail": "human_browser_required"})
+                        return
+                    session = app.sessions.resolve(parent_token, home=home, origin=origin)
+                    if not session:
+                        self.respond(401, {"detail": "human_browser_required"})
+                        return
+                    self.respond(200, {
+                        "contract": "dm.home-session/v1",
+                        "origin": origin,
+                        "expires": session['expires'],
+                        "actor": {"ref": subject.ref, "revision": subject.revision,
+                                  "kind": subject.kind, "name": subject.name},
+                    })
                 elif path == "/access-client.js":
                     self.respond(200, (Path(__file__).parent / "assets" / "access-client.js").read_bytes(),
                                  "text/javascript; charset=utf-8")
@@ -1284,6 +1303,7 @@ def main():
     parser.add_argument('--homemaker-home', help='Registered home serving the owner-operated multi-pair application')
     parser.add_argument('--homemaker-return', action='append', default=[], help='Additional exact registered consumer return URL')
     parser.add_argument('--miniapp-routes', help='Operator-selected public same-origin destination map JSON')
+    parser.add_argument('--miniapp-receivers', help='Verified same-origin per-pair application routes JSON')
     parser.add_argument('--agenda-state', help='Private optional Vikunja adapter state directory')
     parser.add_argument('--agenda-backend', help='Exact loopback origin of a pinned, private Vikunja instance')
     parser.add_argument('--agenda-google-client', help='Private optional Google Calendar OAuth client; separate Calendar consent')
@@ -1305,6 +1325,7 @@ def main():
                       homemaker_source=args.homemaker_source, homemaker_state=args.homemaker_state,
                       homemaker_home=args.homemaker_home, homemaker_returns=args.homemaker_return,
                       miniapp_routes=json.loads(protected_read(Path(args.miniapp_routes))) if args.miniapp_routes else None,
+                      miniapp_receivers=json.loads(protected_read(Path(args.miniapp_receivers))) if args.miniapp_receivers else None,
                       agenda_state=args.agenda_state, agenda_backend=args.agenda_backend,
                       agenda_google_client=args.agenda_google_client)
     servers = [
