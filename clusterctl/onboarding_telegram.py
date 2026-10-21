@@ -37,9 +37,13 @@ CONVERSATION_BINARY = 'ace52375e49c09360a39a62c427bf4567f38b33d6d1713f8aa910b016
 RETAINED_GOAL_COMMIT = 'e54b5393c24923c3eef93f8ebc82e2f01dedac05'
 RETAINED_GOAL_ARCHIVE = 'df5eb49cb5e8036473cc2c2363ea869b1b3acdf0305a91a5d9faab018eaff787'
 RETAINED_GOAL_BINARY = 'a3bac1546cd69219bb6be1176541ca879f7864df108b6ec047d6de13f5cfe589'
-COMMIT = '1983a929632cb62ea260c96079989152553a45e3'
-ARCHIVE = '4f5f06f423d2d71356ef128582621bfd6330c4fd55b8e3374e8c8bca2c222cb8'
-BINARY = 'f0e7fa2f03b651489c41f3cf25507715dadcff102e09d4280988fd2a53006250'
+RETAINED_SESSIONS_COMMIT = '1983a929632cb62ea260c96079989152553a45e3'
+RETAINED_SESSIONS_ARCHIVE = '4f5f06f423d2d71356ef128582621bfd6330c4fd55b8e3374e8c8bca2c222cb8'
+RETAINED_SESSIONS_BINARY = 'f0e7fa2f03b651489c41f3cf25507715dadcff102e09d4280988fd2a53006250'
+COMMIT = '19fde1b126bfc5791399ce9d2ca44d6b20331e46'
+ARCHIVE = '1b057a0636f3c1f83221ef48aef80fff2e0b771b98f4d37e50647e4aeb6b9e63'
+BINARY = 'a62b01a39e6548348d043b5b1ed08e7fc2dc8188c92f5286cea61b8d37841e48'
+FEATURES = '--no-default-features'
 SCHEMA = 'cluster-onboarding-telegram/v1'
 UNIT = 'daimon-onboarding-telegram.service'
 NATIVE_UNIT = 'daimon-onboarding-codex.service'
@@ -50,7 +54,7 @@ def artifact(code: Path, *, uid: int) -> dict:
 
 
 def artifact_directory(directory: Path, *, uid: int) -> dict:
-    """Only explicitly qualified text binaries; labels never select software."""
+    """Only explicitly qualified binaries; labels never select software."""
     value = json.loads(onboarding_release.regular(directory / 'artifact.json', uid=uid, limit=65536))
     if not isinstance(value, dict):
         raise OnboardingError('qualified_telegram_binary_required')
@@ -64,7 +68,9 @@ def artifact_directory(directory: Path, *, uid: int) -> dict:
         (RETAINED_CURRENT_COMMIT, RETAINED_CURRENT_ARCHIVE, RETAINED_CURRENT_BINARY),
         (CONVERSATION_COMMIT, CONVERSATION_ARCHIVE, CONVERSATION_BINARY),
         (RETAINED_GOAL_COMMIT, RETAINED_GOAL_ARCHIVE, RETAINED_GOAL_BINARY),
-        (COMMIT, ARCHIVE, BINARY))]
+        (RETAINED_SESSIONS_COMMIT, RETAINED_SESSIONS_ARCHIVE, RETAINED_SESSIONS_BINARY))]
+    qualified.append(dict(commit=COMMIT, archive_sha256=ARCHIVE, binary_sha256=BINARY,
+                          rust_toolchain='1.95.0', features=FEATURES))
     binary = directory / 'telecodex'
     if (value not in qualified or binary.stat().st_mode & 0o111 != 0o111
             or hashlib.sha256(onboarding_release.regular(binary, uid=uid)).hexdigest() != value['binary_sha256']):

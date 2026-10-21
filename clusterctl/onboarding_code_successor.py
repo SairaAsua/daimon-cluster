@@ -134,7 +134,7 @@ def verify(code: Path, fingerprint: str, base: Path, base_fingerprint: str, *, u
         previous_telegram = onboarding_telegram.artifact(base, uid=uid)
         current_telegram = onboarding_telegram.artifact(code, uid=uid)
         if current_telegram['commit'] not in {onboarding_telegram.COMMIT,
-                onboarding_telegram.RETAINED_CURRENT_COMMIT} or previous_telegram == current_telegram:
+                onboarding_telegram.RETAINED_CURRENT_COMMIT, onboarding_telegram.RETAINED_SESSIONS_COMMIT} or previous_telegram == current_telegram:
             raise OnboardingError('qualified_telegram_successor_required')
         expected.update(schema=QUALIFIED_SDK_SCHEMA if qualified_sdk else TELEGRAM_SCHEMA,
             previous_telegram_digest=digest(previous_telegram), telegram_digest=digest(current_telegram))
@@ -211,7 +211,7 @@ def build(base: Path, base_fingerprint: str, source: Path, modules: tuple[str, .
         previous_telegram = onboarding_telegram.artifact(base, uid=os.geteuid())
         current_telegram = onboarding_telegram.artifact_directory(telegram, uid=os.geteuid())
         if current_telegram['commit'] not in {onboarding_telegram.COMMIT,
-                onboarding_telegram.RETAINED_CURRENT_COMMIT} or current_telegram == previous_telegram:
+                onboarding_telegram.RETAINED_CURRENT_COMMIT, onboarding_telegram.RETAINED_SESSIONS_COMMIT} or current_telegram == previous_telegram:
             raise OnboardingError('qualified_telegram_successor_required')
         marker.update(schema=QUALIFIED_SDK_SCHEMA if qualified_sdk else TELEGRAM_SCHEMA,
                       previous_telegram_digest=digest(previous_telegram),
