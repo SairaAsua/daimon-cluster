@@ -280,7 +280,7 @@ def test_sessions_release_preserves_goal_predecessor_and_rejects_mixed_pins(tmp_
     artifact = dict(commit=getattr(telegram, prefix + "COMMIT"),
                     archive_sha256=getattr(telegram, prefix + "ARCHIVE"),
                     binary_sha256=getattr(telegram, prefix + "BINARY"),
-                    rust_toolchain="1.95.0", features="--no-default-features")
+                    rust_toolchain="1.95.0", features="--no-default-features" if retained else telegram.FEATURES)
     manifest = tmp_path / "artifact.json"
     manifest.write_text(json.dumps(artifact))
     manifest.chmod(0o644)

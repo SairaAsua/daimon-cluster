@@ -90,7 +90,7 @@ def telegram_fixture(tmp_path, monkeypatch):
     (candidate / 'telecodex').chmod(0o755)
     (candidate / 'artifact.json').write_text(json.dumps(dict(commit=telegram.COMMIT,
         archive_sha256=telegram.ARCHIVE, binary_sha256=telegram.BINARY,
-        rust_toolchain='1.95.0', features='--no-default-features')))
+        rust_toolchain='1.95.0', features=telegram.FEATURES)))
     (candidate / 'artifact.json').chmod(0o644)
     return base, fingerprint, source, profile, candidate
 
@@ -105,7 +105,7 @@ def test_qualified_telegram_successor_changes_only_explicit_software(tmp_path, m
         value = json.loads((candidate / 'artifact.json').read_bytes())
         monkeypatch.setattr(telegram, 'RETAINED_CURRENT_BINARY', value['binary_sha256'])
         value.update(commit=telegram.RETAINED_CURRENT_COMMIT,
-            archive_sha256=telegram.RETAINED_CURRENT_ARCHIVE)
+            archive_sha256=telegram.RETAINED_CURRENT_ARCHIVE, features='--no-default-features')
         (candidate / 'artifact.json').write_text(json.dumps(value))
         expected_commit = telegram.RETAINED_CURRENT_COMMIT
     output = tmp_path / 'telegram-successor'
