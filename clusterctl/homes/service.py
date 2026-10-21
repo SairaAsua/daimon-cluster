@@ -811,6 +811,23 @@ def handler(app, *, owner=False):
                         "passkeys": bool(app.passkeys) and not vpn,
                         **({'shared_login':True} if app.sso and not vpn else {}),
                     })
+                elif path == "/access/identity":
+                    # Trusted same-origin applications reuse this session. The
+                    # receiving application still authorizes its own operations.
+                    if vpn or self.headers.get("Authorization") or not subject or subject.kind != 'human':
+                        self.respond(401, {"detail": "human_browser_required"})
+                        return
+                    session = app.sessions.resolve(parent_token, home=home, origin=origin)
+                    if not session:
+                        self.respond(401, {"detail": "human_browser_required"})
+                        return
+                    self.respond(200, {
+                        "contract": "dm.home-session/v1",
+                        "origin": origin,
+                        "expires": session['expires'],
+                        "actor": {"ref": subject.ref, "revision": subject.revision,
+                                  "kind": subject.kind, "name": subject.name},
+                    })
                 elif path == "/access-client.js":
                     self.respond(200, (Path(__file__).parent / "assets" / "access-client.js").read_bytes(),
                                  "text/javascript; charset=utf-8")

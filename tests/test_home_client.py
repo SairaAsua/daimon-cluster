@@ -53,3 +53,28 @@ def test_visitor_projection_and_opt_in_client_use_current_identity(system):
                 get('/access/status', Origin=origin)
             assert denied.value.code == 404
             denied.value.close()
+
+
+def test_application_identity_reuses_current_browser_and_revocation(system):
+    app, _ = system
+    token, _ = approved(app)
+    with serving(handler(app)) as root:
+        def get(**headers):
+            return urllib.request.urlopen(urllib.request.Request(root+'/access/identity',
+                headers={'Host':'one.example.test', **headers}))
+        for headers in ({}, {'Authorization':'Bearer '+token}):
+            with pytest.raises(urllib.error.HTTPError) as denied:
+                get(**headers)
+            assert denied.value.code == 401
+            denied.value.close()
+        with get(Cookie='__Host-home='+token) as response:
+            value=json.load(response)
+        assert value['contract']=='dm.home-session/v1'
+        assert value['origin']=='https://one.example.test'
+        assert value['actor']['ref']=='human'
+        assert token not in json.dumps(value)
+        app.sessions.revoke(home='one', token=token)
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            get(Cookie='__Host-home='+token)
+        assert denied.value.code==401
+        denied.value.close()
