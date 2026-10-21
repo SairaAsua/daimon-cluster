@@ -152,11 +152,11 @@ class HostConfig:
             telegram_code, telegram_digest = Path(value['telegram_code']), value['telegram_digest']
             onboarding_code_successor.verify(telegram_code, telegram_digest, code,
                                              value['release_digest'], uid=path.stat().st_uid)
-            from .onboarding_telegram import artifact, COMMIT, RETAINED_CURRENT_COMMIT
+            from .onboarding_telegram import artifact, COMMIT, RETAINED_CURRENT_COMMIT, RETAINED_SESSIONS_COMMIT
             # A Matrix successor preserves an already-qualified independent
             # Telegram selection; it does not require replacing that consumer.
             if artifact(telegram_code, uid=path.stat().st_uid)['commit'] not in {
-                    COMMIT, RETAINED_CURRENT_COMMIT}:
+                    COMMIT, RETAINED_CURRENT_COMMIT, RETAINED_SESSIONS_COMMIT}:
                 raise OnboardingError('qualified_telegram_successor_required')
         runtime_by_name = None
         if "runtime_by_name" in value:

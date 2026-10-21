@@ -268,23 +268,27 @@ def test_foreign_unit_is_preserved_before_any_upgrade_effect(tmp_path):
     assert unit.read_bytes() == b'An unrelated receiving service.' and not calls
 
 
-@pytest.mark.parametrize("retained", [False, True])
-def test_sessions_release_preserves_goal_predecessor_and_rejects_mixed_pins(tmp_path, monkeypatch, retained):
+@pytest.mark.parametrize("prefix", ["", "RETAINED_GOAL_", "RETAINED_SESSIONS_"])
+def test_release_preserves_predecessors_and_rejects_mixed_pins(tmp_path, monkeypatch, prefix):
     import hashlib
     from clusterctl import onboarding_telegram as telegram
     binary = b"qualified isolated text runtime fixture"
     (tmp_path / "telecodex").write_bytes(binary)
     (tmp_path / "telecodex").chmod(0o755)
-    prefix = "RETAINED_GOAL_" if retained else ""
     monkeypatch.setattr(telegram, prefix + "BINARY", hashlib.sha256(binary).hexdigest())
     artifact = dict(commit=getattr(telegram, prefix + "COMMIT"),
                     archive_sha256=getattr(telegram, prefix + "ARCHIVE"),
                     binary_sha256=getattr(telegram, prefix + "BINARY"),
-                    rust_toolchain="1.95.0", features="--no-default-features")
+                    rust_toolchain="1.95.0", features="--no-default-features" if prefix else telegram.FEATURES)
     manifest = tmp_path / "artifact.json"
     manifest.write_text(json.dumps(artifact))
     manifest.chmod(0o644)
     assert telegram.artifact_directory(tmp_path, uid=os.getuid()) == artifact
+    artifact["features"] = "--all-features"
+    manifest.write_text(json.dumps(artifact))
+    with pytest.raises(OnboardingError, match="qualified_telegram_binary_required"):
+        telegram.artifact_directory(tmp_path, uid=os.getuid())
+    artifact["features"] = "--no-default-features" if prefix else telegram.FEATURES
     artifact["archive_sha256"] = "0" * 64
     manifest.write_text(json.dumps(artifact))
     manifest.chmod(0o644)
