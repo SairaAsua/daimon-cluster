@@ -67,6 +67,13 @@ def test_remote_native_owner_and_current_pairing_revision(app, tmp_path):
             proxy.dispatch('one', owner, 'state', {}, native=True)
 
 
+def test_remote_keeps_the_real_gateway_browser_cookie_and_origin_boundary(app, tmp_path):
+    from tests.test_home_agenda import test_browser_cookie_origin_and_untrusted_scope_http
+    with remote(app, tmp_path) as (proxy, _, _, _):
+        app.agenda = proxy
+        test_browser_cookie_origin_and_untrusted_scope_http(app)
+
+
 def test_remote_calendar_binds_parent_without_forwarding_browser_cookie(app, tmp_path):
     with remote(app, tmp_path) as (proxy, core, _, _):
         human = app.authority.actor('human-one')
