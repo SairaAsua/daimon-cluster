@@ -201,7 +201,7 @@ class Backend:
 
 
 class Application:
-    def __init__(self, config, authority, sessions, *, backends=None, passkey_rp_id=None, client_example=False, style_provider=None, auth_origin=None, google_client=None, homemaker_source=None, homemaker_state=None, homemaker_home=None, homemaker_returns=(), miniapp_routes=None, miniapp_receivers=None, agenda_state=None, agenda_backend=None, agenda_google_client=None):
+    def __init__(self, config, authority, sessions, *, backends=None, passkey_rp_id=None, client_example=False, style_provider=None, auth_origin=None, google_client=None, homemaker_source=None, homemaker_state=None, homemaker_home=None, homemaker_returns=(), miniapp_routes=None, miniapp_receivers=None, agenda_state=None, agenda_backend=None, agenda_google_client=None, agenda_remote=None):
         self.styles = StyleConsumer(style_provider, authority, config["homes"]) if style_provider else None
         from .launcher import validate_launch_routes
         self.miniapp_routes=validate_launch_routes(miniapp_routes)
@@ -263,6 +263,11 @@ class Application:
             from .homemaker import Homemaker
             self.designs = Homemaker(self, homemaker_source, homemaker_state)
             self.styles = StyleConsumer(self.designs, authority, self.homes)
+        if agenda_remote:
+            if agenda_state or agenda_backend or agenda_google_client:
+                raise ValueError('one_agenda_deployment_required')
+            from .agenda_remote import RemoteAgenda
+            self.agenda = RemoteAgenda(self, agenda_remote)
         if agenda_state or agenda_backend:
             if not (agenda_state and agenda_backend):
                 raise ValueError('agenda_state_and_backend_required')
@@ -1304,6 +1309,7 @@ def main():
     parser.add_argument('--homemaker-return', action='append', default=[], help='Additional exact registered consumer return URL')
     parser.add_argument('--miniapp-routes', help='Operator-selected public same-origin destination map JSON')
     parser.add_argument('--miniapp-receivers', help='Verified same-origin per-pair application routes JSON')
+    parser.add_argument('--agenda-remote', help='Private Agenda application configuration; gateway retains identity and authorization')
     parser.add_argument('--agenda-state', help='Private optional Vikunja adapter state directory')
     parser.add_argument('--agenda-backend', help='Exact loopback origin of a pinned, private Vikunja instance')
     parser.add_argument('--agenda-google-client', help='Private optional Google Calendar OAuth client; separate Calendar consent')
@@ -1327,7 +1333,7 @@ def main():
                       miniapp_routes=json.loads(protected_read(Path(args.miniapp_routes))) if args.miniapp_routes else None,
                       miniapp_receivers=json.loads(protected_read(Path(args.miniapp_receivers))) if args.miniapp_receivers else None,
                       agenda_state=args.agenda_state, agenda_backend=args.agenda_backend,
-                      agenda_google_client=args.agenda_google_client)
+                      agenda_google_client=args.agenda_google_client, agenda_remote=args.agenda_remote)
     servers = [
         ThreadingHTTPServer(("127.0.0.1", config[key]), handler(app, owner=owner))
         for key, owner in (("viewer_port", False), ("owner_port", True))

@@ -114,8 +114,6 @@ def catalog(app, home, subject, vpn, *, local_only=False):
         for entry in entries:
             url = entry.get('url')
             owner_app = url in native_web_urls
-            if entry.get('kind') != 'link' or not (owner_app or app_url(url)):
-            owner_app = owner_url is not None and url == owner_url
             published_app = application(entry)
             if entry.get('kind') != 'link' or not (published_app or owner_app or app_url(url)):
                 continue

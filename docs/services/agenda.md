@@ -208,3 +208,58 @@ Qualify HTTPS private read/write and cross-pair rejection, actual Google consent
 and event create/update, plus Android/iOS Telegram entry/reopen/return. Tests
 with fixture identities/Google responses establish contracts, not real human
 consent or phone acceptance. Browser engine failures are reported separately.
+
+
+## Operator-hosted application with shared authentication
+
+The application and Vikunja may run on the selected operator's VPS. Keep the
+existing public home routes, sign-in, current actor/pair authorization and native
+owner transport at the homes gateway; use `--agenda-remote PRIVATE_JSON` instead
+of the local `--agenda-state/--agenda-backend/--agenda-google-client` flags.
+This is an application deployment option, not a second Matrix identity service.
+The public browser UI continues to use its existing home URL and assets.
+
+Gateway selection JSON:
+
+```json
+{"origin":"http://127.0.0.1:SELECTED_TUNNEL_PORT","token_file":"/absolute/private/agenda-transport-token"}
+```
+
+Run the application on its receiving host with
+`python -m clusterctl.homes.agenda_remote --config PRIVATE_JSON`. Its configuration
+selects `port`, `state`, loopback `backend`, `token_file`, optional `google_client`
+and `homes` (registered home reference to exact HTTPS home origin). The application
+listener binds only to127.0.0.1. Use an existing managed private tunnel/proxy from
+the gateway host; ordinary HTTP is refused except for a literal loopback address.
+Remote HTTPS uses normal certificate verification and does not follow redirects.
+Do not expose the application hop or Vikunja through the public browser proxy.
+
+Generate a dedicated transport token outside source, mode0600, available only to
+the gateway operator and receiving application user. It grants access to this
+private Agenda hop, not Matrix signing, owner publication or browser login. Never
+copy existing owner credentials, browser cookies or Matrix custody to the app.
+Rotate the dedicated token on both endpoints when needed.
+
+On every human/native operation the gateway checks its existing live actor,
+owner revision and pairing, then forwards the minimal verified scope to the
+selected application. The receiving service checks its allowlisted home origin,
+private transport, bounded request and short expiry. Per-request scope is held
+in a ContextVar, not mutable process-wide identity. Calendar parent binding uses
+a digest; the original browser cookie never crosses this hop. Provider secrets,
+accounts, tasks, observations, OAuth flows and Calendar tokens stay with the app.
+
+All mutations retain their existing operation IDs and uncertain-result handling.
+The transport never retries a possibly completed request. A lost reply is
+reconciled through the same operation/current records, not a new task creation.
+Current pairing changes stop use of a former human's Calendar grant on the next
+request. Register the unchanged public home callback origins in the Google
+application; internal listener/tunnel addresses are not OAuth callbacks.
+
+The receiving deployment needs two bounded services (application and pinned
+Vikunja), private persistent state, and a retained compatible gateway selection.
+Rollback removes only `--agenda-remote`/the application publication and stops the
+new services/tunnel if selected. Retain databases and existing auth state. The
+three public homes and three native owners use one application with separate
+provider accounts; installing it on Eko's VPS does not make Eko own their identity.
+Real Google consent and physical Telegram acceptance remain separate from the
+remote HTTP and provider qualification tests.
