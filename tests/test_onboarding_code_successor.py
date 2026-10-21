@@ -95,7 +95,7 @@ def telegram_fixture(tmp_path, monkeypatch):
     return base, fingerprint, source, profile, candidate
 
 
-@pytest.mark.parametrize('retained', [False, True])
+@pytest.mark.parametrize('retained', [None, 'RETAINED_CURRENT_', 'RETAINED_SESSIONS_'])
 def test_qualified_telegram_successor_changes_only_explicit_software(tmp_path, monkeypatch, retained):
     from clusterctl import onboarding_telegram as telegram
     base, original, source, _, candidate = telegram_fixture(tmp_path, monkeypatch)
@@ -103,11 +103,11 @@ def test_qualified_telegram_successor_changes_only_explicit_software(tmp_path, m
     if retained:
         # An unrelated SDK successor can retain the already-qualified consumer.
         value = json.loads((candidate / 'artifact.json').read_bytes())
-        monkeypatch.setattr(telegram, 'RETAINED_CURRENT_BINARY', value['binary_sha256'])
-        value.update(commit=telegram.RETAINED_CURRENT_COMMIT,
-            archive_sha256=telegram.RETAINED_CURRENT_ARCHIVE, features='--no-default-features')
+        monkeypatch.setattr(telegram, retained + 'BINARY', value['binary_sha256'])
+        value.update(commit=getattr(telegram, retained + 'COMMIT'),
+            archive_sha256=getattr(telegram, retained + 'ARCHIVE'), features='--no-default-features')
         (candidate / 'artifact.json').write_text(json.dumps(value))
-        expected_commit = telegram.RETAINED_CURRENT_COMMIT
+        expected_commit = getattr(telegram, retained + 'COMMIT')
     output = tmp_path / 'telegram-successor'
     result = build(base, original, source, ('onboarding_target.py',), output, telegram=candidate)
     verify(output, result['runtime_digest'], base, original, uid=os.geteuid())
