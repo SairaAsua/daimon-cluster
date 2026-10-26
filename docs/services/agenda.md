@@ -340,3 +340,23 @@ release and unit selection, qualify the new runtime, and switch only Agenda's
 units; reverting software never restores an older live database. This runbook
 and PR264 own unresolved operator/provider/acceptance needs so another authorized
 operator can continue without contacting the author.
+
+### Receiving checkpoint — 2026-10-26
+
+On the native MEDUSA receiving host, application source70db7a0 and the verified
+official engine2.7.0 are running as bounded systemd services, with a separate
+Python3.12 environment and owner-private configuration/state. The selected VPN
+transport proxy is active; both its endpoint and the loopback application reject
+unauthenticated requests with403. Thirteen remote/Calendar checks passed against
+the official engine on this runtime. The unit generator's seven boundary checks
+and the maintained CI scope/workflow checks passed (74 checks together). Verified
+SQLite online snapshots and the receiving plan/unit hashes are retained locally.
+
+This is private backend readiness. The shared gateway Agenda selection remains
+unactivated: fresh public Agenda reads still return404. The holding gateway
+operator must review the candidate and current receiving plan, confirm the
+dedicated transport/configuration at both endpoints and select the optional
+gateway route under their actual grant. Preserve the existing homes, login,
+authority, sessions and bot/native services. Independent actor journeys, each
+human's Google consent, real event writes and physical phone acceptance remain
+pending. No real participant agenda or initial task is claimed provisioned.
