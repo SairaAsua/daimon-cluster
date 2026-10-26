@@ -357,6 +357,7 @@ HOME_FILES = {'clusterctl/homes/applications.py', 'clusterctl/homes/__init__.py'
     'clusterctl/homes/agenda_assets/agenda.css', 'tests/test_home_agenda.py',
     'tests/test_home_agenda_calendar.py', 'docs/services/agenda.md',
     'tools/agenda_owner.py', 'tools/qualify_agenda.py', 'tools/preview_agenda.py',
+    'tools/agenda_units.py', 'tests/test_agenda_units.py', 'requirements-agenda.txt',
     'tests/js/agenda-journey.cjs',
     'clusterctl/homes/launcher.py', 'clusterctl/homes/launcher/index.html',
     'clusterctl/homes/launcher/launcher.js', 'clusterctl/homes/launcher/launcher.css',
@@ -386,6 +387,7 @@ HOME_FILES = {'clusterctl/homes/applications.py', 'clusterctl/homes/__init__.py'
     'clusterd/assets/fonts/OFL.txt', 'clusterd/assets/fonts/PROVENANCE.json',
     'tests/test_home_access.py', 'tests/test_home_gateway.py', 'tests/test_home_host.py'}
 HOME_TESTS = ('tests/test_home_launcher.py', 'tests/test_home_access.py', 'tests/test_home_gateway.py', 'tests/test_home_host.py',
+              'tests/test_agenda_units.py',
               'tests/test_home_agenda_remote.py', 'tests/test_home_agenda.py', 'tests/test_home_agenda_calendar.py',
               'tests/test_home_passkeys.py', 'tests/test_home_client.py', 'tests/test_home_styles.py', 'tests/test_home_login.py', 'tests/test_home_homemaker.py',
               'tests/test_auth.py', 'tests/test_ci_scope.py', 'tests/test_ci_workflow.py')

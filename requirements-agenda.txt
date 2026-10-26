@@ -1,0 +1,4 @@
+# Private application host only; no Matrix runtime/custody dependency.
+PyYAML==6.0.3
+cryptography==50.0.0
+-r requirements-home-login.txt

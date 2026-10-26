@@ -263,3 +263,80 @@ three public homes and three native owners use one application with separate
 provider accounts; installing it on Eko's VPS does not make Eko own their identity.
 Real Google consent and physical Telegram acceptance remain separate from the
 remote HTTP and provider qualification tests.
+
+### Receiving installation and maintenance
+
+Use a complete immutable release of this repository and the checksum-verified
+engine above. Put its executable at `<release>/engine/vikunja`. Create a
+dedicated Python environment using the receiving operating system's interpreter:
+
+```sh
+/usr/bin/python3 -m venv /selected/private/agenda-venv
+/selected/private/agenda-venv/bin/python -m pip install -r requirements-agenda.txt
+```
+
+The private application does not need a Matrix SDK or native harness environment.
+`requirements-agenda.txt` includes its YAML and Google dependencies. Do not point
+a new service at a moved virtual environment or assume its original interpreter
+paths remain usable after a host relocation. Python3.12 receiving qualification
+passed the remote/Calendar suite against the pinned official engine.
+
+Prepare the application JSON and engine YAML using the configuration contract
+above. Keep configuration, transport token and optional Google client as regular
+mode0600 files. Give the application and engine separate mode0700 directories
+under one mode0700 state root, owned by the selected service user. A transferred
+mode0755 state directory is deliberately rejected at startup; do not relax that
+check to make the service start.
+
+Render the selected units for review with the maintained tool:
+
+```sh
+/selected/private/agenda-venv/bin/python tools/agenda_units.py \
+  --release /selected/immutable/release \
+  --python /selected/private/agenda-venv/bin/python \
+  --config /selected/private/application.json \
+  --engine-config /selected/private/engine.yml \
+  --user agenda-user --group agenda-user \
+  --output /selected/private/staged-units
+```
+
+This only stages files and returns their hashes; it changes no running service.
+Review the actual paths and resource limits. Optional `--slice NAME.slice`
+selects the receiving native application slice. Optional `--private-bind VPN_IP`
+adds a socket-activated private proxy to the loopback application, bound to that
+exact VPN IPv4 address. It refuses public, wildcard and loopback bind arguments.
+It never exposes the engine. The application still requires its dedicated
+transport token and verified per-request scope. No credential is rendered into
+the unit files. A private listener is transport, not actor authorization.
+
+Under the repository's existing reviewed-plan/GO rule, the receiving operator
+must retain previous units/configuration and verify SQLite online backups if
+state already exists. Run `sudo systemd-analyze verify` on the staged files
+(root may be needed to read existing private slice definitions), install only
+the selected Agenda units in `/etc/systemd/system`, reload systemd, then enable
+the engine and application. Enable the optional private socket only for the
+selected gateway transport. No native/Matrix/bot restart or global Stop is needed.
+
+Check engine `/api/v1/info` returns version `v2.7.0`; an unauthenticated POST to
+application `/agenda-operation` must return403. These health results do not
+establish a usable public agenda. On the gateway, retain its current compatible
+release and authority/session state, configure its managed private hop to the
+receiving socket, and select exactly one `--agenda-remote` configuration with
+the same dedicated token. Gateway selection requires the holding operator's
+own current grant and exact reviewed plan. Hosting the engine elsewhere does
+not confer permission to change the shared gateway.
+
+Finish with actual authenticated native/browser reads and writes to the same
+record and rejection across two participant scopes. Then each paired human can
+authorize their own Google account and verify a real linked event from the phone.
+Publish the current application through the shared launcher only after its
+receiving URL works. Keep independent participant and physical acceptance
+pending until observed, even when the author's private backend is healthy.
+
+For rollback, remove only the optional Agenda gateway selection/publication and
+stop/disable its private socket and two services. Retain engine/adapter databases,
+Google grants, authority and sessions. For a compatible update, retain the prior
+release and unit selection, qualify the new runtime, and switch only Agenda's
+units; reverting software never restores an older live database. This runbook
+and PR264 own unresolved operator/provider/acceptance needs so another authorized
+operator can continue without contacting the author.
